@@ -154,7 +154,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
                         // ---- Mise à jour du stock de lots pour cette boutique ----
                         if (!empty($ligne['lot_id'])) {
-                            // On utilise INSERT ... ON DUPLICATE KEY UPDATE pour mettre à jour le lot et la quantité
                             $stmtLotUpdate = $pdo->prepare("
                                 INSERT INTO stock_boutique (produit_id, boutique_id, lot_produit_id, quantite_lot)
                                 VALUES (?, ?, ?, ?)
@@ -163,13 +162,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                     quantite_lot = quantite_lot + VALUES(quantite_lot)
                             ");
                             $stmtLotUpdate->execute([$ligne['produit_id'], $boutiqueId, $ligne['lot_id'], $ligne['quantite_saisie']]);
-                        } else {
-                            // Si pas de lot, on peut éventuellement réinitialiser le lot à NULL et quantite_lot à 0
-                            // Mais on ne le fait que si la ligne existe déjà, sinon cela créerait une ligne avec 0
-                            // Pour éviter de créer des lignes inutiles, on ne fait rien.
-                            // Si on veut être propre, on pourrait faire un UPDATE pour remettre à NULL et 0,
-                            // mais cela supprimerait l'information de lot pour ce produit dans cette boutique.
-                            // On laisse donc les valeurs existantes.
                         }
                     }
                     $pdo->commit();
@@ -545,7 +537,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                 <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
                 <td><?= e($bon['date_livraison'] ?? '—') ?></td>
                 <td class="text-end">
-                    <button class="act-btn v viewBtn" data-bon="<?= e($bon['bon_id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
                     <form method="POST" style="display:inline-block;">
                         <input type="hidden" name="action" value="print_bon_pdf">
                         <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
@@ -598,29 +589,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     header('Content-Type: application/json');
     echo json_encode(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
     exit;
-}
-
-// ---- DÉTAIL D'UN BON (AJAX POST) ----
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'get_bon_detail') {
-    $bonId = $_POST['bon_id'] ?? '';
-    if ($bonId) {
-        $stmt = $pdo->prepare("
-            SELECT produit_id, quantite_commande, unite_affichage, 
-                   facteur_conversion, prix_achat, montant_commande
-            FROM commande
-            WHERE reference_liee = ? AND statut_id = 'Achat'
-        ");
-        $stmt->execute([$bonId]);
-        $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($lignes as &$ligne) {
-            $stmtProd = $pdo->prepare("SELECT titre_produit FROM produit WHERE code_produit = ?");
-            $stmtProd->execute([$ligne['produit_id']]);
-            $ligne['titre_produit'] = $stmtProd->fetchColumn();
-        }
-        header('Content-Type: application/json');
-        echo json_encode($lignes);
-        exit;
-    }
 }
 ?>
 <!DOCTYPE html>
@@ -1110,7 +1078,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                     <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
                                     <td><?= e($bon['date_livraison'] ?? '—') ?></td>
                                     <td class="text-end">
-                                        <button class="act-btn v viewBtn" data-bon="<?= e($bon['bon_id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
                                         <form method="POST" style="display:inline-block;">
                                             <input type="hidden" name="action" value="print_bon_pdf">
                                             <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
@@ -1268,36 +1235,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         </div>
     </div>
 
-    <!-- Modal Détail -->
-    <div class="modal fade" id="detailModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-xl modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold"><i class="bi bi-eye text-primary me-2"></i> Détail du bon</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="table-responsive">
-                        <table class="table table-sm table-bordered">
-                            <thead class="table-light">
-                                <tr>
-                                    <th>Réf.</th>
-                                    <th>Désignation</th>
-                                    <th>Lot/Unité</th>
-                                    <th>Qté (lots)</th>
-                                    <th>Qté (base)</th>
-                                    <th>Prix unit.</th>
-                                    <th>Montant</th>
-                                </tr>
-                            </thead>
-                            <tbody id="detailLignes"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
@@ -1434,40 +1371,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $('#boutiqueSelect').on('change', function() {
                 const adresse = $(this).find(':selected').data('adresse') || '';
                 $('#lieuLivraison').val(adresse);
-            });
-
-            // ---- Détail AJAX ----
-            function voirDetailBon(bonId) {
-                fetch('<?= $_SERVER['PHP_SELF'] ?>', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded'
-                        },
-                        body: 'action=get_bon_detail&bon_id=' + encodeURIComponent(bonId)
-                    })
-                    .then(r => r.json())
-                    .then(data => {
-                        let html = '';
-                        data.forEach(ligne => {
-                            html += `<tr>
-                    <td>${ligne.produit_id}</td>
-                    <td>${ligne.titre_produit || ligne.produit_id}</td>
-                    <td>${ligne.unite_affichage || 'Unité'}</td>
-                    <td>${ligne.quantite_commande / Math.max(1, parseInt(ligne.facteur_conversion || 1))}</td>
-                    <td>${ligne.quantite_commande}</td>
-                    <td>${ligne.prix_achat ? parseFloat(ligne.prix_achat).toLocaleString() : ''} F</td>
-                    <td><strong>${ligne.montant_commande ? parseFloat(ligne.montant_commande).toLocaleString() : ''} F</strong></td>
-                </tr>`;
-                        });
-                        document.getElementById('detailLignes').innerHTML = html;
-                        new bootstrap.Modal(document.getElementById('detailModal')).show();
-                    })
-                    .catch(err => alert('Erreur: ' + err));
-            }
-
-            $(document).on('click', '.viewBtn', function() {
-                const bonId = $(this).data('bon');
-                voirDetailBon(bonId);
             });
 
             // ---- Recherche et filtres AJAX ----

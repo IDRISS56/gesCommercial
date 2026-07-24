@@ -1,4 +1,5 @@
 <?php
+ob_start(); // capture tout octet parasite (BOM, espaces) émis par ce fichier ou les fichiers inclus
 // views/transaction/index.php – Gestion des transactions
 require __DIR__ . '/../../databases/database.php';
 session_start();
@@ -209,8 +210,8 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
     ob_start();
     if (empty($transactions)): ?>
         <tr>
-            <td colspan="12" class="text-center py-5 text-muted">
-                <i class="fas fa-inbox fa-2x d-block mb-2 opacity-50"></i>
+            <td colspan="11" class="text-center py-5 text-muted">
+                <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucune transaction trouvée
             </td>
         </tr>
@@ -233,9 +234,9 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-code="<?= e($tr['numero_transaction']) ?>" title="Voir"><i class="fas fa-eye"></i></button>
-                        <button class="act-btn e editBtn" data-code="<?= e($tr['numero_transaction']) ?>" title="Modifier"><i class="fas fa-pen"></i></button>
-                        <button class="act-btn d deleteBtn" data-code="<?= e($tr['numero_transaction']) ?>" data-nom="n°<?= e($tr['numero_transaction']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="fas fa-trash"></i></button>
+                        <!-- Bouton Voir supprimé -->
+                        <button class="act-btn e editBtn" data-code="<?= e($tr['numero_transaction']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
+                        <button class="act-btn d deleteBtn" data-code="<?= e($tr['numero_transaction']) ?>" data-nom="n°<?= e($tr['numero_transaction']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                     </div>
                 </td>
             </tr>
@@ -250,7 +251,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
             <nav>
                 <ul class="pagination pagination-sm mb-0">
                     <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="fas fa-chevron-left"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
                     </li>
                     <?php
                     $start = max(1, $page - 2);
@@ -271,7 +272,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                     }
                     ?>
                     <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="fas fa-chevron-right"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
                     </li>
                 </ul>
             </nav>
@@ -303,58 +304,11 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getTableContent($pdo, $search, $filtres, $page);
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
     header('Content-Type: application/json');
     echo json_encode($result);
-    exit;
-}
-
-// --- AJAX pour voir une transaction ---
-if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
-    $numero = trim($_POST['code'] ?? '');
-    if (empty($numero)) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => 'Numéro non spécifié']);
-        exit;
-    }
-
-    try {
-        $stmt = $pdo->prepare("SELECT t.*, c.nom_prenom_contact, f.titre_facture, u.nom_prenom AS valideur_nom
-                               FROM transaction t
-                               LEFT JOIN contact c ON t.contact_id = c.code_contact
-                               LEFT JOIN facture f ON t.facture_id = f.numero_facture
-                               LEFT JOIN utilisateur u ON t.valider_par = u.id
-                               WHERE t.numero_transaction = ?");
-        $stmt->execute([$numero]);
-        $tr = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($tr) {
-            header('Content-Type: application/json');
-            echo json_encode([
-                'success' => true,
-                'numero_transaction' => $tr['numero_transaction'],
-                'date_transaction' => date('d/m/Y', strtotime($tr['date_transaction'])),
-                'heure_transaction' => substr($tr['heure_transaction'], 0, 5),
-                'montant_transaction' => number_format((float)$tr['montant_transaction'], 0, ',', ' '),
-                'frais_transaction' => number_format((float)$tr['frais_transaction'], 0, ',', ' '),
-                'montant_total' => number_format((float)$tr['montant_total'], 0, ',', ' '),
-                'type_transaction' => $tr['type_transaction'],
-                'objet_transaction' => $tr['objet_transaction'] ?? '—',
-                'contact' => $tr['nom_prenom_contact'] ?? '—',
-                'facture' => $tr['titre_facture'] ?? '—',
-                'mode_reglement' => $tr['mode_reglement'],
-                'numero_reglement' => $tr['numero_reglement'] ?? '—',
-                'reference_reglement' => $tr['reference_reglement'] ?? '—',
-                'valideur' => $tr['valideur_nom'] ?? '—',
-                'etat_transaction' => $tr['etat_transaction']
-            ]);
-        } else {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'message' => 'Transaction non trouvée']);
-        }
-    } catch (PDOException $e) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
-    }
     exit;
 }
 
@@ -374,7 +328,7 @@ if ($page < 1) $page = 1;
 $initialData = getTableContent($pdo, $search, $filtres, $page);
 
 $editTransaction = null;
-if ($action === 'edit' && isset($_POST['edit_code'])) {
+if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $numero = $_POST['edit_code'];
     $stmt = $pdo->prepare("SELECT * FROM transaction WHERE numero_transaction = ?");
     $stmt->execute([$numero]);
@@ -390,8 +344,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
     <title>Gestion des transactions</title>
     <!-- Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Bootstrap Icons -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <!-- Bootstrap SelectPicker (CSS) -->
@@ -550,12 +502,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
 
         .act-btn:hover {
             transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .act-btn.e:hover {
@@ -722,7 +668,7 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
                 <p class="text-tertiary mt-1">Suivez l'ensemble des encaissements et décaissements</p>
             </div>
             <div>
-                <button class="btn btn-primary btn-sm" id="addBtn"><i class="fas fa-plus"></i> Nouvelle transaction</button>
+                <button class="btn btn-primary btn-sm" id="addBtn"><i class="bi bi-plus-circle"></i> Nouvelle transaction</button>
             </div>
         </div>
 
@@ -743,7 +689,7 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
                     <div class="col-md-2">
                         <label for="searchInput" class="form-label fw-semibold small">Recherche</label>
                         <div class="search-inline" style="min-width:100%;">
-                            <i class="fas fa-search"></i>
+                            <i class="bi bi-search"></i>
                             <input type="text" name="search" id="searchInput" placeholder="N°, objet, contact..." value="<?= e($search) ?>">
                         </div>
                     </div>
@@ -784,10 +730,10 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
                         </select>
                     </div>
                     <div class="col-md-2">
-                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="fas fa-filter"></i> Filtrer</button>
+                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
                     </div>
                     <div class="col-md-1">
-                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="fas fa-undo"></i></button>
+                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
                     </div>
                 </div>
             </form>
@@ -834,7 +780,7 @@ MODAL FORMULAIRE (ajout/modification)
         <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="fas fa-exchange-alt text-primary me-2"></i> Nouvelle transaction</h5>
+                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-arrow-left-right text-primary me-2"></i> Nouvelle transaction</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
                 </div>
                 <form method="post" id="transactionForm">
@@ -843,12 +789,12 @@ MODAL FORMULAIRE (ajout/modification)
                     <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
                     <div class="modal-body">
                         <!-- Numéro, date, heure -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-hashtag me-1"></i> Identification</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-hash me-1"></i> Identification</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-4">
                                 <label for="numero_transaction" class="form-label fw-semibold">N° transaction</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-hashtag"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-hash"></i></span>
                                     <input type="text" class="form-control" id="numero_transaction" name="numero_transaction" readonly value="<?= e($editTransaction['numero_transaction'] ?? generateTransactionId($pdo)) ?>">
                                 </div>
                                 <div class="form-text">ID généré automatiquement</div>
@@ -856,21 +802,21 @@ MODAL FORMULAIRE (ajout/modification)
                             <div class="col-md-4">
                                 <label for="date_transaction" class="form-label fw-semibold">Date <span class="text-danger">*</span></label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-calendar"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-calendar"></i></span>
                                     <input type="date" class="form-control" id="date_transaction" name="date_transaction" required value="<?= e($editTransaction['date_transaction'] ?? date('Y-m-d')) ?>">
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <label for="heure_transaction" class="form-label fw-semibold">Heure</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-clock"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-clock"></i></span>
                                     <input type="time" class="form-control" id="heure_transaction" name="heure_transaction" value="<?= e($editTransaction['heure_transaction'] ?? date('H:i')) ?>">
                                 </div>
                             </div>
                         </div>
 
                         <!-- Type et objet -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-tag me-1"></i> Détails</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Détails</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="type_transaction" class="form-label fw-semibold">Type <span class="text-danger">*</span></label>
@@ -884,33 +830,33 @@ MODAL FORMULAIRE (ajout/modification)
                             <div class="col-md-6">
                                 <label for="objet_transaction" class="form-label fw-semibold">Objet</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-pencil-alt"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-pencil"></i></span>
                                     <input type="text" class="form-control" id="objet_transaction" name="objet_transaction" placeholder="Paiement facture..." value="<?= e($editTransaction['objet_transaction'] ?? '') ?>">
                                 </div>
                             </div>
                         </div>
 
                         <!-- Montants -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-coins me-1"></i> Montants</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-coins me-1"></i> Montants</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-4">
                                 <label for="montant_transaction" class="form-label fw-semibold">Montant <span class="text-danger">*</span></label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-dollar-sign"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-currency-dollar"></i></span>
                                     <input type="number" step="0.01" class="form-control" id="montant_transaction" name="montant_transaction" placeholder="0.00" value="<?= e($editTransaction['montant_transaction'] ?? 0) ?>" required>
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <label for="frais_transaction" class="form-label fw-semibold">Frais</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-percent"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-percent"></i></span>
                                     <input type="number" step="0.01" class="form-control" id="frais_transaction" name="frais_transaction" placeholder="0.00" value="<?= e($editTransaction['frais_transaction'] ?? 0) ?>">
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <label for="montant_total" class="form-label fw-semibold">Montant total</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-calculator"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-calculator"></i></span>
                                     <input type="number" step="0.01" class="form-control" id="montant_total" name="montant_total" placeholder="0.00" readonly value="<?= e($editTransaction['montant_total'] ?? 0) ?>">
                                 </div>
                                 <div class="calcul-auto">Calculé automatiquement (Montant + Frais)</div>
@@ -918,7 +864,7 @@ MODAL FORMULAIRE (ajout/modification)
                         </div>
 
                         <!-- Associations -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-link me-1"></i> Associations</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-link me-1"></i> Associations</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="contact_id" class="form-label fw-semibold">Contact</label>
@@ -941,7 +887,7 @@ MODAL FORMULAIRE (ajout/modification)
                         </div>
 
                         <!-- Règlement -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-credit-card me-1"></i> Règlement</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-credit-card me-1"></i> Règlement</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-4">
                                 <label for="mode_reglement" class="form-label fw-semibold">Mode de règlement <span class="text-danger">*</span></label>
@@ -955,21 +901,21 @@ MODAL FORMULAIRE (ajout/modification)
                             <div class="col-md-4">
                                 <label for="numero_reglement" class="form-label fw-semibold">Numéro de règlement</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-hashtag"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-hash"></i></span>
                                     <input type="text" class="form-control" id="numero_reglement" name="numero_reglement" placeholder="N° chèque..." value="<?= e($editTransaction['numero_reglement'] ?? '') ?>">
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <label for="reference_reglement" class="form-label fw-semibold">Référence</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-qrcode"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-qr-code"></i></span>
                                     <input type="text" class="form-control" id="reference_reglement" name="reference_reglement" placeholder="Réf. externe" value="<?= e($editTransaction['reference_reglement'] ?? '') ?>">
                                 </div>
                             </div>
                         </div>
 
                         <!-- Validateur et état -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-user-check me-1"></i> Validation</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-person-check me-1"></i> Validation</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="valider_par" class="form-label fw-semibold">Validé par</label>
@@ -991,30 +937,10 @@ MODAL FORMULAIRE (ajout/modification)
                         </div>
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="fas fa-times"></i> Annuler</button>
-                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="fas fa-save"></i> Enregistrer</button>
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
+                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="bi bi-save"></i> Enregistrer</button>
                     </div>
                 </form>
-            </div>
-        </div>
-    </div>
-
-    <!-- =========================================================
-MODAL : VUE DÉTAIL
-========================================================= -->
-    <div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="fas fa-eye text-primary me-2"></i> Détails de la transaction</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3" id="viewGrid"></div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                </div>
             </div>
         </div>
     </div>
@@ -1084,7 +1010,7 @@ SCRIPTS
                 e.preventDefault();
                 $('#formAction').val('add');
                 $('#oldNumero').val('');
-                $('#modalTitle').html('<i class="fas fa-exchange-alt text-primary me-2"></i> Nouvelle transaction');
+                $('#modalTitle').html('<i class="bi bi-arrow-left-right text-primary me-2"></i> Nouvelle transaction');
 
                 // Réinitialiser les champs
                 $('#transactionForm')[0].reset();
@@ -1114,59 +1040,9 @@ SCRIPTS
             $(document).on('click', '.editBtn', function(e) {
                 e.preventDefault();
                 const code = $(this).data('code');
-                $('#actionField').val('edit');
+                $('#actionField').val('load_edit');
                 $('#editCodeField').val(code);
                 $('#actionForm').submit();
-            });
-
-            // --- Vue ---
-            $(document).on('click', '.viewBtn', function(e) {
-                e.preventDefault();
-                const code = $(this).data('code');
-                $('#viewModal').modal('hide');
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        ajax_view: '1',
-                        code: code
-                    },
-                    dataType: 'json',
-                    success: function(response) {
-                        if (response.success) {
-                            $('#viewModalLabel').text('Transaction ' + response.numero_transaction);
-                            const fields = [
-                                ['N° transaction', response.numero_transaction],
-                                ['Date', response.date_transaction],
-                                ['Heure', response.heure_transaction],
-                                ['Type', response.type_transaction],
-                                ['Objet', response.objet_transaction],
-                                ['Montant', response.montant_transaction + ' FCFA'],
-                                ['Frais', response.frais_transaction + ' FCFA'],
-                                ['Montant total', response.montant_total + ' FCFA'],
-                                ['Mode de règlement', response.mode_reglement],
-                                ['N° règlement', response.numero_reglement],
-                                ['Référence', response.reference_reglement],
-                                ['Contact', response.contact],
-                                ['Facture', response.facture],
-                                ['Validé par', response.valideur],
-                                ['État', response.etat_transaction]
-                            ];
-                            let html = '';
-                            fields.forEach(([label, value]) => {
-                                let val = value || '—';
-                                html += '<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">' + label + '</div><div class="fw-semibold">' + val + '</div></div></div>';
-                            });
-                            $('#viewGrid').html(html);
-                            $('#viewModal').modal('show');
-                        } else {
-                            alert('Erreur : ' + (response.message || 'Transaction non trouvée'));
-                        }
-                    },
-                    error: function() {
-                        alert('Erreur lors de la récupération des données.');
-                    }
-                });
             });
 
             // --- Fonction de recherche AJAX ---
@@ -1253,11 +1129,11 @@ SCRIPTS
             }, 5000);
 
             // --- Si édition via POST ---
-            <?php if (isset($editTransaction) && $action === 'edit'): ?>
+            <?php if (isset($editTransaction) && $action === 'load_edit'): ?>
                 $(function() {
                     $('#formAction').val('edit');
                     $('#oldNumero').val('<?= e($editTransaction['numero_transaction']) ?>');
-                    $('#modalTitle').html('<i class="fas fa-exchange-alt text-primary me-2"></i> Modifier la transaction');
+                    $('#modalTitle').html('<i class="bi bi-arrow-left-right text-primary me-2"></i> Modifier la transaction');
                     $('#numero_transaction').prop('readonly', true);
                     $('.selectpicker').selectpicker('refresh');
                     var modalEl = document.getElementById('transactionModal');

@@ -1,6 +1,19 @@
 <?php
+ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
+
+// Fonction utilitaire pour envoyer une réponse JSON propre
+function sendJson($data)
+{
+    // Supprimer tous les buffers de sortie actifs
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+
 // views/lot_produit/index.php – Gestion des lots de produits (design dashboard)
-// Assurez-vous que le chemin vers database.php est correct
 require __DIR__ . '/../../databases/database.php';
 session_start();
 
@@ -48,14 +61,18 @@ $produits = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $message = '';
 $messageType = '';
 $action = $_POST['action'] ?? '';
-$csrf_token = $_POST['csrf_token'] ?? '';
+$csrf_token_post = $_POST['csrf_token'] ?? '';
+
+// Génération du token CSRF (doit être fait avant toute vérification)
+$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+$csrf_token = $_SESSION['csrf_token'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (empty($csrf_token) || $csrf_token !== ($_SESSION['csrf_token'] ?? '')) {
+    if (empty($csrf_token_post) || $csrf_token_post !== $csrf_token) {
         $message = 'Token de sécurité invalide.';
         $messageType = 'danger';
     } else {
-        // Ajout ou modification
+        // Ajout ou modification (soumission du formulaire principal)
         if ($action === 'add' || $action === 'edit') {
             $code = trim($_POST['code_lot_produit'] ?? '');
             $produit_id = trim($_POST['produit_id'] ?? '');
@@ -143,10 +160,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Générer un token CSRF
-$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-$csrf_token = $_SESSION['csrf_token'];
-
 // --- Fonction pour récupérer le contenu du tableau (AJAX et initial) ---
 function getTableContent($pdo, $search, $etat_filter, $page, $perPage = 20) {
     $sql = "SELECT lp.code_lot_produit, lp.produit_id, lp.titre_lot, lp.unites_par_lot, lp.etat_lot, p.titre_produit
@@ -208,7 +221,6 @@ function getTableContent($pdo, $search, $etat_filter, $page, $perPage = 20) {
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-code="<?= e($l['code_lot_produit']) ?>" title="Voir"><i class="bi bi-eye"></i></button>
                         <button class="act-btn e editBtn" data-code="<?= e($l['code_lot_produit']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
                         <button class="act-btn d deleteBtn" data-code="<?= e($l['code_lot_produit']) ?>" data-nom="<?= e($l['titre_lot']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash3"></i></button>
                     </div>
@@ -264,49 +276,14 @@ function getTableContent($pdo, $search, $etat_filter, $page, $perPage = 20) {
     ];
 }
 
-// --- Gestion des requêtes AJAX ---
+// --- Gestion des requêtes AJAX (recherche, filtrage, pagination) ---
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $search = trim($_POST['search'] ?? '');
     $etat_filter = trim($_POST['etat_filter'] ?? '');
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getTableContent($pdo, $search, $etat_filter, $page);
-    header('Content-Type: application/json');
-    echo json_encode($result);
-    exit;
-}
-
-// AJAX pour afficher les détails d'un lot (vue)
-if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
-    $code = trim($_POST['code'] ?? '');
-    if (empty($code)) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => 'Code non spécifié']);
-        exit;
-    }
-    try {
-        $stmt = $pdo->prepare("SELECT lp.*, p.titre_produit FROM lot_produit lp LEFT JOIN produit p ON lp.produit_id = p.code_produit WHERE lp.code_lot_produit = ?");
-        $stmt->execute([$code]);
-        $l = $stmt->fetch(PDO::FETCH_ASSOC);
-        if ($l) {
-            header('Content-Type: application/json');
-            echo json_encode([
-                'success' => true,
-                'code_lot_produit' => $l['code_lot_produit'],
-                'produit_nom' => $l['titre_produit'] ?? '—',
-                'titre_lot' => $l['titre_lot'],
-                'unites_par_lot' => $l['unites_par_lot'],
-                'etat_lot' => $l['etat_lot']
-            ]);
-        } else {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'message' => 'Lot non trouvé']);
-        }
-    } catch (PDOException $e) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
-    }
-    exit;
+    sendJson($result);
 }
 
 // --- Affichage initial (chargement de la page) ---
@@ -326,9 +303,9 @@ foreach ($defaultKeys as $key) {
     }
 }
 
-// Récupération du lot à modifier si on vient de l'action 'edit'
+// Récupération du lot à modifier si on vient de l'action 'load_edit'
 $editLot = null;
-if ($action === 'edit' && isset($_POST['edit_code'])) {
+if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $code = $_POST['edit_code'];
     $stmt = $pdo->prepare("SELECT * FROM lot_produit WHERE code_lot_produit = ?");
     $stmt->execute([$code]);
@@ -604,7 +581,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
             transition: all .2s;
         }
         .act-btn:hover { transform: scale(1.1); }
-        .act-btn.v:hover { color: var(--b); background: var(--bl); border-color: rgba(37,99,235,.15); }
         .act-btn.e:hover { color: var(--wrn); background: var(--wrnl); border-color: rgba(245,158,11,.15); }
         .act-btn.d:hover { color: var(--dng); background: var(--dngl); border-color: rgba(239,68,68,.15); }
 
@@ -804,24 +780,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
     </div>
 </div>
 
-<!-- ===== MODAL VUE ===== -->
-<div class="modal fade" id="viewModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="bi bi-eye text-primary me-2"></i> Détails du lot</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div class="row g-3" id="viewGrid"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Fermer</button>
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- ===== MODAL SUPPRESSION ===== -->
 <div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
@@ -878,49 +836,12 @@ $(document).ready(function() {
         new bootstrap.Modal(document.getElementById('lotModal')).show();
     });
 
-    // --- Édition ---
+    // --- Édition (chargement via formulaire POST) ---
     $(document).on('click', '.editBtn', function(e) {
         e.preventDefault();
-        $('#actionField').val('edit');
+        $('#actionField').val('load_edit');  // action modifiée
         $('#editCodeField').val($(this).data('code'));
         $('#actionForm').submit();
-    });
-
-    // --- Vue ---
-    $(document).on('click', '.viewBtn', function(e) {
-        e.preventDefault();
-        const code = $(this).data('code');
-        $.ajax({
-            url: window.location.href,
-            method: 'POST',
-            data: { ajax_view: '1', code: code },
-            dataType: 'json',
-            success: function(res) {
-                if (res.success) {
-                    $('#viewModalLabel').text('Lot ' + res.titre_lot);
-                    const fields = [
-                        ['Code', res.code_lot_produit],
-                        ['Produit', res.produit_nom],
-                        ['Titre du lot', res.titre_lot],
-                        ['Unités par lot', res.unites_par_lot],
-                        ['État', res.etat_lot]
-                    ];
-                    let html = '';
-                    fields.forEach(function(field) {
-                        const label = field[0];
-                        const value = field[1] || '—';
-                        html += '<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">' + label + '</div><div class="fw-semibold">' + value + '</div></div></div>';
-                    });
-                    $('#viewGrid').html(html);
-                    new bootstrap.Modal(document.getElementById('viewModal')).show();
-                } else {
-                    alert('Erreur : ' + (res.message || 'Lot non trouvé'));
-                }
-            },
-            error: function() {
-                alert('Erreur réseau.');
-            }
-        });
     });
 
     // --- Fonction de recherche AJAX ---
@@ -943,8 +864,10 @@ $(document).ready(function() {
                 });
                 $('.selectpicker').selectpicker('refresh');
             },
-            error: function() {
-                alert('Erreur lors de la recherche.');
+            error: function(xhr, status, error) {
+                console.error('Statut :', status);
+                console.error('Réponse brute :', xhr.responseText);
+                alert('Erreur lors de la recherche (code ' + xhr.status + '). Voir console pour détails.');
             }
         });
     }
@@ -1002,8 +925,8 @@ $(document).ready(function() {
         $('.alert').alert('close');
     }, 5000);
 
-    // --- Si édition via POST ---
-    <?php if (isset($editLot) && $action === 'edit'): ?>
+    // --- Si édition via POST (chargement des données) ---
+    <?php if (isset($editLot) && $action === 'load_edit'): ?>
         $(function() {
             $('#formAction').val('edit');
             $('#oldCode').val('<?= e($editLot['code_lot_produit']) ?>');

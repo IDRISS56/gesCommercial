@@ -32,6 +32,45 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
+// ---- FONCTION POUR RÉCUPÉRER LE PRIX UNITAIRE DEPUIS LA TABLE prix ----
+function getPrixUnitaire($pdo, $produitId, $boutiqueId, $lotId, $quantiteBase) {
+    $sql = "SELECT prix_unitaire 
+            FROM prix 
+            WHERE produit_id = ? 
+              AND etat_prix = 'Actif'
+              AND quantite_min <= ?
+              AND (quantite_max IS NULL OR quantite_max >= ?)
+              AND (boutique_id = ? OR (boutique_id IS NULL AND ? IS NOT NULL))
+              AND (lot_id = ? OR (lot_id IS NULL AND ? IS NOT NULL))
+            ORDER BY 
+              CASE WHEN boutique_id IS NOT NULL THEN 1 ELSE 2 END,
+              CASE WHEN lot_id IS NOT NULL THEN 1 ELSE 2 END,
+              quantite_min DESC
+            LIMIT 1";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([$produitId, $quantiteBase, $quantiteBase, $boutiqueId, $boutiqueId, $lotId, $lotId]);
+    $prix = $stmt->fetchColumn();
+    if ($prix === false) {
+        $sqlGlobal = "SELECT prix_unitaire 
+                      FROM prix 
+                      WHERE produit_id = ? 
+                        AND etat_prix = 'Actif'
+                        AND quantite_min <= ?
+                        AND (quantite_max IS NULL OR quantite_max >= ?)
+                        AND boutique_id IS NULL
+                        AND lot_id IS NULL
+                      ORDER BY quantite_min DESC
+                      LIMIT 1";
+        $stmt = $pdo->prepare($sqlGlobal);
+        $stmt->execute([$produitId, $quantiteBase, $quantiteBase]);
+        $prix = $stmt->fetchColumn();
+        if ($prix === false) {
+            throw new Exception("Aucun prix trouvé pour ce produit, cette boutique et ce lot avec la quantité demandée.");
+        }
+    }
+    return (float)$prix;
+}
+
 // ---- LISTES ----
 $clients = $pdo->query("SELECT code_contact, nom_prenom_contact, telephone_contact, email_contact, adresse_contact FROM contact WHERE type_contact = 'Client' AND etat_contact = 'Actif' ORDER BY nom_prenom_contact")->fetchAll(PDO::FETCH_ASSOC);
 $boutiques = $pdo->query("SELECT code_boutique, nom_boutique, adresse_boutique, telephone_boutique, email_boutique, ville_boutique, pays_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
@@ -45,7 +84,7 @@ while ($lot = $stmtLots->fetch(PDO::FETCH_ASSOC)) {
     $lotsParProduit[$lot['produit_id']][] = $lot;
 }
 
-// ---- PRIX DE VENTE (prix_produit) ----
+// ---- PRIX DE VENTE (on ne l'utilise plus, on le garde pour compatibilité) ----
 $prixVente = [];
 foreach ($produits as $p) {
     $prixVente[$p['code_produit']] = $p['prix_produit'] ?? 0;
@@ -70,7 +109,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $produitsPost = $_POST['produit_id'] ?? [];
         $lots = $_POST['lot_id'] ?? [];
         $quantites = $_POST['quantite'] ?? [];
-        $prixUnitaires = $_POST['prix_unitaire'] ?? [];
         $totalBon = 0;
 
         if (empty($clientId) || empty($boutiqueId) || empty($produitsPost)) {
@@ -81,11 +119,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $lignesValides = [];
             foreach ($produitsPost as $index => $produitId) {
                 if (empty($produitId)) continue;
-                $quantite = intval($quantites[$index] ?? 0);
-                $prix = floatval($prixUnitaires[$index] ?? 0);
-                if ($quantite <= 0 || $prix < 0) {
+                $quantiteSaisie = intval($quantites[$index] ?? 0);
+                if ($quantiteSaisie <= 0) {
                     $errors = true;
-                    $message = "Vérifiez les quantités et prix unitaires (positifs).";
+                    $message = "La quantité doit être positive.";
                     $messageType = 'error';
                     break;
                 }
@@ -101,13 +138,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         $unite = $lotData['titre_lot'];
                     }
                 }
-                $quantiteBase = $quantite * $facteur;
+                $quantiteBase = $quantiteSaisie * $facteur;
+
+                try {
+                    $prix = getPrixUnitaire($pdo, $produitId, $boutiqueId, $lotId, $quantiteBase);
+                } catch (Exception $e) {
+                    $errors = true;
+                    $message = "Erreur pour le produit $produitId : " . $e->getMessage();
+                    $messageType = 'error';
+                    break;
+                }
+
                 $totalLigne = $quantiteBase * $prix;
                 $totalBon += $totalLigne;
                 $lignesValides[] = [
                     'produit_id' => $produitId,
                     'lot_id' => $lotId,
-                    'quantite_saisie' => $quantite,
+                    'quantite_saisie' => $quantiteSaisie,
                     'facteur' => $facteur,
                     'quantite_base' => $quantiteBase,
                     'prix_unitaire' => $prix,
@@ -212,6 +259,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             }
         }
     }
+}
+
+// ---- ENDPOINT AJAX POUR OBTENIR LE PRIX UNITAIRE ----
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'get_prix_unitaire') {
+    while (ob_get_level()) ob_end_clean();
+
+    $produitId = $_POST['produit_id'] ?? '';
+    $boutiqueId = $_POST['boutique_id'] ?? '';
+    $lotId = $_POST['lot_id'] ?? null;
+    $quantiteSaisie = intval($_POST['quantite'] ?? 0);
+    $facteur = 1;
+    if (!empty($lotId)) {
+        $stmtLot = $pdo->prepare("SELECT unites_par_lot FROM lot_produit WHERE code_lot_produit = ? AND produit_id = ?");
+        $stmtLot->execute([$lotId, $produitId]);
+        $facteur = intval($stmtLot->fetchColumn() ?: 1);
+    }
+    $quantiteBase = $quantiteSaisie * $facteur;
+    try {
+        $prix = getPrixUnitaire($pdo, $produitId, $boutiqueId, $lotId, $quantiteBase);
+        header('Content-Type: application/json');
+        echo json_encode(['success' => true, 'prix' => $prix]);
+    } catch (Exception $e) {
+        header('Content-Type: application/json');
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
 }
 
 // ---- IMPRESSION PDF (BON DE LIVRAISON) ----
@@ -516,7 +589,7 @@ if ($page < 1) $page = 1;
 
 $bonsData = getBonsVente($pdo, $search, $client_filter, $boutique_filter, $page, 10);
 
-// ---- AJAX ----
+// ---- AJAX pour le tableau ----
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $search = trim($_POST['search'] ?? '');
     $client_filter = trim($_POST['client_filter'] ?? '');
@@ -526,7 +599,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     ob_start();
     if (empty($data['bons'])): ?>
         <tr>
-            <td colspan="9" class="text-center py-5 text-muted">
+            <td colspan="8" class="text-center py-5 text-muted">
                 <i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>
                 Aucun bon trouvé
             </td>
@@ -541,7 +614,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
             <td><?= e($bon['facture_id'] ?? '—') ?></td>
             <td class="text-end">
-                <button class="act-btn v viewBtn" data-bon="<?= e($bon['bon_id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
                 <form method="POST" style="display:inline-block;">
                     <input type="hidden" name="action" value="print_bon_pdf">
                     <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
@@ -593,29 +665,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     header('Content-Type: application/json');
     echo json_encode(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
     exit;
-}
-
-// ---- DÉTAIL D'UN BON (AJAX POST) ----
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'get_bon_detail') {
-    $bonId = $_POST['bon_id'] ?? '';
-    if ($bonId) {
-        $stmt = $pdo->prepare("
-            SELECT produit_id, quantite_commande, unite_affichage, 
-                   facteur_conversion, prix_commande, montant_commande
-            FROM commande
-            WHERE reference_liee = ? AND statut_id = '012'
-        ");
-        $stmt->execute([$bonId]);
-        $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($lignes as &$ligne) {
-            $stmtProd = $pdo->prepare("SELECT titre_produit FROM produit WHERE code_produit = ?");
-            $stmtProd->execute([$ligne['produit_id']]);
-            $ligne['titre_produit'] = $stmtProd->fetchColumn();
-        }
-        header('Content-Type: application/json');
-        echo json_encode($lignes);
-        exit;
-    }
 }
 ?>
 <!DOCTYPE html>
@@ -974,7 +1023,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
                             <td><?= e($bon['facture_id'] ?? '—') ?></td>
                             <td class="text-end">
-                                <button class="act-btn v viewBtn" data-bon="<?= e($bon['bon_id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
                                 <form method="POST" style="display:inline-block;">
                                     <input type="hidden" name="action" value="print_bon_pdf">
                                     <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
@@ -1095,7 +1143,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                     <select name="produit_id[]" class="form-select select-produit" required>
                                         <option value="">-- Choisir --</option>
                                         <?php foreach ($produits as $p): ?>
-                                            <option value="<?= e($p['code_produit']) ?>" data-prix="<?= $p['prix_produit'] ?>"><?= e($p['titre_produit']) ?></option>
+                                            <option value="<?= e($p['code_produit']) ?>"><?= e($p['titre_produit']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
@@ -1111,11 +1159,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                 </div>
                                 <div class="col-md-1">
                                     <label class="form-label fw-semibold">Qté (lots)</label>
-                                    <input type="number" name="quantite[]" class="form-control quantite" min="1" value="1" required oninput="calculerLigne(this)">
+                                    <input type="number" name="quantite[]" class="form-control quantite" min="1" value="1" required oninput="mettreAJourPrix(this)">
                                 </div>
                                 <div class="col-md-2">
                                     <label class="form-label fw-semibold">Prix unitaire (base) <span class="text-danger">*</span></label>
-                                    <input type="number" step="0.01" name="prix_unitaire[]" class="form-control prix-unitaire" min="0" required oninput="calculerLigne(this)">
+                                    <input type="number" step="0.01" name="prix_unitaire[]" class="form-control prix-unitaire" readonly value="0">
                                 </div>
                                 <div class="col-md-2">
                                     <label class="form-label fw-semibold">Total ligne</label>
@@ -1134,39 +1182,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     <button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Valider le bon</button>
                 </div>
             </form>
-        </div>
-    </div>
-</div>
-
-<!-- ===== MODAL DÉTAIL ===== -->
-<div class="modal fade" id="detailModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-xl modal-dialog-centered">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title fw-bold"><i class="bi bi-eye text-primary me-2"></i> Détail du bon</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div class="table-responsive">
-                    <table class="table table-sm table-bordered">
-                        <thead class="table-light">
-                            <tr>
-                                <th>Réf.</th>
-                                <th>Désignation</th>
-                                <th>Lot/Unité</th>
-                                <th>Qté (lots)</th>
-                                <th>Qté (base)</th>
-                                <th>Prix unit.</th>
-                                <th>Montant</th>
-                            </tr>
-                        </thead>
-                        <tbody id="detailLignes"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Fermer</button>
-            </div>
         </div>
     </div>
 </div>
@@ -1191,14 +1206,12 @@ $(document).ready(function() {
 
     // ---- Données injectées ----
     const lotsParProduit = <?= json_encode($lotsParProduit) ?>;
-    const prixVente = <?= json_encode($prixVente) ?>;
 
-    // ---- Mise à jour des lots, prix unitaire, unité affichée ----
-    function mettreAJourLotsEtPrix(selectProduit) {
+    // ---- Mise à jour des lots et unité affichée ----
+    function mettreAJourLots(selectProduit) {
         const ligne = selectProduit.closest('.ligne-produit');
         const lotSelect = ligne.querySelector('.select-lot');
         const uniteAff = ligne.querySelector('.unite-affichage');
-        const prixInput = ligne.querySelector('.prix-unitaire');
         const produitId = selectProduit.value;
 
         const lots = lotsParProduit[produitId] || [];
@@ -1208,19 +1221,55 @@ $(document).ready(function() {
         });
         lotSelect.innerHTML = options;
 
-        if (produitId && prixVente[produitId] !== undefined) {
-            prixInput.value = prixVente[produitId];
-        } else {
-            prixInput.value = '';
-        }
-
         const selectedLot = lotSelect.options[lotSelect.selectedIndex];
         uniteAff.value = selectedLot ? (selectedLot.text || 'Unité') : 'Unité';
-        calculerLigne(prixInput);
+        // Mettre à jour le prix après changement de lot
+        mettreAJourPrix(ligne.querySelector('.quantite'));
     }
 
-    function calculerLigne(element) {
-        const ligne = element.closest('.ligne-produit');
+    // ---- Fonction pour interroger le serveur et récupérer le prix unitaire ----
+    function mettreAJourPrix(quantiteInput) {
+        const ligne = quantiteInput.closest('.ligne-produit');
+        const produitId = ligne.querySelector('.select-produit').value;
+        const boutiqueId = document.getElementById('boutiqueSelect').value;
+        const lotId = ligne.querySelector('.select-lot').value;
+        const quantite = parseFloat(quantiteInput.value) || 0;
+
+        if (!produitId || !boutiqueId || quantite <= 0) {
+            ligne.querySelector('.prix-unitaire').value = '0';
+            calculerTotal(ligne);
+            return;
+        }
+
+        $.ajax({
+            url: window.location.href,
+            method: 'POST',
+            data: {
+                action: 'get_prix_unitaire',
+                produit_id: produitId,
+                boutique_id: boutiqueId,
+                lot_id: lotId,
+                quantite: quantite
+            },
+            dataType: 'json',
+            success: function(response) {
+                if (response.success) {
+                    ligne.querySelector('.prix-unitaire').value = response.prix;
+                } else {
+                    ligne.querySelector('.prix-unitaire').value = '0';
+                    alert('Erreur : ' + response.message);
+                }
+                calculerTotal(ligne);
+            },
+            error: function() {
+                ligne.querySelector('.prix-unitaire').value = '0';
+                alert('Erreur réseau lors de la récupération du prix.');
+            }
+        });
+    }
+
+    // ---- Calcul du total ligne ----
+    function calculerTotal(ligne) {
         const quantite = parseFloat(ligne.querySelector('.quantite').value) || 0;
         const prix = parseFloat(ligne.querySelector('.prix-unitaire').value) || 0;
         const lotSelect = ligne.querySelector('.select-lot');
@@ -1234,8 +1283,9 @@ $(document).ready(function() {
         ligne.querySelector('.total-ligne').value = total.toFixed(0);
     }
 
+    // ---- Événements ----
     $(document).on('change', '.select-produit', function() {
-        mettreAJourLotsEtPrix(this);
+        mettreAJourLots(this);
     });
 
     $(document).on('change', '.select-lot', function() {
@@ -1243,12 +1293,11 @@ $(document).ready(function() {
         const uniteAff = ligne.querySelector('.unite-affichage');
         const selected = this.options[this.selectedIndex];
         uniteAff.value = selected ? (selected.text || 'Unité') : 'Unité';
-        const prixInput = ligne.querySelector('.prix-unitaire');
-        calculerLigne(prixInput);
+        mettreAJourPrix(ligne.querySelector('.quantite'));
     });
 
-    $(document).on('input', '.quantite, .prix-unitaire', function() {
-        calculerLigne(this);
+    $(document).on('input', '.quantite', function() {
+        mettreAJourPrix(this);
     });
 
     // ---- Ajouter / Supprimer lignes ----
@@ -1260,7 +1309,7 @@ $(document).ready(function() {
         clone.querySelector('.select-lot').innerHTML = '<option value="">Unité</option>';
         clone.querySelector('.unite-affichage').value = '';
         clone.querySelector('.quantite').value = 1;
-        clone.querySelector('.prix-unitaire').value = '';
+        clone.querySelector('.prix-unitaire').value = '0';
         clone.querySelector('.total-ligne').value = '0';
         clone.querySelector('.supprimer-ligne').style.display = 'inline-block';
         container.appendChild(clone);
@@ -1277,6 +1326,13 @@ $(document).ready(function() {
     }
     window.supprimerLigne = supprimerLigne;
 
+    // ---- Initialisation de la première ligne ----
+    $('.select-produit').each(function() {
+        if ($(this).val()) {
+            mettreAJourLots(this);
+        }
+    });
+
     // ---- Modal Nouveau bon ----
     const bonModal = new bootstrap.Modal(document.getElementById('bonModal'));
     $('#addBtn').on('click', function() {
@@ -1288,7 +1344,7 @@ $(document).ready(function() {
         first.find('.select-lot').html('<option value="">Unité</option>');
         first.find('.unite-affichage').val('');
         first.find('.quantite').val(1);
-        first.find('.prix-unitaire').val('');
+        first.find('.prix-unitaire').val('0');
         first.find('.total-ligne').val('0');
         first.find('.supprimer-ligne').hide();
         bonModal.show();
@@ -1297,38 +1353,10 @@ $(document).ready(function() {
     $('#boutiqueSelect').on('change', function() {
         const adresse = $(this).find(':selected').data('adresse') || '';
         $('#lieuLivraison').val(adresse);
-    });
-
-    // ---- Détail AJAX ----
-    function voirDetailBon(bonId) {
-        fetch(window.location.href, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'action=get_bon_detail&bon_id=' + encodeURIComponent(bonId)
-        })
-        .then(r => r.json())
-        .then(data => {
-            let html = '';
-            data.forEach(ligne => {
-                html += `<tr>
-                    <td>${ligne.produit_id}</td>
-                    <td>${ligne.titre_produit || ligne.produit_id}</td>
-                    <td>${ligne.unite_affichage || 'Unité'}</td>
-                    <td>${ligne.quantite_commande / Math.max(1, parseInt(ligne.facteur_conversion || 1))}</td>
-                    <td>${ligne.quantite_commande}</td>
-                    <td>${ligne.prix_commande ? parseFloat(ligne.prix_commande).toLocaleString() : ''} F</td>
-                    <td><strong>${ligne.montant_commande ? parseFloat(ligne.montant_commande).toLocaleString() : ''} F</strong></td>
-                </tr>`;
-            });
-            document.getElementById('detailLignes').innerHTML = html;
-            new bootstrap.Modal(document.getElementById('detailModal')).show();
-        })
-        .catch(err => alert('Erreur: ' + err));
-    }
-
-    $(document).on('click', '.viewBtn', function() {
-        const bonId = $(this).data('bon');
-        voirDetailBon(bonId);
+        document.querySelectorAll('.ligne-produit').forEach(function(ligne) {
+            const qteInput = ligne.querySelector('.quantite');
+            if (qteInput) mettreAJourPrix(qteInput);
+        });
     });
 
     // ---- Recherche AJAX ----

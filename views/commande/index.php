@@ -23,26 +23,7 @@ if (!$user) {
     exit;
 }
 
-// ---- VÉRIFICATION ET AJOUT DES COLONNES MANQUANTES DANS `commande` ----
-try {
-    $cols = $pdo->query("SHOW COLUMNS FROM commande")->fetchAll(PDO::FETCH_COLUMN);
-    if (!in_array('reference_liee', $cols)) {
-        $pdo->exec("ALTER TABLE commande ADD COLUMN reference_liee VARCHAR(100) DEFAULT NULL");
-    }
-    if (!in_array('montant_rembourse', $cols)) {
-        $pdo->exec("ALTER TABLE commande ADD COLUMN montant_rembourse DECIMAL(12,2) DEFAULT 0");
-    }
-    if (!in_array('motif_retour', $cols)) {
-        $pdo->exec("ALTER TABLE commande ADD COLUMN motif_retour TEXT DEFAULT NULL");
-    }
-    if (!in_array('type_retour', $cols)) {
-        $pdo->exec("ALTER TABLE commande ADD COLUMN type_retour VARCHAR(50) DEFAULT NULL");
-    }
-} catch (PDOException $e) {
-    // Ignorer
-}
-
-// ---- AJOUT DES NOUVEAUX STATUTS (s'ils n'existent pas) ----
+// ---- VÉRIFICATION DES STATUTS (s'ils n'existent pas) ----
 try {
     $pdo->exec("INSERT IGNORE INTO statut (code_statut, titre_statut, type_statut, symbole_statut, etat_statut)
                 VALUES 
@@ -134,42 +115,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 try {
                     $pdo->beginTransaction();
 
-                    // Verrou + calcul stock_avant/apres, uniquement si le retour est remis en stock
-                    $stockAvant = null;
-                    $stockApres = null;
-                    $stockAvantLot = null;
-                    $stockApresLot = null;
-                    if ($remiseEnStock) {
-                        // On va chercher la ligne de stock boutique (avec verrou)
-                        $stmtLock = $pdo->prepare("SELECT quantite, quantite_lot FROM stock_boutique WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
-                        $stmtLock->execute([$produitId, $boutiqueId]);
-                        $row = $stmtLock->fetch(PDO::FETCH_ASSOC);
-                        if (!$row) {
-                            // Si pas de ligne, on crée une ligne avec 0
-                            $pdo->prepare("INSERT INTO stock_boutique (produit_id, boutique_id, quantite, quantite_lot) VALUES (?, ?, 0, 0)")
-                                ->execute([$produitId, $boutiqueId]);
-                            $stockAvant = 0;
-                            $stockAvantLot = 0;
-                        } else {
-                            $stockAvant = (int)$row['quantite'];
-                            $stockAvantLot = (int)$row['quantite_lot'];
-                        }
-                        $stockApres = $stockAvant + $quantiteBase;
-                        $stockApresLot = $stockAvantLot + ($lotId ? $quantiteSaisie : 0);
-                    }
-
-                    // Insertion de la commande de retour
+                    // Génération du numéro de commande retour
                     $codeRetour = 'RET-' . date('YmdHis') . rand(100, 999);
+
+                    // Insertion de la commande de retour (sans colonnes inexistantes)
                     $stmt = $pdo->prepare("INSERT INTO commande 
-                        (numero_commande, produit_id, contact_id, statut_id, date_commande, heure_commande,
+                        (numero_commande, produit_id, contact_id, facture_id, statut_id, date_commande, heure_commande,
                          prix_achat, prix_commande, quantite_commande, montant_commande, utilisateur_id,
                          boutique_id, etat_commande, lot_produit_id, unite_affichage, facteur_conversion,
-                         montant_rembourse, motif_retour, type_retour, stock_avant, stock_apres, sens_mouvement)
-                        VALUES (?, ?, ?, '010', ?, CURTIME(), 0, 0, ?, ?, ?, ?, 'Valider', ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                         date_livraison_recue, reference_liee, montant_rembourse, motif_retour, type_retour)
+                        VALUES (?, ?, ?, ?, '010', ?, CURTIME(), 0, 0, ?, ?, ?, ?, 'Valider', ?, ?, ?, ?, ?, ?, ?, ?)");
                     $stmt->execute([
                         $codeRetour,
                         $produitId,
                         $clientId,
+                        $factureId,        // peut être NULL ou vide
                         $dateRetour,
                         $quantiteBase,
                         $montantRembourse,
@@ -178,34 +138,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         $lotId,
                         $unite,
                         $facteur,
+                        null,              // date_livraison_recue (NULL autorisé)
+                        $codeRetour,       // reference_liee (NOT NULL)
                         $montantRembourse,
                         $motif,
-                        $typeRetour,
-                        $stockAvant,
-                        $stockApres,
-                        $remiseEnStock ? 'ENTREE' : null
+                        $typeRetour
                     ]);
 
-                    // Mise à jour du stock si remis en stock
+                    // ---- Mise à jour du stock si remis en stock ----
                     if ($remiseEnStock) {
-                        // Mise à jour de la quantité de base
-                        $pdo->prepare("UPDATE stock_boutique SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
-                            ->execute([$stockApres, $produitId, $boutiqueId]);
-
-                        // Si un lot est sélectionné, on met à jour le lot
-                        if (!empty($lotId)) {
-                            // On utilise INSERT ... ON DUPLICATE KEY UPDATE pour gérer le lot
-                            $stmtLotUpdate = $pdo->prepare("
-                                INSERT INTO stock_boutique (produit_id, boutique_id, lot_produit_id, quantite_lot)
-                                VALUES (?, ?, ?, ?)
-                                ON DUPLICATE KEY UPDATE 
-                                    lot_produit_id = VALUES(lot_produit_id),
-                                    quantite_lot = quantite_lot + VALUES(quantite_lot)
-                            ");
-                            $stmtLotUpdate->execute([$produitId, $boutiqueId, $lotId, $quantiteSaisie]);
+                        // Vérifier si une ligne de stock existe déjà pour ce produit/boutique
+                        $stmtCheck = $pdo->prepare("SELECT quantite FROM stock_boutique WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                        $stmtCheck->execute([$produitId, $boutiqueId]);
+                        $row = $stmtCheck->fetch(PDO::FETCH_ASSOC);
+                        if ($row) {
+                            $nouvelleQuantite = (int)$row['quantite'] + $quantiteBase;
+                            $pdo->prepare("UPDATE stock_boutique SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
+                                ->execute([$nouvelleQuantite, $produitId, $boutiqueId]);
+                        } else {
+                            // Créer une nouvelle ligne de stock
+                            $pdo->prepare("INSERT INTO stock_boutique (produit_id, boutique_id, quantite) VALUES (?, ?, ?)")
+                                ->execute([$produitId, $boutiqueId, $quantiteBase]);
                         }
 
-                        // Mise à jour du stock global produit
+                        // Mise à jour du stock global produit (somme des stocks boutiques)
                         $pdo->prepare("UPDATE produit SET stock_produit = (
                                 SELECT COALESCE(SUM(quantite), 0) FROM stock_boutique WHERE produit_id = ?
                             ) WHERE code_produit = ?")

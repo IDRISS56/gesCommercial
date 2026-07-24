@@ -1,4 +1,18 @@
 <?php
+ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
+
+// Fonction utilitaire pour envoyer une réponse JSON propre
+function sendJson($data)
+{
+    // Supprimer tous les buffers de sortie actifs
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+
 // views/statut/index.php – Gestion des statuts
 require __DIR__ . '/../../databases/database.php';
 session_start();
@@ -168,7 +182,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
     if (empty($statuts)): ?>
         <tr>
             <td colspan="6" class="text-center py-5 text-muted">
-                <i class="fas fa-inbox fa-2x d-block mb-2 opacity-50"></i>
+                <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucun statut trouvé
             </td>
         </tr>
@@ -186,9 +200,9 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-code="<?= e($s['code_statut']) ?>" title="Voir"><i class="fas fa-eye"></i></button>
-                        <button class="act-btn e editBtn" data-code="<?= e($s['code_statut']) ?>" title="Modifier"><i class="fas fa-pen"></i></button>
-                        <button class="act-btn d deleteBtn" data-code="<?= e($s['code_statut']) ?>" data-nom="<?= e($s['titre_statut']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="fas fa-trash"></i></button>
+                        <!-- Bouton Voir supprimé -->
+                        <button class="act-btn e editBtn" data-code="<?= e($s['code_statut']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
+                        <button class="act-btn d deleteBtn" data-code="<?= e($s['code_statut']) ?>" data-nom="<?= e($s['titre_statut']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                     </div>
                 </td>
             </tr>
@@ -203,7 +217,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
             <nav>
                 <ul class="pagination pagination-sm mb-0">
                     <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="fas fa-chevron-left"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
                     </li>
                     <?php
                     $start = max(1, $page - 2);
@@ -224,7 +238,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                     }
                     ?>
                     <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="fas fa-chevron-right"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
                     </li>
                 </ul>
             </nav>
@@ -251,44 +265,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getTableContent($pdo, $search, $filtres, $page);
-    header('Content-Type: application/json');
-    echo json_encode($result);
-    exit;
-}
-
-// --- AJAX pour voir un statut ---
-if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
-    $code = trim($_POST['code'] ?? '');
-    if (empty($code)) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => 'Code non spécifié']);
-        exit;
-    }
-
-    try {
-        $stmt = $pdo->prepare("SELECT * FROM statut WHERE code_statut = ?");
-        $stmt->execute([$code]);
-        $s = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($s) {
-            header('Content-Type: application/json');
-            echo json_encode([
-                'success' => true,
-                'code_statut' => $s['code_statut'],
-                'titre_statut' => $s['titre_statut'],
-                'type_statut' => $s['type_statut'],
-                'symbole_statut' => $s['symbole_statut'] ?? '—',
-                'etat_statut' => $s['etat_statut']
-            ]);
-        } else {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'message' => 'Statut non trouvé']);
-        }
-    } catch (PDOException $e) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
-    }
-    exit;
+    sendJson($result);
 }
 
 // --- Affichage initial ---
@@ -301,8 +278,9 @@ $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 $initialData = getTableContent($pdo, $search, $filtres, $page);
 
+// Chargement des données pour l'édition (action load_edit)
 $editStatut = null;
-if ($action === 'edit' && isset($_POST['edit_code'])) {
+if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $code = $_POST['edit_code'];
     $stmt = $pdo->prepare("SELECT * FROM statut WHERE code_statut = ?");
     $stmt->execute([$code]);
@@ -318,8 +296,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
     <title>Gestion des statuts</title>
     <!-- Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Bootstrap Icons -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <!-- Bootstrap SelectPicker (CSS) -->
@@ -478,12 +454,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
 
         .act-btn:hover {
             transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .act-btn.e:hover {
@@ -664,7 +634,7 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
                     <div class="col-md-4">
                         <label for="searchInput" class="form-label fw-semibold small">Recherche</label>
                         <div class="search-inline" style="min-width:100%;">
-                            <i class="fas fa-search"></i>
+                            <i class="bi bi-search"></i>
                             <input type="text" name="search" id="searchInput" placeholder="Code, titre, type, symbole..." value="<?= e($search) ?>">
                         </div>
                     </div>
@@ -687,10 +657,10 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
                         </select>
                     </div>
                     <div class="col-md-2">
-                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="fas fa-filter"></i> Filtrer</button>
+                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
                     </div>
                     <div class="col-md-1">
-                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="fas fa-undo"></i></button>
+                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
                     </div>
                 </div>
             </form>
@@ -807,26 +777,6 @@ MODAL FORMULAIRE (ajout/modification)
     </div>
 
     <!-- =========================================================
-MODAL : VUE DÉTAIL
-========================================================= -->
-    <div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="fas fa-eye text-primary me-2"></i> Détails du statut</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3" id="viewGrid"></div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- =========================================================
 MODAL : CONFIRMATION SUPPRESSION
 ========================================================= -->
     <div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
@@ -853,7 +803,7 @@ MODAL : CONFIRMATION SUPPRESSION
         <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
     </form>
 
-    <!-- Formulaire caché pour action edit -->
+    <!-- Formulaire caché pour action edit (chargement) -->
     <form method="post" id="actionForm">
         <input type="hidden" name="action" id="actionField">
         <input type="hidden" name="edit_code" id="editCodeField">
@@ -895,53 +845,13 @@ SCRIPTS
                 modal.show();
             });
 
-            // --- Édition ---
+            // --- Édition (chargement via formulaire POST) ---
             $(document).on('click', '.editBtn', function(e) {
                 e.preventDefault();
                 const code = $(this).data('code');
-                $('#actionField').val('edit');
+                $('#actionField').val('load_edit');  // action modifiée
                 $('#editCodeField').val(code);
                 $('#actionForm').submit();
-            });
-
-            // --- Vue ---
-            $(document).on('click', '.viewBtn', function(e) {
-                e.preventDefault();
-                const code = $(this).data('code');
-                $('#viewModal').modal('hide');
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        ajax_view: '1',
-                        code: code
-                    },
-                    dataType: 'json',
-                    success: function(response) {
-                        if (response.success) {
-                            $('#viewModalLabel').text('Statut ' + response.titre_statut);
-                            const fields = [
-                                ['Code', response.code_statut],
-                                ['Titre', response.titre_statut],
-                                ['Type', response.type_statut],
-                                ['Symbole', response.symbole_statut],
-                                ['État', response.etat_statut]
-                            ];
-                            let html = '';
-                            fields.forEach(([label, value]) => {
-                                let val = value || '—';
-                                html += '<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">' + label + '</div><div class="fw-semibold">' + val + '</div></div></div>';
-                            });
-                            $('#viewGrid').html(html);
-                            $('#viewModal').modal('show');
-                        } else {
-                            alert('Erreur : ' + (response.message || 'Statut non trouvé'));
-                        }
-                    },
-                    error: function() {
-                        alert('Erreur lors de la récupération des données.');
-                    }
-                });
             });
 
             // --- Fonction de recherche AJAX ---
@@ -965,8 +875,10 @@ SCRIPTS
                         });
                         $('.selectpicker').selectpicker('refresh');
                     },
-                    error: function() {
-                        alert('Erreur lors de la recherche.');
+                    error: function(xhr, status, error) {
+                        console.error('Statut :', status);
+                        console.error('Réponse brute :', xhr.responseText);
+                        alert('Erreur lors de la recherche (code ' + xhr.status + '). Voir console pour détails.');
                     }
                 });
             }
@@ -1025,8 +937,8 @@ SCRIPTS
                 $('.alert').alert('close');
             }, 5000);
 
-            // --- Si édition via POST ---
-            <?php if (isset($editStatut) && $action === 'edit'): ?>
+            // --- Si édition via POST (chargement des données) ---
+            <?php if (isset($editStatut) && $action === 'load_edit'): ?>
                 $(function() {
                     $('#formAction').val('edit');
                     $('#oldCode').val('<?= e($editStatut['code_statut']) ?>');

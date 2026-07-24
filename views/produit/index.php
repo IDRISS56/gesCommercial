@@ -2,7 +2,24 @@
 // produit.php
 // CRUD produit avec photos, datalist remplacé par Bootstrap SelectPicker pour les catégories
 
+ob_start(); // capture tout octet parasite (BOM, espaces) émis par ce fichier ou les fichiers inclus
 require_once 'databases/database.php';
+
+session_start();
+// Vérifier la session
+if (!isset($_SESSION['user_id'])) {
+    header('Location: utilisateur/login');
+    exit;
+}
+// Vérifier que l'utilisateur existe toujours
+$stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
+$stmt->execute([$_SESSION['user_id']]);
+$user = $stmt->fetch(PDO::FETCH_ASSOC);
+if (!$user) {
+    session_destroy();
+    header('Location: utilisateur/login');
+    exit;
+}
 
 /**
  * Enregistre un mouvement de stock et met à jour le solde de la boutique.
@@ -118,6 +135,13 @@ $boutiquePrincipale = $boutiquesActives[0]['code_boutique'] ?? null;
 $message = '';
 $messageType = '';
 $action = $_POST['action'] ?? '';
+$csrf_token = $_POST['csrf_token'] ?? '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !(isset($_POST['ajax']) && $_POST['ajax'] == '1')) {
+    if (empty($csrf_token) || $csrf_token !== ($_SESSION['csrf_token'] ?? '')) {
+        $message = 'Token de sécurité invalide.';
+        $messageType = 'danger';
+    } else {
 
 if ($action === 'add' || $action === 'edit') {
     $code = trim($_POST['code_produit'] ?? '');
@@ -125,8 +149,6 @@ if ($action === 'add' || $action === 'edit') {
     $prix_fournisseur = trim($_POST['prix_fournisseur'] ?? '');
     $prix_produit = trim($_POST['prix_produit'] ?? '');
     $stock_alerte = trim($_POST['stock_alerte'] ?? '10');
-    // stock_initial n'existe que sur le formulaire d'AJOUT : c'est la quantité
-    // constatée à la création du produit, pas un champ modifiable ensuite.
     $stock_initial = trim($_POST['stock_initial'] ?? '0');
     $boutique_initiale = trim($_POST['boutique_initiale'] ?? '');
     $categorie_id = trim($_POST['categorie_id'] ?? '');
@@ -241,11 +263,16 @@ if (isset($_POST['btn_supprimer']) && $_POST['btn_supprimer'] == '1') {
     }
 }
 
+    } // fin vérification CSRF
+}
+
+// Générer un token CSRF pour les prochains formulaires
+$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+$csrf_token = $_SESSION['csrf_token'];
+
 // --- Fonction de génération du tableau (AJAX) ---
 function getTableContent($pdo, $search, $categorie_filter, $page, $perPage = 20)
 {
-    // Le stock affiché n'est plus produit.stock_produit (obsolète) mais la
-    // somme des soldes par boutique dans stock_boutique.
     $where = "WHERE 1=1";
     $params = [];
     if (!empty($search)) {
@@ -281,7 +308,7 @@ function getTableContent($pdo, $search, $categorie_filter, $page, $perPage = 20)
     if (empty($produits)): ?>
         <tr>
             <td colspan="11" class="text-center py-5 text-muted">
-                <i class="fas fa-inbox fa-2x d-block mb-2 opacity-50"></i>
+                <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucun produit trouvé
             </td>
         </tr>
@@ -315,9 +342,9 @@ function getTableContent($pdo, $search, $categorie_filter, $page, $perPage = 20)
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-code="<?= htmlspecialchars($p['code_produit']) ?>" title="Voir"><i class="fas fa-eye"></i></button>
-                        <button class="act-btn e editBtn" data-code="<?= htmlspecialchars($p['code_produit']) ?>" title="Modifier"><i class="fas fa-pen"></i></button>
-                        <button class="act-btn d deleteBtn" data-code="<?= htmlspecialchars($p['code_produit']) ?>" data-nom="<?= htmlspecialchars($p['titre_produit']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="fas fa-trash"></i></button>
+                        <!-- Bouton Voir supprimé -->
+                        <button class="act-btn e editBtn" data-code="<?= htmlspecialchars($p['code_produit']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
+                        <button class="act-btn d deleteBtn" data-code="<?= htmlspecialchars($p['code_produit']) ?>" data-nom="<?= htmlspecialchars($p['titre_produit']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                     </div>
                 </td>
             </tr>
@@ -333,7 +360,7 @@ function getTableContent($pdo, $search, $categorie_filter, $page, $perPage = 20)
             <nav>
                 <ul class="pagination pagination-sm mb-0">
                     <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="fas fa-chevron-left"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
                     </li>
                     <?php
                     $start = max(1, $page - 2);
@@ -354,7 +381,7 @@ function getTableContent($pdo, $search, $categorie_filter, $page, $perPage = 20)
                     }
                     ?>
                     <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="fas fa-chevron-right"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
                     </li>
                 </ul>
             </nav>
@@ -378,6 +405,9 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getTableContent($pdo, $search, $categorie_filter, $page);
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
     header('Content-Type: application/json');
     echo json_encode($result);
     exit;
@@ -413,26 +443,13 @@ function getStockParBoutique(PDO $pdo, string $produit_id): array
 }
 
 $editProduit = null;
-if ($action === 'edit' && isset($_POST['edit_code'])) {
+if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $code = $_POST['edit_code'];
     $stmt = $pdo->prepare("SELECT * FROM produit WHERE code_produit = ?");
     $stmt->execute([$code]);
     $editProduit = $stmt->fetch(PDO::FETCH_ASSOC);
     if ($editProduit) {
         $editProduit['stock_total'] = getStockTotal($pdo, $code);
-    }
-}
-
-$viewProduit = null;
-$viewStockDetail = [];
-if ($action === 'view' && isset($_POST['view_code'])) {
-    $code = $_POST['view_code'];
-    $stmt = $pdo->prepare("SELECT * FROM produit WHERE code_produit = ?");
-    $stmt->execute([$code]);
-    $viewProduit = $stmt->fetch(PDO::FETCH_ASSOC);
-    if ($viewProduit) {
-        $viewProduit['stock_total'] = getStockTotal($pdo, $code);
-        $viewStockDetail = getStockParBoutique($pdo, $code);
     }
 }
 ?>
@@ -445,8 +462,6 @@ if ($action === 'view' && isset($_POST['view_code'])) {
     <title>Gestion des produits</title>
     <!-- Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Bootstrap Icons -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <!-- Bootstrap SelectPicker (CSS) -->
@@ -605,12 +620,6 @@ if ($action === 'view' && isset($_POST['view_code'])) {
 
         .act-btn:hover {
             transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .act-btn.e:hover {
@@ -792,7 +801,7 @@ if ($action === 'view' && isset($_POST['view_code'])) {
                 <p class="text-tertiary mt-1">Créer, modifier et suivre votre catalogue</p>
             </div>
             <div>
-                <button class="btn btn-primary btn-sm" id="addBtn"><i class="fas fa-plus"></i> Nouveau produit</button>
+                <button class="btn btn-primary btn-sm" id="addBtn"><i class="bi bi-plus-circle"></i> Nouveau produit</button>
             </div>
         </div>
 
@@ -813,7 +822,7 @@ if ($action === 'view' && isset($_POST['view_code'])) {
                     <div class="col-md-4">
                         <label for="searchInput" class="form-label fw-semibold small">Recherche</label>
                         <div class="search-inline" style="min-width:100%; height:42px;">
-                            <i class="fas fa-search"></i>
+                            <i class="bi bi-search"></i>
                             <input type="text" name="search" id="searchInput" placeholder="Code, titre, description..." value="<?= htmlspecialchars($search) ?>">
                         </div>
                     </div>
@@ -829,10 +838,10 @@ if ($action === 'view' && isset($_POST['view_code'])) {
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="fas fa-filter"></i> Filtrer</button>
+                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
                     </div>
                     <div class="col-md-2">
-                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="fas fa-undo"></i> Réinitialiser</button>
+                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i> Réinitialiser</button>
                     </div>
                 </div>
             </form>
@@ -879,53 +888,54 @@ MODAL FORMULAIRE (ajout/modification)
         <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="fas fa-cube text-primary me-2"></i> Nouveau produit</h5>
+                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-cube text-primary me-2"></i> Nouveau produit</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
                 </div>
                 <form method="post" id="produitForm" enctype="multipart/form-data">
                     <input type="hidden" name="action" id="formAction" value="add">
                     <input type="hidden" name="old_code" id="oldCode" value="">
+                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                     <div class="modal-body">
                         <!-- Identification -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-tag me-1"></i> Identification</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="code_produit" class="form-label fw-semibold">Code produit <span class="text-danger">*</span></label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-hashtag"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-hash"></i></span>
                                     <input type="text" class="form-control" id="code_produit" name="code_produit" required placeholder="P001" value="<?= htmlspecialchars($editProduit['code_produit'] ?? '') ?>">
                                 </div>
                             </div>
                             <div class="col-md-6">
                                 <label for="titre_produit" class="form-label fw-semibold">Titre du produit</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-cube"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-cube"></i></span>
                                     <input type="text" class="form-control" id="titre_produit" name="titre_produit" placeholder="Nom du produit" value="<?= htmlspecialchars($editProduit['titre_produit'] ?? '') ?>">
                                 </div>
                             </div>
                         </div>
 
                         <!-- Prix -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-coins me-1"></i> Prix et bénéfice</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-coins me-1"></i> Prix et bénéfice</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-4">
                                 <label for="prix_fournisseur" class="form-label fw-semibold">Prix fournisseur</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-euro-sign"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-currency-dollar"></i></span>
                                     <input type="text" class="form-control" id="prix_fournisseur" name="prix_fournisseur" placeholder="0.00" value="<?= htmlspecialchars($editProduit['prix_fournisseur'] ?? '') ?>">
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <label for="prix_produit" class="form-label fw-semibold">Prix de vente</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-tag"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-tag"></i></span>
                                     <input type="text" class="form-control" id="prix_produit" name="prix_produit" placeholder="0.00" value="<?= htmlspecialchars($editProduit['prix_produit'] ?? '') ?>">
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label fw-semibold">Bénéfice estimé</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-chart-line"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-graph-up-arrow"></i></span>
                                     <input type="text" class="form-control" id="benefice_estime" readonly placeholder="calculé automatiquement" value="<?= isset($editProduit['benefice_produit']) ? $editProduit['benefice_produit'] : '' ?>">
                                 </div>
                                 <div class="form-text">Calculé automatiquement (vente - fournisseur)</div>
@@ -933,19 +943,19 @@ MODAL FORMULAIRE (ajout/modification)
                         </div>
 
                         <!-- Stock -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-boxes-stacked me-1"></i> Gestion de stock</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-boxes me-1"></i> Gestion de stock</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="stock_alerte" class="form-label fw-semibold">Stock d'alerte</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-exclamation-triangle"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-exclamation-triangle"></i></span>
                                     <input type="text" class="form-control" id="stock_alerte" name="stock_alerte" placeholder="10" value="<?= htmlspecialchars($editProduit['stock_alerte'] ?? '10') ?>">
                                 </div>
                             </div>
                             <div class="col-md-6" id="blocStockTotal" style="display:none;">
                                 <label class="form-label fw-semibold">Stock actuel (toutes boutiques)</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-cubes"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-cubes"></i></span>
                                     <input type="text" class="form-control" readonly value="<?= (int) ($editProduit['stock_total'] ?? 0) ?>">
                                 </div>
                                 <div class="form-text">Non modifiable ici. Passez par un mouvement d'inventaire pour corriger une quantité.</div>
@@ -955,7 +965,7 @@ MODAL FORMULAIRE (ajout/modification)
                             <div class="col-md-6">
                                 <label for="stock_initial" class="form-label fw-semibold">Quantité initiale</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-cubes"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-cubes"></i></span>
                                     <input type="text" class="form-control" id="stock_initial" name="stock_initial" placeholder="0">
                                 </div>
                                 <div class="form-text">Génère un mouvement ENTREE_INVENTAIRE à la création.</div>
@@ -973,7 +983,7 @@ MODAL FORMULAIRE (ajout/modification)
                         </div>
 
                         <!-- Catégorie avec SelectPicker -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-list me-1"></i> Catégorie</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-list me-1"></i> Catégorie</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-12">
                                 <label for="categorie_id" class="form-label fw-semibold">Catégorie</label>
@@ -993,14 +1003,14 @@ MODAL FORMULAIRE (ajout/modification)
                             <div class="col-md-12">
                                 <label for="description_produit" class="form-label fw-semibold">Description</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-align-left"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-text-left"></i></span>
                                     <textarea class="form-control" id="description_produit" name="description_produit" rows="3" placeholder="Description détaillée..."><?= htmlspecialchars($editProduit['description_produit'] ?? '') ?></textarea>
                                 </div>
                             </div>
                         </div>
 
                         <!-- Photo -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-image me-1"></i> Photo</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-image me-1"></i> Photo</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-12">
                                 <input type="file" class="form-control" id="photo_produit" name="photo_produit" accept="image/*">
@@ -1008,14 +1018,14 @@ MODAL FORMULAIRE (ajout/modification)
                                     <?php if (isset($editProduit) && !empty($editProduit['photo'])): ?>
                                         <img src="data:<?= htmlspecialchars($editProduit['type_photo'] ?? 'image/jpeg') ?>;base64,<?= base64_encode($editProduit['photo']) ?>" class="preview-img" alt="Aperçu">
                                     <?php else: ?>
-                                        <div class="img-placeholder"><i class="fas fa-image fa-2x"></i></div>
+                                        <div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>
                                     <?php endif; ?>
                                 </div>
                             </div>
                         </div>
 
                         <!-- État -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-toggle-on me-1"></i> Statut</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-toggle-on me-1"></i> Statut</h6>
                         <div class="row g-3">
                             <div class="col-md-6">
                                 <label for="etat_produit" class="form-label fw-semibold">État</label>
@@ -1027,30 +1037,10 @@ MODAL FORMULAIRE (ajout/modification)
                         </div>
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="fas fa-times"></i> Annuler</button>
-                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="fas fa-save"></i> Enregistrer</button>
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
+                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="bi bi-save"></i> Enregistrer</button>
                     </div>
                 </form>
-            </div>
-        </div>
-    </div>
-
-    <!-- =========================================================
-MODAL : VUE DÉTAIL
-========================================================= -->
-    <div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="fas fa-eye text-primary me-2"></i> Détails du produit</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3" id="viewGrid"></div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                </div>
             </div>
         </div>
     </div>
@@ -1078,13 +1068,14 @@ MODAL : CONFIRMATION SUPPRESSION
     <form id="deleteForm" method="POST" style="display:none;">
         <input type="hidden" name="btn_supprimer" value="1">
         <input type="hidden" name="sai_supprimer_id" id="deleteFormId" value="">
+        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
     </form>
 
-    <!-- Formulaire caché pour actions view/edit -->
+    <!-- Formulaire caché pour action edit -->
     <form method="post" id="actionForm">
         <input type="hidden" name="action" id="actionField">
         <input type="hidden" name="edit_code" id="editCodeField">
-        <input type="hidden" name="view_code" id="viewCodeField">
+        <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
     </form>
 
     <!-- =========================================================
@@ -1105,7 +1096,6 @@ SCRIPTS
             $('.selectpicker').selectpicker();
 
             const produitModal = new bootstrap.Modal(document.getElementById('produitModal'));
-            const viewModal = new bootstrap.Modal(document.getElementById('viewModal'));
 
             // --- Ajout ---
             $('#addBtn').on('click', function() {
@@ -1115,7 +1105,7 @@ SCRIPTS
                 $('#produitForm')[0].reset();
                 $('#code_produit').prop('readonly', false);
                 $('#benefice_estime').val('');
-                $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="fas fa-image fa-2x"></i></div>');
+                $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>');
 
                 // Vidage manuel : reset() ne suffit pas, car ces champs ont leur
                 // value/selected écrite par PHP côté serveur (pré-remplis lors d'une
@@ -1143,16 +1133,8 @@ SCRIPTS
             // --- Édition ---
             $(document).on('click', '.editBtn', function() {
                 const code = $(this).data('code');
-                $('#actionField').val('edit');
+                $('#actionField').val('load_edit');
                 $('#editCodeField').val(code);
-                $('#actionForm').submit();
-            });
-
-            // --- Vue ---
-            $(document).on('click', '.viewBtn', function() {
-                const code = $(this).data('code');
-                $('#actionField').val('view');
-                $('#viewCodeField').val(code);
                 $('#actionForm').submit();
             });
 
@@ -1174,7 +1156,7 @@ SCRIPTS
                     };
                     reader.readAsDataURL(file);
                 } else {
-                    $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="fas fa-image fa-2x"></i></div>');
+                    $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>');
                 }
             });
 
@@ -1264,7 +1246,7 @@ SCRIPTS
             }, 5000);
 
             // --- Si édition via POST ---
-            <?php if (isset($editProduit) && $action === 'edit'): ?>
+            <?php if (isset($editProduit) && $action === 'load_edit'): ?>
                 $(function() {
                     $('#formAction').val('edit');
                     $('#oldCode').val('<?= htmlspecialchars($editProduit['code_produit']) ?>');
@@ -1275,36 +1257,6 @@ SCRIPTS
                     // La catégorie est déjà sélectionnée via l'attribut selected dans le select, on rafraîchit le selectpicker
                     $('#categorie_id').selectpicker('destroy').selectpicker();
                     produitModal.show();
-                });
-            <?php endif; ?>
-
-            // --- Si vue via POST ---
-            <?php if (isset($viewProduit) && $action === 'view'): ?>
-                $(function() {
-                    $('#viewModalLabel').text('<?= htmlspecialchars($viewProduit['titre_produit'] ?? $viewProduit['code_produit']) ?>');
-                    const fields = [
-                        ['Code', '<?= htmlspecialchars($viewProduit['code_produit']) ?>'],
-                        ['Titre', '<?= htmlspecialchars($viewProduit['titre_produit']) ?>'],
-                        ['Photo', '<?php if (!empty($viewProduit['photo'])): ?><img src="data:<?= htmlspecialchars($viewProduit['type_photo'] ?? 'image/jpeg') ?>;base64,<?= base64_encode($viewProduit['photo']) ?>" class="preview-img" style="width:100px;height:100px;"><?php else: ?>—<?php endif; ?>'],
-                        ['Prix fournisseur', '<?= htmlspecialchars($viewProduit['prix_fournisseur']) ?>'],
-                        ['Prix vente', '<?= htmlspecialchars($viewProduit['prix_produit']) ?>'],
-                        ['Bénéfice', '<?= htmlspecialchars($viewProduit['benefice_produit']) ?>'],
-                        ['Stock alerte', '<?= htmlspecialchars($viewProduit['stock_alerte']) ?>'],
-                        ['Stock total (toutes boutiques)', '<?= (int) $viewProduit['stock_total'] ?>'],
-                        ['Catégorie', '<?= htmlspecialchars($viewProduit['categorie_id']) ?>'],
-                        ['Description', '<?= htmlspecialchars($viewProduit['description_produit']) ?>'],
-                        ['État', '<?= htmlspecialchars($viewProduit['etat_produit']) ?>']
-                    ];
-                    let html = '';
-                    fields.forEach(([l, v]) => {
-                        let val = v || '—';
-                        html += `<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">${l}</div><div class="fw-semibold">${val}</div></div></div>`;
-                    });
-                    <?php if (!empty($viewStockDetail)): ?>
-                        html += '<div class="col-12"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold mb-2">Détail par boutique</div><table class="table table-sm mb-0"><?php foreach ($viewStockDetail as $s): ?><tr><td><?= htmlspecialchars($s['nom_boutique']) ?></td><td class="text-end fw-semibold"><?= (int) $s['quantite'] ?></td></tr><?php endforeach; ?></table></div></div>';
-                    <?php endif; ?>
-                    $('#viewGrid').html(html);
-                    viewModal.show();
                 });
             <?php endif; ?>
         });

@@ -1944,9 +1944,21 @@
                  title: 'RAPPORTS',
                  icon: 'bi-clock-history',
                  emoji: '🧾',
-                 items: [
-
-
+                 items: [{
+                         icon: 'bi-search',
+                         label: 'Bilan Stock',
+                         url: '/rapport/rachat'
+                     },
+                     {
+                         icon: 'bi-search',
+                         label: 'Bilan Finance',
+                         url: '/rapport/rfinance'
+                     },
+                     {
+                         icon: 'bi-search',
+                         label: 'Bilan Vente',
+                         url: '/rapport/rvente'
+                     },
                  ]
              },
 
@@ -2519,7 +2531,7 @@
          const notificationBell = document.getElementById('notificationBell');
          if (notificationBell) {
              notificationBell.addEventListener('click', () => {
-                 loadPage('/registre/attente');
+                 loadPage('/notification/gestion');
              });
          }
 

@@ -1,8 +1,11 @@
 ﻿<?php
+
+// require_once 'config/authentification.php';
 class utilisateur
 {
     public function gestion()
     {
+        // requirePermission(['Admin', 'Super Admin']);
         include "views/utilisateur/index.php";
     }
     public function login()
@@ -15,7 +18,7 @@ class utilisateur
     }
     public function menu()
     {
-        // checkAccessConditions();
+        //  checkAccessConditions();
         include "config/menu.php";
     }
 }

@@ -1,6 +1,6 @@
 <?php
 // depense.php
-// CRUD pour la table depense – avec Bootstrap SelectPicker (modèle identique à contact.php)
+// CRUD pour la table depense – avec Bootstrap SelectPicker
 
 require_once 'databases/database.php';
 // --- Récupération des listes pour les selects ---
@@ -128,8 +128,8 @@ function getTableContent($pdo, $search, $boutique_filter, $utilisateur_filter, $
     ob_start();
     if (empty($depenses)): ?>
         <tr>
-            <td colspan="9" class="text-center py-5 text-muted">
-                <i class="fas fa-inbox fa-2x d-block mb-2 opacity-50"></i>
+            <td colspan="8" class="text-center py-5 text-muted">
+                <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucune dépense trouvée
             </td>
         </tr>
@@ -153,9 +153,9 @@ function getTableContent($pdo, $search, $boutique_filter, $utilisateur_filter, $
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-code="<?= htmlspecialchars($d['code_depense']) ?>" title="Voir"><i class="fas fa-eye"></i></button>
-                        <button class="act-btn e editBtn" data-code="<?= htmlspecialchars($d['code_depense']) ?>" title="Modifier"><i class="fas fa-pen"></i></button>
-                        <button class="act-btn d deleteBtn" data-code="<?= htmlspecialchars($d['code_depense']) ?>" data-nom="<?= htmlspecialchars($d['titre_depense']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="fas fa-trash"></i></button>
+                        <!-- Bouton Voir supprimé -->
+                        <button class="act-btn e editBtn" data-code="<?= htmlspecialchars($d['code_depense']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
+                        <button class="act-btn d deleteBtn" data-code="<?= htmlspecialchars($d['code_depense']) ?>" data-nom="<?= htmlspecialchars($d['titre_depense']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                     </div>
                 </td>
             </tr>
@@ -171,7 +171,7 @@ function getTableContent($pdo, $search, $boutique_filter, $utilisateur_filter, $
             <nav>
                 <ul class="pagination pagination-sm mb-0">
                     <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="fas fa-chevron-left"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
                     </li>
                     <?php
                     $start = max(1, $page - 2);
@@ -192,7 +192,7 @@ function getTableContent($pdo, $search, $boutique_filter, $utilisateur_filter, $
                     }
                     ?>
                     <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="fas fa-chevron-right"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
                     </li>
                 </ul>
             </nav>
@@ -240,18 +240,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
     $editDepense = $stmt->fetch(PDO::FETCH_ASSOC);
 }
 
-$viewDepense = null;
-if ($action === 'view' && isset($_POST['view_code'])) {
-    $code = $_POST['view_code'];
-    $stmt = $pdo->prepare("SELECT d.*, b.nom_boutique, u.nom_prenom 
-                           FROM depense d
-                           LEFT JOIN boutique b ON d.boutique_id = b.code_boutique
-                           LEFT JOIN utilisateur u ON d.utilisateur_id = u.id
-                           WHERE d.code_depense = ?");
-    $stmt->execute([$code]);
-    $viewDepense = $stmt->fetch(PDO::FETCH_ASSOC);
-}
-
 $etats_depense = ['VALIDE', 'ANNULE'];
 ?>
 <!DOCTYPE html>
@@ -263,8 +251,6 @@ $etats_depense = ['VALIDE', 'ANNULE'];
     <title>Gestion des dépenses</title>
     <!-- Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Bootstrap Icons -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <!-- Bootstrap SelectPicker (CSS) -->
@@ -272,7 +258,7 @@ $etats_depense = ['VALIDE', 'ANNULE'];
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        /* === Styles identiques à contact.php === */
+        /* === Styles identiques === */
         :root {
             --color-primary: #4f46e5;
             --color-primary-dark: #3730a3;
@@ -423,12 +409,6 @@ $etats_depense = ['VALIDE', 'ANNULE'];
 
         .act-btn:hover {
             transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .act-btn.e:hover {
@@ -588,7 +568,7 @@ $etats_depense = ['VALIDE', 'ANNULE'];
                 <p class="text-tertiary mt-1">Suivez toutes vos dépenses par boutique et utilisateur</p>
             </div>
             <div>
-                <button class="btn btn-primary btn-sm" id="addBtn"><i class="fas fa-plus"></i> Nouvelle dépense</button>
+                <button class="btn btn-primary btn-sm" id="addBtn"><i class="bi bi-plus-circle"></i> Nouvelle dépense</button>
             </div>
         </div>
 
@@ -609,7 +589,7 @@ $etats_depense = ['VALIDE', 'ANNULE'];
                     <div class="col-md-3">
                         <label for="searchInput" class="form-label fw-semibold small">Recherche</label>
                         <div class="search-inline" style="min-width:100%; height:42px;">
-                            <i class="fas fa-search"></i>
+                            <i class="bi bi-search"></i>
                             <input type="text" name="search" id="searchInput" placeholder="Code, titre, description..." value="<?= htmlspecialchars($search) ?>">
                         </div>
                     </div>
@@ -645,10 +625,10 @@ $etats_depense = ['VALIDE', 'ANNULE'];
                         </select>
                     </div>
                     <div class="col-md-2">
-                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="fas fa-filter"></i> Filtrer</button>
+                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
                     </div>
                     <div class="col-md-1">
-                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="fas fa-undo"></i></button>
+                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
                     </div>
                 </div>
             </form>
@@ -693,7 +673,7 @@ MODAL FORMULAIRE (ajout/modification)
         <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="fas fa-money-bill-wave text-primary me-2"></i> Nouvelle dépense</h5>
+                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-currency-dollar text-primary me-2"></i> Nouvelle dépense</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
                 </div>
                 <form method="post" id="depenseForm">
@@ -701,26 +681,26 @@ MODAL FORMULAIRE (ajout/modification)
                     <input type="hidden" name="old_code" id="oldCode" value="">
                     <div class="modal-body">
                         <!-- Identification -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-tag me-1"></i> Identification</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="code_depense" class="form-label fw-semibold">Code dépense <span class="text-danger">*</span></label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-hashtag"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-hash"></i></span>
                                     <input type="text" class="form-control" id="code_depense" name="code_depense" required placeholder="DEP001" value="<?= htmlspecialchars($editDepense['code_depense'] ?? '') ?>">
                                 </div>
                             </div>
                             <div class="col-md-6">
                                 <label for="titre_depense" class="form-label fw-semibold">Titre <span class="text-danger">*</span></label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-heading"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-pencil"></i></span>
                                     <input type="text" class="form-control" id="titre_depense" name="titre_depense" placeholder="Achat fournitures" value="<?= htmlspecialchars($editDepense['titre_depense'] ?? '') ?>" required>
                                 </div>
                             </div>
                         </div>
 
                         <!-- Association boutique / utilisateur -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-store me-1"></i> Association</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-store me-1"></i> Association</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="boutique_id" class="form-label fw-semibold">Boutique</label>
@@ -747,38 +727,38 @@ MODAL FORMULAIRE (ajout/modification)
                         </div>
 
                         <!-- Montant et date -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-coins me-1"></i> Montant & date</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-coins me-1"></i> Montant & date</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="montant_depense" class="form-label fw-semibold">Montant <span class="text-danger">*</span></label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-dollar-sign"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-currency-dollar"></i></span>
                                     <input type="number" step="0.01" class="form-control" id="montant_depense" name="montant_depense" placeholder="0.00" value="<?= htmlspecialchars($editDepense['montant_depense'] ?? '0') ?>" required>
                                 </div>
                             </div>
                             <div class="col-md-6">
                                 <label for="date_depense" class="form-label fw-semibold">Date et heure</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-calendar-alt"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-calendar"></i></span>
                                     <input type="datetime-local" class="form-control" id="date_depense" name="date_depense" value="<?= isset($editDepense) ? date('Y-m-d\TH:i', strtotime($editDepense['date_depense'])) : date('Y-m-d\TH:i') ?>">
                                 </div>
                             </div>
                         </div>
 
                         <!-- Description -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-align-left me-1"></i> Description</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-align-left me-1"></i> Description</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-12">
                                 <label for="description_depense" class="form-label fw-semibold">Description</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-pencil-alt"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-text-left"></i></span>
                                     <textarea class="form-control" id="description_depense" name="description_depense" rows="3" placeholder="Détails de la dépense..."><?= htmlspecialchars($editDepense['description_depense'] ?? '') ?></textarea>
                                 </div>
                             </div>
                         </div>
 
                         <!-- État -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-toggle-on me-1"></i> Statut</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-toggle-on me-1"></i> Statut</h6>
                         <div class="row g-3">
                             <div class="col-md-6">
                                 <label for="etat_depense" class="form-label fw-semibold">État</label>
@@ -790,30 +770,10 @@ MODAL FORMULAIRE (ajout/modification)
                         </div>
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="fas fa-times"></i> Annuler</button>
-                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="fas fa-save"></i> Enregistrer</button>
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
+                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="bi bi-save"></i> Enregistrer</button>
                     </div>
                 </form>
-            </div>
-        </div>
-    </div>
-
-    <!-- =========================================================
-MODAL : VUE DÉTAIL
-========================================================= -->
-    <div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="fas fa-eye text-primary me-2"></i> Détails de la dépense</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3" id="viewGrid"></div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                </div>
             </div>
         </div>
     </div>
@@ -843,11 +803,10 @@ MODAL : CONFIRMATION SUPPRESSION
         <input type="hidden" name="sai_supprimer_id" id="deleteFormId" value="">
     </form>
 
-    <!-- Formulaire caché pour actions view/edit -->
+    <!-- Formulaire caché pour action edit -->
     <form method="post" id="actionForm">
         <input type="hidden" name="action" id="actionField">
         <input type="hidden" name="edit_code" id="editCodeField">
-        <input type="hidden" name="view_code" id="viewCodeField">
     </form>
 
     <!-- =========================================================
@@ -904,14 +863,6 @@ SCRIPTS
                 const code = $(this).data('code');
                 $('#actionField').val('edit');
                 $('#editCodeField').val(code);
-                $('#actionForm').submit();
-            });
-
-            // --- Vue ---
-            $(document).on('click', '.viewBtn', function() {
-                const code = $(this).data('code');
-                $('#actionField').val('view');
-                $('#viewCodeField').val(code);
                 $('#actionForm').submit();
             });
 
@@ -1012,30 +963,6 @@ SCRIPTS
                     $('#modalTitle').text('Modifier la dépense');
                     $('#code_depense').prop('readonly', true);
                     depenseModal.show();
-                });
-            <?php endif; ?>
-
-            // --- Si vue via POST ---
-            <?php if (isset($viewDepense) && $action === 'view'): ?>
-                $(function() {
-                    $('#viewModalLabel').text('Détails de la dépense - <?= htmlspecialchars($viewDepense['titre_depense'] ?? $viewDepense['code_depense']) ?>');
-                    const fields = [
-                        ['Code', '<?= htmlspecialchars($viewDepense['code_depense']) ?>'],
-                        ['Titre', '<?= htmlspecialchars($viewDepense['titre_depense']) ?>'],
-                        ['Boutique', '<?= htmlspecialchars($viewDepense['nom_boutique'] ?? '—') ?>'],
-                        ['Utilisateur', '<?= htmlspecialchars($viewDepense['nom_prenom'] ?? '—') ?>'],
-                        ['Montant', '<?= number_format((float)$viewDepense['montant_depense'], 2) ?>'],
-                        ['Date', '<?= isset($viewDepense['date_depense']) ? date('d/m/Y H:i', strtotime($viewDepense['date_depense'])) : '—' ?>'],
-                        ['Description', '<?= htmlspecialchars($viewDepense['description_depense'] ?? '') ?>'],
-                        ['État', '<?= htmlspecialchars($viewDepense['etat_depense']) ?>']
-                    ];
-                    let html = '';
-                    fields.forEach(([l, v]) => {
-                        let val = v || '—';
-                        html += `<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">${l}</div><div class="fw-semibold">${val}</div></div></div>`;
-                    });
-                    $('#viewGrid').html(html);
-                    viewModal.show();
                 });
             <?php endif; ?>
         });

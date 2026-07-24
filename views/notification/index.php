@@ -1,4 +1,18 @@
 <?php
+ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
+
+// Fonction utilitaire pour envoyer une réponse JSON propre
+function sendJson($data)
+{
+    // Supprimer tous les buffers de sortie actifs
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+
 // notification.php
 // CRUD pour la table notification – avec Bootstrap SelectPicker
 
@@ -196,18 +210,14 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getTableContent($pdo, $search, $filtres, $page);
-    header('Content-Type: application/json');
-    echo json_encode($result);
-    exit;
+    sendJson($result);
 }
 
 // --- AJAX pour voir une notification ---
 if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
     $id = (int)($_POST['id'] ?? 0);
     if ($id <= 0) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => 'ID non spécifié']);
-        exit;
+        sendJson(['success' => false, 'message' => 'ID non spécifié']);
     }
     try {
         $stmt = $pdo->prepare("SELECT n.*, u.nom_prenom AS user_nom
@@ -217,8 +227,7 @@ if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
         $stmt->execute([$id]);
         $notif = $stmt->fetch(PDO::FETCH_ASSOC);
         if ($notif) {
-            header('Content-Type: application/json');
-            echo json_encode([
+            sendJson([
                 'success' => true,
                 'id' => $notif['id'],
                 'objet' => $notif['objet'] ?? '',
@@ -229,14 +238,11 @@ if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
                 'fichier' => $notif['fichier'] ?? ''
             ]);
         } else {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'message' => 'Notification non trouvée']);
+            sendJson(['success' => false, 'message' => 'Notification non trouvée']);
         }
     } catch (PDOException $e) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        sendJson(['success' => false, 'message' => $e->getMessage()]);
     }
-    exit;
 }
 
 // --- Affichage initial ---
@@ -250,8 +256,9 @@ $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 $initialData = getTableContent($pdo, $search, $filtres, $page);
 
+// Chargement des données pour l'édition (action load_edit)
 $editNotification = null;
-if ($action === 'edit' && isset($_POST['edit_id'])) {
+if ($action === 'load_edit' && isset($_POST['edit_id'])) {
     $id = (int)$_POST['edit_id'];
     $stmt = $pdo->prepare("SELECT * FROM notification WHERE id = ?");
     $stmt->execute([$id]);
@@ -820,7 +827,7 @@ MODAL : CONFIRMATION SUPPRESSION
         <input type="hidden" name="sai_supprimer_id" id="deleteFormId" value="">
     </form>
 
-    <!-- Formulaire caché pour action edit -->
+    <!-- Formulaire caché pour action edit (chargement) -->
     <form method="post" id="actionForm">
         <input type="hidden" name="action" id="actionField">
         <input type="hidden" name="edit_id" id="editIdField">
@@ -874,11 +881,11 @@ SCRIPTS
                 modal.show();
             });
 
-            // --- Édition (via formulaire POST) ---
+            // --- Édition (chargement via formulaire POST) ---
             $(document).on('click', '.editBtn', function(e) {
                 e.preventDefault();
                 const id = $(this).data('id');
-                $('#actionField').val('edit');
+                $('#actionField').val('load_edit');  // action modifiée
                 $('#editIdField').val(id);
                 $('#actionForm').submit();
             });
@@ -919,8 +926,10 @@ SCRIPTS
                             alert('Erreur : ' + (response.message || 'Notification non trouvée'));
                         }
                     },
-                    error: function() {
-                        alert('Erreur lors de la récupération des données.');
+                    error: function(xhr, status, error) {
+                        console.error('Statut :', status);
+                        console.error('Réponse brute :', xhr.responseText);
+                        alert('Erreur lors de la récupération des données (code ' + xhr.status + '). Voir console pour détails.');
                     }
                 });
             });
@@ -946,8 +955,10 @@ SCRIPTS
                         });
                         $('.selectpicker').selectpicker('refresh');
                     },
-                    error: function() {
-                        alert('Erreur lors de la recherche.');
+                    error: function(xhr, status, error) {
+                        console.error('Statut :', status);
+                        console.error('Réponse brute :', xhr.responseText);
+                        alert('Erreur lors de la recherche (code ' + xhr.status + '). Voir console pour détails.');
                     }
                 });
             }
@@ -1016,8 +1027,8 @@ SCRIPTS
                 $('.alert').alert('close');
             }, 5000);
 
-            // --- Si édition via POST ---
-            <?php if (isset($editNotification) && $action === 'edit'): ?>
+            // --- Si édition via POST (chargement des données) ---
+            <?php if (isset($editNotification) && $action === 'load_edit'): ?>
                 $(function() {
                     $('#formAction').val('edit');
                     $('#oldId').val('<?= $editNotification['id'] ?>');

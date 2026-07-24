@@ -277,8 +277,7 @@ function getTransferts($pdo, $search, $produit_filter, $boutique_filter, $page, 
     ];
 }
 
-// ---- GESTION DES REQUÊTES AJAX ----
-// 1. Filtrage / Pagination
+// ---- GESTION DES REQUÊTES AJAX (seulement filtrage/pagination) ----
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $search = trim($_POST['search'] ?? '');
     $produit_filter = trim($_POST['produit_filter'] ?? '');
@@ -292,7 +291,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     ob_start();
     if (empty($data['transferts'])): ?>
         <tr>
-            <td colspan="7" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucun transfert</td>
+            <td colspan="6" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucun transfert</td>
         </tr>
         <?php else: foreach ($data['transferts'] as $t): ?>
             <tr>
@@ -302,9 +301,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                 <td><?= e($t['nom_source']) ?></td>
                 <td><?= e($t['nom_dest']) ?></td>
                 <td><?= $t['quantite'] ?></td>
-                <td class="text-end">
-                    <button class="act-btn v viewBtn" data-transfert="<?= e($t['transfert_id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
-                </td>
             </tr>
         <?php endforeach;
     endif;
@@ -356,39 +352,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
         'totalPages' => $data['totalPages']
     ]);
     exit;
-}
-
-// 2. Détail d'un transfert
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'get_transfert_detail') {
-    $transfertId = trim($_POST['transfert_id'] ?? '');
-    if ($transfertId) {
-        $stmt = $pdo->prepare("
-            SELECT produit_id, quantite_commande, unite_affichage, 
-                   facteur_conversion, boutique_id, statut_id
-            FROM commande
-            WHERE reference_liee = ? AND statut_id IN ('008','009')
-            ORDER BY statut_id DESC
-        ");
-        $stmt->execute([$transfertId]);
-        $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($lignes as &$ligne) {
-            // Produit
-            $stmtProd = $pdo->prepare("SELECT titre_produit FROM produit WHERE code_produit = ?");
-            $stmtProd->execute([$ligne['produit_id']]);
-            $ligne['titre_produit'] = $stmtProd->fetchColumn() ?: $ligne['produit_id'];
-            // Boutique
-            $stmtBout = $pdo->prepare("SELECT nom_boutique FROM boutique WHERE code_boutique = ?");
-            $stmtBout->execute([$ligne['boutique_id']]);
-            $ligne['nom_boutique'] = $stmtBout->fetchColumn() ?: $ligne['boutique_id'];
-            // Type
-            $ligne['type_mouvement'] = ($ligne['statut_id'] == '008') ? 'Sortie' : 'Entrée';
-            $ligne['badge_class'] = ($ligne['statut_id'] == '008') ? 'bg-danger' : 'bg-success';
-        }
-        unset($ligne);
-        header('Content-Type: application/json');
-        echo json_encode($lignes);
-        exit;
-    }
 }
 
 // ---- PARAMÈTRES INITIAUX POUR L'AFFICHAGE ----
@@ -530,30 +493,6 @@ $transfertsData = getTransferts($pdo, $search, $produit_filter, $boutique_filter
         .td-bold {
             font-weight: 700;
             color: var(--text-primary) !important;
-        }
-
-        .act-btn {
-            width: 32px;
-            height: 32px;
-            border-radius: 6px;
-            border: 1px solid transparent;
-            background: transparent;
-            color: var(--text-quaternary);
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            transition: all var(--transition-base);
-            font-size: 0.8rem;
-        }
-
-        .act-btn:hover {
-            transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .search-inline {
@@ -718,12 +657,6 @@ $transfertsData = getTransferts($pdo, $search, $produit_filter, $boutique_filter
                 padding: 4px 6px;
             }
 
-            .table .act-btn {
-                width: 26px;
-                height: 26px;
-                font-size: 0.65rem;
-            }
-
             .page-heading h2 {
                 font-size: 1.2rem;
             }
@@ -808,13 +741,12 @@ $transfertsData = getTransferts($pdo, $search, $produit_filter, $boutique_filter
                             <th>Source</th>
                             <th>Destination</th>
                             <th>Qté (base)</th>
-                            <th class="text-end">Actions</th>
                         </tr>
                     </thead>
                     <tbody id="tableBody">
                         <?php if (empty($transfertsData['transferts'])): ?>
                             <tr>
-                                <td colspan="7" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucun transfert</td>
+                                <td colspan="6" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucun transfert</td>
                             </tr>
                             <?php else: foreach ($transfertsData['transferts'] as $t): ?>
                                 <tr>
@@ -824,9 +756,6 @@ $transfertsData = getTransferts($pdo, $search, $produit_filter, $boutique_filter
                                     <td><?= e($t['nom_source']) ?></td>
                                     <td><?= e($t['nom_dest']) ?></td>
                                     <td><?= $t['quantite'] ?></td>
-                                    <td class="text-end">
-                                        <button class="act-btn v viewBtn" data-transfert="<?= e($t['transfert_id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
-                                    </td>
                                 </tr>
                         <?php endforeach;
                         endif; ?>
@@ -940,34 +869,6 @@ $transfertsData = getTransferts($pdo, $search, $produit_filter, $boutique_filter
         </div>
     </div>
 
-    <!-- Modal Détail -->
-    <div class="modal fade" id="detailModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-lg modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold"><i class="bi bi-eye text-primary me-2"></i> Détail du transfert</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="table-responsive">
-                        <table class="table table-sm table-bordered">
-                            <thead class="table-light">
-                                <tr>
-                                    <th>Produit</th>
-                                    <th>Unité</th>
-                                    <th>Quantité (base)</th>
-                                    <th>Type</th>
-                                    <th>Boutique</th>
-                                </tr>
-                            </thead>
-                            <tbody id="detailLignes"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
@@ -1007,38 +908,6 @@ $transfertsData = getTransferts($pdo, $search, $produit_filter, $boutique_filter
                 transfertModal.show();
             });
 
-            // ---- Détail AJAX ----
-            function voirDetailTransfert(transfertId) {
-                fetch('<?= $_SERVER['PHP_SELF'] ?>', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded'
-                        },
-                        body: 'action=get_transfert_detail&transfert_id=' + encodeURIComponent(transfertId)
-                    })
-                    .then(r => r.json())
-                    .then(data => {
-                        let html = '';
-                        data.forEach(ligne => {
-                            html += `<tr>
-                    <td>${ligne.titre_produit}</td>
-                    <td>${ligne.unite_affichage || 'Unité'}</td>
-                    <td>${ligne.quantite_commande}</td>
-                    <td><span class="badge ${ligne.badge_class}">${ligne.type_mouvement}</span></td>
-                    <td>${ligne.nom_boutique}</td>
-                </tr>`;
-                        });
-                        document.getElementById('detailLignes').innerHTML = html;
-                        new bootstrap.Modal(document.getElementById('detailModal')).show();
-                    })
-                    .catch(err => alert('Erreur: ' + err));
-            }
-
-            $(document).on('click', '.viewBtn', function() {
-                const transfertId = $(this).data('transfert');
-                voirDetailTransfert(transfertId);
-            });
-
             // ---- Recherche et filtres AJAX ----
             function rechercher(page) {
                 page = page || 1;
@@ -1065,11 +934,6 @@ $transfertsData = getTransferts($pdo, $search, $produit_filter, $boutique_filter
                             e.preventDefault();
                             var p = $(this).data('page');
                             if (p) rechercher(p);
-                        });
-                        // Ré-attacher les événements des boutons de détail (les nouveaux boutons)
-                        $('.viewBtn').off('click').on('click', function() {
-                            const id = $(this).data('transfert');
-                            voirDetailTransfert(id);
                         });
                     },
                     error: function() {

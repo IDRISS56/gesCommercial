@@ -1,5 +1,10 @@
 <?php
-// vc.php – Caisse - Vente Comptoir
+// vc.php – Caisse - Vente Comptoir (refonte complète avec ticket PDF)
+
+// Nettoyage du buffer
+while (ob_get_level()) ob_end_clean();
+ob_start();
+
 session_start();
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
@@ -7,7 +12,9 @@ if (!isset($_SESSION['user_id'])) {
 }
 
 require_once 'databases/database.php';
+require_once 'librairies/fpdf/fpdf.php';
 
+// Vérification de l'utilisateur
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
 $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -20,6 +27,7 @@ if (!$user) {
 define('USER_ID', $_SESSION['user_id']);
 define('USER_BOUTIQUE', $user['boutique_id'] ?? null);
 
+// Récupération de la caisse active
 $stmt = $pdo->query("SELECT code_caisse FROM caisse WHERE etat_caisse = 'Actif' LIMIT 1");
 $caisse = $stmt->fetch(PDO::FETCH_ASSOC);
 if (!$caisse) {
@@ -28,11 +36,13 @@ if (!$caisse) {
 }
 define('CAISSE_ID', $caisse['code_caisse'] ?? '1');
 
+// CSRF Token
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 $csrf_token = $_SESSION['csrf_token'];
 
+// ---- FONCTIONS UTILITAIRES ----
 function e($str)
 {
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
@@ -41,7 +51,10 @@ function fmt($n)
 {
     return number_format(floatval($n), 0, ',', ' ');
 }
-
+function safeText($str)
+{
+    return iconv('UTF-8', 'ISO-8859-1//TRANSLIT', $str);
+}
 function columnExists($pdo, $table, $col)
 {
     try {
@@ -51,23 +64,20 @@ function columnExists($pdo, $table, $col)
         return false;
     }
 }
+
+// Vérification des colonnes
 $produit_has_categorie = columnExists($pdo, 'produit', 'categorie_produit');
 $contact_has_email = columnExists($pdo, 'contact', 'email_contact');
 $contact_has_type = columnExists($pdo, 'contact', 'type_contact');
 $contact_has_statut = columnExists($pdo, 'contact', 'statut_contact');
 
-// Ajouter la colonne quantite si elle n'existe pas dans lot_produit
+// Ajout colonne quantite dans lot_produit si absente
 try {
     $pdo->exec("ALTER TABLE lot_produit ADD COLUMN quantite INT NOT NULL DEFAULT 0");
 } catch (PDOException $e) {
 }
 
-$scriptUrl = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https://' : 'http://')
-    . $_SERVER['HTTP_HOST']
-    . rtrim(dirname($_SERVER['SCRIPT_NAME']), '/')
-    . '/' . basename($_SERVER['SCRIPT_NAME']);
-
-// ==================== ACTIONS AJAX ====================
+// ---- TRAITEMENT DES ACTIONS AJAX ----
 $input = json_decode(file_get_contents('php://input'), true);
 if ($input) {
     $_REQUEST = array_merge($_REQUEST, $input);
@@ -84,7 +94,6 @@ if ($isAjax && $action) {
 
     try {
         switch ($action) {
-
             case 'load_products':
             case 'search_products':
                 $q = trim($_REQUEST['q'] ?? '');
@@ -363,6 +372,9 @@ if ($isAjax && $action) {
                     throw $e;
                 }
                 exit;
+
+            default:
+                throw new Exception('Action inconnue');
         }
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage(), 'message' => $e->getMessage()]);
@@ -370,10 +382,395 @@ if ($isAjax && $action) {
     }
 }
 
-// ==================== DONNÉES PAGE ====================
+// ---- EXPORT PDF : TICKET ou FACTURE COMPLÈTE ----
+if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST['numero'])) {
+    error_reporting(0);
+    while (ob_get_level()) ob_end_clean();
+
+    $numero = $_POST['numero'];
+    $format = $_POST['format'] ?? 'facture'; // 'ticket' ou 'facture'
+
+    // Récupération des données de la facture
+    $stmt = $pdo->prepare("SELECT f.*, c.nom_prenom_contact, c.adresse_contact, c.telephone_contact, c.email_contact,
+        u.nom_prenom AS vendeur_nom
+        FROM facture f
+        LEFT JOIN contact c ON f.contact_id = c.code_contact
+        LEFT JOIN utilisateur u ON f.utilisateur_id = u.id
+        WHERE f.numero_facture = ?");
+    $stmt->execute([$numero]);
+    $facture = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$facture) die('Facture introuvable');
+
+    // Lignes de commande
+    $stmt = $pdo->prepare("SELECT c.*, p.titre_produit
+        FROM commande c
+        LEFT JOIN produit p ON c.produit_id = p.code_produit
+        WHERE c.facture_id = ?");
+    $stmt->execute([$numero]);
+    $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // --- SI FORMAT TICKET (design de la photo) ---
+    if ($format === 'ticket') {
+        $pdf = new FPDF('P', 'mm', array(80, 200)); // format ticket 80mm large
+        $pdf->AddPage();
+        $pdf->SetFont('Courier', '', 10); // police monospace
+        $pdf->SetMargins(5, 5, 5);
+        $pdf->SetAutoPageBreak(true, 5);
+
+        // En-tête
+        $pdf->SetFont('Courier', 'B', 14);
+        $pdf->Cell(70, 8, 'CAISSE COMPTOIR', 0, 1, 'C');
+        $pdf->SetFont('Courier', '', 10);
+        $date = date('d/m/Y H:i:s');
+        $pdf->Cell(70, 5, $date, 0, 1, 'C');
+        $pdf->Ln(2);
+
+        // Client et facture
+        $client = $facture['nom_prenom_contact'] ?? 'Client inconnu';
+        $code = $facture['contact_id'] ?? '';
+        $pdf->Cell(70, 5, 'Client: ' . $client . ' (' . $code . ')', 0, 1, 'L');
+        $pdf->Cell(70, 5, 'Facture: ' . $facture['numero_facture'], 0, 1, 'L');
+        $pdf->Ln(2);
+
+        // Séparateur
+        $pdf->SetDrawColor(0);
+        $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
+        $pdf->Ln(2);
+
+        // En-têtes tableau
+        $pdf->SetFont('Courier', 'B', 9);
+        $pdf->Cell(30, 5, 'Produit', 0, 0, 'L');
+        $pdf->Cell(12, 5, 'Qte', 0, 0, 'C');
+        $pdf->Cell(15, 5, 'Prix', 0, 0, 'R');
+        $pdf->Cell(13, 5, 'Montant', 0, 1, 'R');
+        $pdf->SetFont('Courier', '', 9);
+
+        // Lignes produits
+        foreach ($lignes as $l) {
+            $nom = substr($l['titre_produit'] ?? $l['produit_id'], 0, 20);
+            $qte = (int)$l['quantite_commande'];
+            $pu = (float)$l['prix_commande'];
+            $total = (float)$l['montant_commande'];
+            $pdf->Cell(30, 5, $nom, 0, 0, 'L');
+            $pdf->Cell(12, 5, $qte, 0, 0, 'C');
+            $pdf->Cell(15, 5, number_format($pu, 0, ',', ' ') . ' FCFA', 0, 0, 'R');
+            $pdf->Cell(13, 5, number_format($total, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
+        }
+
+        // Séparateur
+        $pdf->Ln(2);
+        $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
+        $pdf->Ln(2);
+
+        // Totaux
+        $ht = (float)$facture['montant_ht'];
+        $ttc = (float)$facture['montant_ttc'];
+        $avance = (float)$facture['avance'];
+        $pdf->SetFont('Courier', 'B', 10);
+        $pdf->Cell(50, 6, 'HT', 0, 0, 'L');
+        $pdf->Cell(20, 6, number_format($ht, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
+        $pdf->Cell(50, 6, 'TTC', 0, 0, 'L');
+        $pdf->Cell(20, 6, number_format($ttc, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
+        $pdf->Cell(50, 6, 'Avance', 0, 0, 'L');
+        $pdf->Cell(20, 6, number_format($avance, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
+
+        // Séparateur final
+        $pdf->Ln(2);
+        $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
+        $pdf->Ln(3);
+
+        // Message de remerciement
+        $pdf->SetFont('Courier', 'B', 12);
+        $pdf->Cell(70, 8, 'Merci !', 0, 1, 'C');
+
+        // Sortie
+        while (ob_get_level()) ob_end_clean();
+        $pdf->Output('I', 'Ticket_' . $facture['numero_facture'] . '.pdf');
+        exit;
+    }
+
+    // --- SINON : FACTURE COMPLÈTE (paysage) ---
+    // (Repris de l'original, avec le design de l'exemple)
+    $boutique = $pdo->query("SELECT * FROM boutique WHERE etat_boutique = 'Actif' LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+    if (!$boutique) {
+        $boutique = [
+            'nom_boutique' => 'ABC DISTRIBUTION SARL',
+            'adresse_boutique' => '01 BP 1234 Bouaké 01',
+            'ville_boutique' => 'Bouaké',
+            'pays_boutique' => 'Côte d\'Ivoire',
+            'telephone_boutique' => '+225 07 08 09 10 11',
+            'email_boutique' => 'contact@abcdistribution.ci'
+        ];
+    }
+
+    $pdf = new FPDF('L', 'mm', 'A4');
+    $pdf->AddPage();
+    $pdf->SetFont('Arial', '', 10);
+
+    $blueDark = [0, 51, 102];
+    $blueLight = [240, 245, 255];
+    $grayBg = [245, 245, 245];
+
+    $toLatin = function ($chaine) {
+        return safeText($chaine);
+    };
+
+    // En-tête
+    $yStart = 10;
+    $pdf->SetFont('Arial', 'B', 14);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text(10, $yStart + 6, $toLatin(strtoupper($boutique['nom_boutique'])));
+
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetTextColor(80, 80, 80);
+    $pdf->Text(10, $yStart + 11, $toLatin("Commerce Général - Distribution de Produits"));
+    $pdf->Text(10, $yStart + 15, $toLatin($boutique['adresse_boutique'] . ', ' . $boutique['ville_boutique'] . ', ' . $boutique['pays_boutique']));
+    $pdf->Text(10, $yStart + 19, $toLatin("Tél. : " . $boutique['telephone_boutique']));
+    $pdf->Text(10, $yStart + 23, $toLatin("Email : " . $boutique['email_boutique']));
+    $pdf->Text(10, $yStart + 27, $toLatin("N° CC : CI-BOUA-2020-B-12345   N° Contribuable : 1949444F"));
+
+    // Titre
+    $pdf->SetFont('Arial', 'B', 24);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text(125, $yStart + 10, $toLatin('FACTURE'));
+
+    // Numéro
+    $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Rect(115, $yStart + 13, 50, 10, 'F');
+    $pdf->SetTextColor(255, 255, 255);
+    $pdf->SetFont('Arial', 'B', 12);
+    $pdf->Text(122, $yStart + 20, $toLatin('N° ' . $facture['numero_facture']));
+
+    // Infos droite
+    $pdf->SetFont('Arial', '', 9);
+    $pdf->SetTextColor(0, 0, 0);
+    $xRight = 200;
+    $yInfo = $yStart;
+    $pdf->Text($xRight, $yInfo + 5, $toLatin('Date de facture'));
+    $pdf->Text($xRight + 40, $yInfo + 5, ': ' . date('d/m/Y', strtotime($facture['date_facture'])));
+    $echeance = date('d/m/Y', strtotime($facture['date_facture'] . ' + 30 days'));
+    $pdf->Text($xRight, $yInfo + 10, $toLatin("Date d'échéance"));
+    $pdf->Text($xRight + 40, $yInfo + 10, ': ' . $echeance);
+    $pdf->Text($xRight, $yInfo + 15, $toLatin("Mode de paiement"));
+    $pdf->Text($xRight + 40, $yInfo + 15, ': ' . ($facture['mode_reglement'] ?? 'Virement bancaire'));
+
+    // Séparateur
+    $pdf->SetDrawColor(200, 200, 200);
+    $pdf->Line(10, 42, 287, 42);
+
+    // Blocs VENDEUR / CLIENT
+    $yBlocks = 48;
+    $wBlock = (277 - 10) / 2;
+    $drawAddressBlock = function ($pdf, $x, $y, $w, $title, $name, $address, $phone, $email) use ($toLatin, $blueDark, $grayBg) {
+        $h = 30;
+        $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->Rect($x, $y, 40, 6, 'F');
+        $pdf->SetTextColor(255, 255, 255);
+        $pdf->SetFont('Arial', 'B', 8);
+        $pdf->Text($x + 3, $y + 4.5, $toLatin(strtoupper($title)));
+        $pdf->SetFillColor($grayBg[0], $grayBg[1], $grayBg[2]);
+        $pdf->Rect($x, $y + 6, $w, $h - 6, 'F');
+        $pdf->SetDrawColor(200, 200, 200);
+        $pdf->Rect($x, $y + 6, $w, $h - 6, 'D');
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->SetFont('Arial', 'B', 9);
+        $pdf->Text($x + 3, $y + 13, $toLatin($name));
+        $pdf->SetFont('Arial', '', 8);
+        $pdf->Text($x + 3, $y + 18, $toLatin($address));
+        $pdf->Text($x + 3, $y + 23, $toLatin('Tél. : ' . $phone));
+        $pdf->Text($x + 3, $y + 28, $toLatin('Email : ' . $email));
+    };
+
+    $drawAddressBlock(
+        $pdf,
+        10,
+        $yBlocks,
+        $wBlock,
+        'VENDEUR',
+        $boutique['nom_boutique'],
+        $boutique['ville_boutique'] . ', ' . $boutique['pays_boutique'],
+        $boutique['telephone_boutique'],
+        $boutique['email_boutique']
+    );
+
+    $drawAddressBlock(
+        $pdf,
+        10 + $wBlock + 10,
+        $yBlocks,
+        $wBlock,
+        'CLIENT',
+        $facture['nom_prenom_contact'],
+        $facture['adresse_contact'] ?? '',
+        $facture['telephone_contact'] ?? '',
+        $facture['email_contact'] ?? ''
+    );
+
+    // Tableau des lignes
+    $yTable = 80;
+    $pageBottom = 195;
+    $colWidths = [25, 100, 28, 22, 27, 35, 40];
+    $headers = ['RÉFÉRENCE', 'DÉSIGNATION', 'NB UNITÉ/CARTON', 'CARTON', 'QTÉ (UNITÉ)', 'P.U. (FCFA)', 'MONTANT (FCFA)'];
+    $headerH = 7;
+    $rowH = 7;
+
+    $drawTableHeader = function () use ($pdf, $colWidths, $headers, $headerH, $toLatin, $blueDark, &$yTable) {
+        $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->SetTextColor(255, 255, 255);
+        $pdf->SetFont('Arial', 'B', 7);
+        $x = 10;
+        foreach ($headers as $i => $h) {
+            $label = $toLatin($h);
+            $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
+            $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
+            $x += $colWidths[$i];
+        }
+    };
+    $drawTableHeader();
+
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->SetFont('Arial', '', 8);
+    $yCurrent = $yTable + $headerH;
+    $totalHT = 0;
+
+    foreach ($lignes as $ligne) {
+        if ($yCurrent + $rowH > $pageBottom) {
+            $pdf->AddPage();
+            $yTable = 15;
+            $yCurrent = $yTable + $headerH;
+            $drawTableHeader();
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', '', 8);
+        }
+
+        $ref = $ligne['produit_id'];
+        $des = substr($ligne['titre_produit'] ?? $ligne['produit_id'], 0, 45);
+        $unites_par_carton = (int)($ligne['facteur_conversion'] ?? 1);
+        $qte_commande = (int)$ligne['quantite_commande'];
+        $nb_cartons = ($unites_par_carton > 0) ? ceil($qte_commande / $unites_par_carton) : 0;
+        $pu = (float)$ligne['prix_commande'];
+        $total_ligne = (float)$ligne['montant_commande'];
+        $totalHT += $total_ligne;
+
+        $data = [
+            $ref,
+            $des,
+            $unites_par_carton,
+            $nb_cartons,
+            $qte_commande,
+            number_format($pu, 0, ',', ' '),
+            number_format($total_ligne, 0, ',', ' ')
+        ];
+
+        $x = 10;
+        foreach ($data as $i => $val) {
+            $align = ($i >= 2 && $i != 3) ? 'C' : (($i >= 5) ? 'R' : 'L');
+            $label = $toLatin((string)$val);
+            $txtX = ($align == 'R')
+                ? $x + $colWidths[$i] - 2 - $pdf->GetStringWidth($label)
+                : (($align == 'C') ? $x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2) : $x + 1);
+
+            $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
+            $pdf->Text($txtX, $yCurrent + 5, $label);
+            $x += $colWidths[$i];
+        }
+        $yCurrent += $rowH;
+    }
+
+    // Totaux
+    $yTotals = $yCurrent + 6;
+    $wObs = 170;
+    $hObs = 28;
+    $pdf->SetDrawColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->SetLineWidth(0.3);
+    $pdf->Rect(10, $yTotals, $wObs, $hObs, 'D');
+    $pdf->SetFont('Arial', 'B', 9);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text(12, $yTotals + 6, $toLatin('Observations :'));
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->SetXY(12, $yTotals + 9);
+    $pdf->MultiCell($wObs - 4, 5, $toLatin($facture['titre_facture'] ?? "Merci de votre confiance.\nVeuillez effectuer le paiement avant la date d'échéance."), 0, 'L');
+
+    // Bloc totaux
+    $xTot = 10 + $wObs + 10;
+    $wTot = 287 - $xTot;
+    $hTot = 7;
+    $pdf->SetFont('Arial', '', 9);
+    $pdf->SetTextColor(0, 0, 0);
+
+    $taxe = (float)($facture['taxe'] ?? 0);
+    $remise = (float)($facture['remise'] ?? 0);
+    $montantTtcSaisi = (float)($facture['montant_ttc'] ?? 0);
+    $totalTTC = $montantTtcSaisi > 0 ? $montantTtcSaisi : ($totalHT * (1 + $taxe / 100) - $remise);
+
+    $pdf->Rect($xTot, $yTotals, $wTot, $hTot, 'D');
+    $pdf->Text($xTot + 2, $yTotals + 5, $toLatin('TOTAL HORS TAXES (HT)'));
+    $pdf->SetXY($xTot, $yTotals + 5);
+    $pdf->Cell($wTot - 2, 0, number_format($totalHT, 0, ',', ' '), 0, 0, 'R');
+
+    $pdf->Rect($xTot, $yTotals + $hTot, $wTot, $hTot, 'D');
+    $pdf->Text($xTot + 2, $yTotals + $hTot + 5, $toLatin('TVA (' . $taxe . '%)'));
+    $pdf->SetXY($xTot, $yTotals + $hTot + 5);
+    $pdf->Cell($wTot - 2, 0, number_format($totalHT * $taxe / 100, 0, ',', ' '), 0, 0, 'R');
+
+    $pdf->Rect($xTot, $yTotals + ($hTot * 2), $wTot, $hTot, 'D');
+    $pdf->Text($xTot + 2, $yTotals + ($hTot * 2) + 5, $toLatin('REMISE'));
+    $pdf->SetXY($xTot, $yTotals + ($hTot * 2) + 5);
+    $pdf->Cell($wTot - 2, 0, number_format($remise, 0, ',', ' '), 0, 0, 'R');
+
+    $pdf->SetFillColor($blueLight[0], $blueLight[1], $blueLight[2]);
+    $pdf->Rect($xTot, $yTotals + ($hTot * 3), $wTot, $hTot + 2, 'FD');
+    $pdf->SetFont('Arial', 'B', 10);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text($xTot + 2, $yTotals + ($hTot * 3) + 5.5, $toLatin('NET À PAYER (TTC)'));
+    $pdf->SetXY($xTot, $yTotals + ($hTot * 3) + 5.5);
+    $pdf->Cell($wTot - 2, 0, number_format($totalTTC, 0, ',', ' '), 0, 0, 'R');
+
+    // Signatures
+    $hSig = 26;
+    $ySig = $yTotals + $hObs + 8;
+    if ($ySig + $hSig > $pageBottom + 15) {
+        $pdf->AddPage();
+        $ySig = 20;
+    }
+    $wSig = 133;
+
+    $pdf->SetDrawColor(200, 200, 200);
+    $pdf->Rect(10, $ySig, $wSig, $hSig, 'D');
+    $pdf->SetFont('Arial', 'B', 9);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text(12, $ySig + 5, $toLatin('Le vendeur'));
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->Text(12, $ySig + 10, $toLatin('Nom et Signature'));
+    $pdf->SetDrawColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Rect(60, $ySig + 5, 70, $hSig - 6, 'D');
+    $pdf->SetFont('Arial', 'B', 7);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text(63, $ySig + 9, $toLatin($boutique['nom_boutique']));
+    $pdf->SetFont('Arial', '', 6);
+    $pdf->Text(63, $ySig + 13, $toLatin($boutique['adresse_boutique']));
+    $pdf->Text(63, $ySig + 17, $toLatin('Tél. : ' . $boutique['telephone_boutique']));
+
+    $xClient = 10 + $wSig + 21;
+    $pdf->SetDrawColor(200, 200, 200);
+    $pdf->Rect($xClient, $ySig, $wSig, $hSig, 'D');
+    $pdf->SetFont('Arial', 'B', 9);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text($xClient + 2, $ySig + 5, $toLatin('Le client'));
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->Text($xClient + 2, $ySig + 10, $toLatin('Nom et Signature'));
+
+    while (ob_get_level()) ob_end_clean();
+    $pdf->Output('I', 'Facture_' . $facture['numero_facture'] . '.pdf');
+    exit;
+}
+
+// ---- RÉCUPÉRATION DES DONNÉES POUR LA PAGE ----
 $taxes = $pdo->query("SELECT * FROM taxe WHERE etat_taxe = 'Actif' ORDER BY type_taxe, taux_taxe")->fetchAll();
 $caisse = $pdo->query("SELECT * FROM caisse WHERE code_caisse = '" . CAISSE_ID . "'")->fetch();
-$user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->fetch();
+$userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->fetch();
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -384,23 +781,44 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
     <title>Caisse - Vente Comptoir</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
-        /* Styles de base (inchangés) */
+        /* Styles identiques à la version précédente (inchangés) */
         :root {
-            --blue-primary: #2563eb;
-            --blue-dark: #1d4ed8;
-            --blue-light: #eff6ff;
-            --blue-border: #bfdbfe;
-            --bg-app: #f8fafc;
-            --card-white: #ffffff;
-            --text-dark: #1e293b;
-            --text-muted: #64748b;
-            --border-light: #e2e8f0;
-            --danger: #ef4444;
-            --success: #10b981;
-            --warning: #f59e0b;
-            --radius: 12px;
+            --color-primary: #4f46e5;
+            --color-primary-dark: #3730a3;
+            --color-primary-soft: #eef2ff;
+            --color-success: #10b981;
+            --color-success-soft: #d1fae5;
+            --color-warning: #f59e0b;
+            --color-warning-soft: #fef3c7;
+            --color-danger: #ef4444;
+            --color-danger-soft: #fee2e2;
+            --color-gray-50: #f8fafc;
+            --color-gray-100: #f1f5f9;
+            --color-gray-200: #e2e8f0;
+            --color-gray-300: #cbd5e1;
+            --color-gray-400: #94a3b8;
+            --color-gray-500: #64748b;
+            --color-gray-600: #475569;
+            --color-gray-700: #334155;
+            --color-gray-800: #1e293b;
+            --color-gray-900: #0f172a;
+            --bg-body: #f1f5f9;
+            --bg-surface: #ffffff;
+            --bg-muted: #f8fafc;
+            --border-color: #e2e8f0;
+            --text-primary: #0f172a;
+            --text-secondary: #334155;
+            --text-tertiary: #64748b;
+            --text-quaternary: #94a3b8;
+            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.08);
+            --radius-sm: 10px;
+            --radius-md: 14px;
+            --radius-lg: 20px;
+            --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
         }
 
         * {
@@ -411,13 +829,24 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         body {
             font-family: 'Inter', sans-serif;
-            background: var(--bg-app);
-            color: var(--text-dark);
+            background: var(--bg-body);
+            color: var(--text-primary);
             height: 100vh;
             overflow: hidden;
             font-size: 14px;
             display: flex;
             flex-direction: column;
+        }
+
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6 {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 700;
+            letter-spacing: -0.02em;
         }
 
         button {
@@ -462,43 +891,39 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .pos-right {
             width: 480px;
-            background: var(--card-white);
-            border-left: 1px solid var(--border-light);
+            background: var(--bg-surface);
+            border-left: 1px solid var(--border-color);
             display: flex;
             flex-direction: column;
             flex-shrink: 0;
             min-height: 0;
         }
 
-        .search-zone {
-            margin-bottom: 12px;
-        }
-
         .search-box {
             display: flex;
             align-items: center;
-            background: var(--card-white);
-            border: 2px solid var(--border-light);
-            border-radius: var(--radius);
+            background: var(--bg-surface);
+            border: 2px solid var(--border-color);
+            border-radius: var(--radius-sm);
             padding: 0 16px;
             height: 52px;
-            transition: all .2s;
+            transition: all var(--transition-base);
             position: relative;
         }
 
         .search-box:focus-within {
-            border-color: var(--blue-primary);
-            box-shadow: 0 0 0 4px var(--blue-light);
+            border-color: var(--color-primary);
+            box-shadow: 0 0 0 4px var(--color-primary-soft);
         }
 
         .search-box.is-loading {
-            border-color: var(--warning);
+            border-color: var(--color-warning);
             opacity: .8;
         }
 
         .search-box i.bi-search {
             font-size: 20px;
-            color: var(--blue-primary);
+            color: var(--color-primary);
             margin-right: 12px;
         }
 
@@ -508,11 +933,11 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             background: transparent;
             font-size: 15px;
             font-weight: 500;
-            color: var(--text-dark);
+            color: var(--text-primary);
         }
 
         .search-box input::placeholder {
-            color: var(--text-muted);
+            color: var(--text-tertiary);
         }
 
         .search-box .clear-btn {
@@ -524,14 +949,14 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .search-box .clear-btn:hover {
-            color: var(--danger);
+            color: var(--color-danger);
         }
 
         .search-box .result-count {
             font-size: 11px;
             font-weight: 600;
-            color: var(--text-muted);
-            background: var(--bg-app);
+            color: var(--text-tertiary);
+            background: var(--bg-muted);
             padding: 4px 10px;
             border-radius: 6px;
             white-space: nowrap;
@@ -539,15 +964,15 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .search-box .result-count.has-results {
-            color: var(--blue-primary);
-            background: var(--blue-light);
+            color: var(--color-primary);
+            background: var(--color-primary-soft);
         }
 
         .search-box .spinner-inline {
             width: 18px;
             height: 18px;
-            border: 2.5px solid var(--border-light);
-            border-top-color: var(--blue-primary);
+            border: 2.5px solid var(--border-color);
+            border-top-color: var(--color-primary);
             border-radius: 50%;
             animation: spin .6s linear infinite;
             margin-right: 10px;
@@ -562,7 +987,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .kbd-hint {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             margin-top: 4px;
             display: flex;
             align-items: center;
@@ -571,7 +996,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .kbd {
             background: #f1f5f9;
-            border: 1px solid var(--border-light);
+            border: 1px solid var(--border-color);
             padding: 1px 5px;
             border-radius: 3px;
             font-family: monospace;
@@ -596,23 +1021,23 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             border-radius: 8px;
             font-size: 12px;
             font-weight: 600;
-            background: var(--card-white);
-            color: var(--text-muted);
-            border: 1.5px solid var(--border-light);
+            background: var(--bg-surface);
+            color: var(--text-tertiary);
+            border: 1.5px solid var(--border-color);
             transition: all .15s;
             white-space: nowrap;
         }
 
         .cat-btn:hover {
-            border-color: var(--blue-border);
-            color: var(--blue-primary);
-            background: var(--blue-light);
+            border-color: #bfdbfe;
+            color: var(--color-primary);
+            background: var(--color-primary-soft);
         }
 
         .cat-btn.active {
-            background: var(--blue-primary);
+            background: var(--color-primary);
             color: #fff;
-            border-color: var(--blue-primary);
+            border-color: var(--color-primary);
         }
 
         .products-scroll {
@@ -634,7 +1059,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             align-items: center;
             justify-content: center;
             height: 100%;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             text-align: center;
             padding-top: 40px;
         }
@@ -643,13 +1068,13 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             font-size: 48px;
             margin-bottom: 12px;
             opacity: .15;
-            color: var(--blue-primary);
+            color: var(--color-primary);
         }
 
         .empty-state h3 {
             font-size: 15px;
             font-weight: 600;
-            color: var(--text-dark);
+            color: var(--text-primary);
             margin-bottom: 4px;
         }
 
@@ -658,9 +1083,9 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .product-card {
-            background: var(--card-white);
-            border: 1px solid var(--border-light);
-            border-radius: var(--radius);
+            background: var(--bg-surface);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
             padding: 14px;
             cursor: pointer;
             transition: all .15s ease;
@@ -672,13 +1097,13 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .product-card:hover {
-            border-color: var(--blue-primary);
-            box-shadow: 0 4px 12px rgba(37, 99, 235, .12);
+            border-color: var(--color-primary);
+            box-shadow: 0 4px 12px rgba(79, 70, 229, .12);
             transform: translateY(-2px);
         }
 
         .product-card.in-cart {
-            border-color: var(--success);
+            border-color: var(--color-success);
             background: #f0fdf4;
         }
 
@@ -687,7 +1112,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             position: absolute;
             top: 8px;
             right: 8px;
-            background: var(--success);
+            background: var(--color-success);
             color: #fff;
             width: 22px;
             height: 22px;
@@ -709,7 +1134,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .pc-title {
             font-size: 13px;
             font-weight: 600;
-            color: var(--text-dark);
+            color: var(--text-primary);
             line-height: 1.4;
             flex: 1;
             padding-right: 6px;
@@ -722,8 +1147,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .pc-cat {
             font-size: 10px;
             font-weight: 600;
-            color: var(--blue-primary);
-            background: var(--blue-light);
+            color: var(--color-primary);
+            background: var(--color-primary-soft);
             padding: 2px 8px;
             border-radius: 4px;
             margin-bottom: 6px;
@@ -754,7 +1179,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .pc-bottom {
-            border-top: 1px dashed var(--border-light);
+            border-top: 1px dashed var(--border-color);
             padding-top: 10px;
             display: flex;
             justify-content: space-between;
@@ -764,20 +1189,19 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .pc-price {
             font-size: 17px;
             font-weight: 700;
-            color: var(--blue-primary);
+            color: var(--color-primary);
         }
 
         .pc-code {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             font-family: monospace;
         }
 
-        /* ===== PANIER - 2 colonnes ===== */
         .cart-header {
             padding: 10px 16px;
-            border-bottom: 1px solid var(--border-light);
-            background: var(--card-white);
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-surface);
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -789,11 +1213,11 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             display: flex;
             align-items: center;
             gap: 6px;
-            color: var(--text-dark);
+            color: var(--text-primary);
         }
 
         .cart-badge {
-            background: var(--blue-primary);
+            background: var(--color-primary);
             color: #fff;
             font-size: 11px;
             padding: 2px 8px;
@@ -803,8 +1227,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .client-zone {
             padding: 6px 12px;
-            border-bottom: 1px solid var(--border-light);
-            background: var(--blue-light);
+            border-bottom: 1px solid var(--border-color);
+            background: var(--color-primary-soft);
         }
 
         .client-search-wrapper {
@@ -815,7 +1239,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .client-search-wrapper input {
             flex: 1;
-            border: 1px solid var(--blue-border);
+            border: 1px solid #bfdbfe;
             border-radius: 6px;
             padding: 6px 10px;
             font-size: 12px;
@@ -825,12 +1249,12 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .client-search-wrapper input:focus {
-            border-color: var(--blue-primary);
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, .1);
+            border-color: var(--color-primary);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, .1);
         }
 
         .client-search-wrapper .btn-add {
-            background: var(--blue-primary);
+            background: var(--color-primary);
             color: #fff;
             width: 34px;
             height: 34px;
@@ -843,7 +1267,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .client-search-wrapper .btn-add:hover {
-            background: var(--blue-dark);
+            background: var(--color-primary-dark);
         }
 
         .client-selected {
@@ -851,7 +1275,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             align-items: center;
             justify-content: space-between;
             background: #fff;
-            border: 1px solid var(--blue-primary);
+            border: 1px solid var(--color-primary);
             border-radius: 6px;
             padding: 6px 10px;
         }
@@ -859,7 +1283,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .client-selected .info h5 {
             font-size: 13px;
             font-weight: 700;
-            color: var(--blue-dark);
+            color: var(--color-primary-dark);
             margin: 0;
             display: flex;
             align-items: center;
@@ -868,13 +1292,13 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .client-selected .info p {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             margin: 0;
         }
 
         .client-selected .btn-change {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             text-decoration: underline;
             background: none;
         }
@@ -885,7 +1309,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             left: 0;
             right: 40px;
             background: #fff;
-            border: 1px solid var(--border-light);
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             margin-top: 2px;
             box-shadow: 0 6px 20px rgba(0, 0, 0, .12);
@@ -897,11 +1321,11 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .customer-dropdown .dd-header {
             padding: 6px 12px;
-            background: var(--blue-light);
+            background: var(--color-primary-soft);
             border-radius: 8px 8px 0 0;
             font-size: 10px;
             font-weight: 600;
-            color: var(--blue-dark);
+            color: var(--color-primary-dark);
             display: flex;
             justify-content: space-between;
         }
@@ -917,15 +1341,15 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .customer-item:hover {
-            background: var(--blue-light);
+            background: var(--color-primary-soft);
         }
 
         .customer-item .ci-avatar {
             width: 30px;
             height: 30px;
             border-radius: 6px;
-            background: var(--blue-light);
-            color: var(--blue-primary);
+            background: var(--color-primary-soft);
+            color: var(--color-primary);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -937,13 +1361,13 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .customer-item .ci-body strong {
             display: block;
             font-size: 12px;
-            color: var(--text-dark);
+            color: var(--text-primary);
             font-weight: 600;
         }
 
         .customer-item .ci-body small {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             display: block;
             margin-top: 1px;
         }
@@ -977,13 +1401,13 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .customer-item:hover .ci-arrow {
-            color: var(--blue-primary);
+            color: var(--color-primary);
         }
 
         .dd-empty {
             padding: 16px;
             text-align: center;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             font-size: 12px;
         }
 
@@ -1005,7 +1429,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .recent-clients .rc-title {
             font-size: 10px;
             font-weight: 600;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             margin-bottom: 3px;
             display: flex;
             align-items: center;
@@ -1024,8 +1448,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             font-size: 10px;
             font-weight: 600;
             background: #fff;
-            color: var(--text-dark);
-            border: 1px solid var(--border-light);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
             cursor: pointer;
             transition: all .15s;
             display: flex;
@@ -1034,14 +1458,14 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .rc-chip:hover {
-            border-color: var(--blue-primary);
-            color: var(--blue-primary);
-            background: var(--blue-light);
+            border-color: var(--color-primary);
+            color: var(--color-primary);
+            background: var(--color-primary-soft);
         }
 
         .rc-chip i {
             font-size: 9px;
-            color: var(--blue-primary);
+            color: var(--color-primary);
         }
 
         .cart-items {
@@ -1061,14 +1485,14 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             align-items: center;
             justify-content: center;
             height: 100%;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
         }
 
         .cart-empty i {
             font-size: 40px;
             opacity: .15;
             margin-bottom: 8px;
-            color: var(--blue-primary);
+            color: var(--color-primary);
         }
 
         .cart-empty p {
@@ -1076,21 +1500,21 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .cart-line {
-            border: 1px solid var(--border-light);
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 8px 10px;
             display: flex;
             flex-direction: column;
             gap: 4px;
             background: #fff;
-            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, .02);
             transition: all .2s;
             height: fit-content;
         }
 
         .cart-line:hover {
-            border-color: var(--blue-primary);
-            box-shadow: 0 2px 8px rgba(37, 99, 235, .1);
+            border-color: var(--color-primary);
+            box-shadow: 0 2px 8px rgba(79, 70, 229, .1);
         }
 
         .cl-header {
@@ -1103,7 +1527,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .cl-name {
             font-size: 12px;
             font-weight: 600;
-            color: var(--text-dark);
+            color: var(--text-primary);
             flex: 1;
             white-space: nowrap;
             overflow: hidden;
@@ -1112,8 +1536,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .cl-lot {
             font-size: 9px;
-            color: var(--text-muted);
-            background: var(--bg-app);
+            color: var(--text-tertiary);
+            background: var(--bg-muted);
             padding: 0 6px;
             border-radius: 3px;
             white-space: nowrap;
@@ -1128,7 +1552,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .cl-remove:hover {
-            color: var(--danger);
+            color: var(--color-danger);
         }
 
         .cl-footer {
@@ -1140,8 +1564,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .qty-selector {
             display: flex;
             align-items: center;
-            background: var(--bg-app);
-            border: 1px solid var(--border-light);
+            background: var(--bg-muted);
+            border: 1px solid var(--border-color);
             border-radius: 4px;
             width: fit-content;
         }
@@ -1152,14 +1576,14 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             background: none;
             font-size: 14px;
             font-weight: 600;
-            color: var(--blue-primary);
+            color: var(--color-primary);
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
         .qty-selector button:hover {
-            background: var(--blue-light);
+            background: var(--color-primary-soft);
         }
 
         .qty-selector span {
@@ -1167,24 +1591,24 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             text-align: center;
             font-weight: 600;
             font-size: 12px;
-            color: var(--text-dark);
+            color: var(--text-primary);
         }
 
         .cl-total {
             font-size: 14px;
             font-weight: 700;
-            color: var(--blue-dark);
+            color: var(--color-primary-dark);
         }
 
         .cl-unit {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             text-align: right;
         }
 
         .cart-footer {
             padding: 8px 12px;
-            border-top: 1px solid var(--border-light);
+            border-top: 1px solid var(--border-color);
             background: #fff;
         }
 
@@ -1204,7 +1628,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .split-label {
             font-size: 10px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             font-weight: 500;
             display: flex;
             align-items: center;
@@ -1212,19 +1636,19 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .split-label select {
-            border: 1px solid var(--border-light);
+            border: 1px solid var(--border-color);
             border-radius: 3px;
             padding: 1px 4px;
             font-size: 10px;
             background: #fff;
-            color: var(--text-dark);
+            color: var(--text-primary);
             width: auto;
         }
 
         .split-value {
             font-size: 13px;
             font-weight: 700;
-            color: var(--text-dark);
+            color: var(--text-primary);
         }
 
         .total-grand {
@@ -1232,21 +1656,21 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             justify-content: space-between;
             padding-top: 6px;
             margin-top: 4px;
-            border-top: 2px solid var(--border-light);
+            border-top: 2px solid var(--border-color);
             margin-bottom: 8px;
         }
 
         .total-grand span:first-child {
             font-size: 13px;
             font-weight: 700;
-            color: var(--text-dark);
+            color: var(--text-primary);
             align-self: center;
         }
 
         .total-grand span:last-child {
             font-size: 22px;
             font-weight: 800;
-            color: var(--blue-primary);
+            color: var(--color-primary);
         }
 
         .actions-row {
@@ -1256,10 +1680,10 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .btn-pay {
             flex: 2;
-            background: var(--blue-primary);
+            background: var(--color-primary);
             color: #fff;
             padding: 10px;
-            border-radius: var(--radius);
+            border-radius: var(--radius-sm);
             font-size: 13px;
             font-weight: 700;
             display: flex;
@@ -1267,11 +1691,11 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             justify-content: center;
             gap: 6px;
             transition: background .2s;
-            box-shadow: 0 4px 6px rgba(37, 99, 235, .2);
+            box-shadow: 0 4px 6px rgba(79, 70, 229, .2);
         }
 
         .btn-pay:hover:not(:disabled) {
-            background: var(--blue-dark);
+            background: var(--color-primary-dark);
         }
 
         .btn-pay:disabled {
@@ -1283,10 +1707,10 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .btn-clear {
             flex: 1;
             background: #fff;
-            color: var(--danger);
+            color: var(--color-danger);
             border: 1.5px solid #fecaca;
             padding: 8px;
-            border-radius: var(--radius);
+            border-radius: var(--radius-sm);
             font-size: 12px;
             font-weight: 600;
             transition: all .2s;
@@ -1298,10 +1722,10 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .btn-clear:hover {
             background: #fee2e2;
-            border-color: var(--danger);
+            border-color: var(--color-danger);
         }
 
-        /* Modales (inchangées) */
+        /* Modales */
         .modal-overlay {
             position: fixed;
             inset: 0;
@@ -1328,7 +1752,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .modal-head {
             padding: 16px 20px;
-            border-bottom: 1px solid var(--border-light);
+            border-bottom: 1px solid var(--border-color);
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -1340,13 +1764,13 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             display: flex;
             align-items: center;
             gap: 8px;
-            color: var(--text-dark);
+            color: var(--text-primary);
         }
 
         .modal-close {
             background: #f1f5f9;
             font-size: 18px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             width: 32px;
             height: 32px;
             border-radius: 50%;
@@ -1358,7 +1782,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .modal-close:hover {
             background: #fee2e2;
-            color: var(--danger);
+            color: var(--color-danger);
         }
 
         .modal-body {
@@ -1367,7 +1791,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .modal-foot {
             padding: 16px 20px;
-            border-top: 1px solid var(--border-light);
+            border-top: 1px solid var(--border-color);
             display: flex;
             justify-content: flex-end;
             gap: 12px;
@@ -1382,13 +1806,13 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             font-size: 12px;
             font-weight: 600;
             margin-bottom: 6px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
         }
 
         .form-group input,
         .form-group select {
             width: 100%;
-            border: 1px solid var(--border-light);
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 10px 12px;
             font-size: 14px;
@@ -1398,19 +1822,19 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .form-group input:focus,
         .form-group select:focus {
-            border-color: var(--blue-primary);
+            border-color: var(--color-primary);
             background: #fff;
-            box-shadow: 0 0 0 3px var(--blue-light);
+            box-shadow: 0 0 0 3px var(--color-primary-soft);
         }
 
         .btn-secondary {
             background: #f1f5f9;
-            color: var(--text-dark);
+            color: var(--text-primary);
             padding: 10px 16px;
             border-radius: 8px;
             font-weight: 600;
             font-size: 14px;
-            border: 1px solid var(--border-light);
+            border: 1px solid var(--border-color);
         }
 
         .btn-secondary:hover {
@@ -1418,7 +1842,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .btn-primary {
-            background: var(--blue-primary);
+            background: var(--color-primary);
             color: #fff;
             padding: 10px 16px;
             border-radius: 8px;
@@ -1428,7 +1852,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .btn-primary:hover {
-            background: var(--blue-dark);
+            background: var(--color-primary-dark);
         }
 
         .pay-modes {
@@ -1440,20 +1864,20 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .pay-mode {
             flex: 1;
             padding: 12px;
-            border: 2px solid var(--border-light);
+            border: 2px solid var(--border-color);
             border-radius: 10px;
             text-align: center;
             font-size: 13px;
             font-weight: 600;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
             background: #f8fafc;
             transition: all .2s;
         }
 
         .pay-mode.active {
-            border-color: var(--blue-primary);
-            color: var(--blue-primary);
-            background: var(--blue-light);
+            border-color: var(--color-primary);
+            color: var(--color-primary);
+            background: var(--color-primary-soft);
         }
 
         .pay-mode i {
@@ -1463,8 +1887,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .change-box {
-            background: var(--blue-light);
-            border: 1px solid var(--blue-border);
+            background: var(--color-primary-soft);
+            border: 1px solid #bfdbfe;
             padding: 16px;
             border-radius: 10px;
             text-align: center;
@@ -1473,7 +1897,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         .change-box .lbl {
             font-size: 13px;
-            color: var(--blue-dark);
+            color: var(--color-primary-dark);
             font-weight: 600;
             margin-bottom: 4px;
         }
@@ -1481,7 +1905,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .change-box .val {
             font-size: 28px;
             font-weight: 800;
-            color: var(--blue-primary);
+            color: var(--color-primary);
         }
 
         .lot-select-modal .modal-box {
@@ -1493,7 +1917,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             align-items: center;
             justify-content: space-between;
             padding: 10px 14px;
-            border: 1px solid var(--border-light);
+            border: 1px solid var(--border-color);
             border-radius: 8px;
             margin-bottom: 8px;
             cursor: pointer;
@@ -1501,13 +1925,13 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .lot-option:hover {
-            border-color: var(--blue-primary);
-            background: var(--blue-light);
+            border-color: var(--color-primary);
+            background: var(--color-primary-soft);
         }
 
         .lot-option.selected {
-            border-color: var(--blue-primary);
-            background: var(--blue-light);
+            border-color: var(--color-primary);
+            background: var(--color-primary-soft);
         }
 
         .lot-option .lot-info {
@@ -1517,24 +1941,24 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         .lot-option .lot-info strong {
             display: block;
             font-size: 14px;
-            color: var(--text-dark);
+            color: var(--text-primary);
         }
 
         .lot-option .lot-info small {
             font-size: 11px;
-            color: var(--text-muted);
+            color: var(--text-tertiary);
         }
 
         .lot-option .lot-stock {
             font-weight: 700;
-            color: var(--blue-primary);
+            color: var(--color-primary);
         }
 
         .toast-notif {
             position: fixed;
             top: 20px;
             right: 20px;
-            background: var(--text-dark);
+            background: var(--text-primary);
             color: #fff;
             padding: 12px 20px;
             border-radius: 8px;
@@ -1548,11 +1972,11 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         }
 
         .toast-notif.error {
-            background: var(--danger);
+            background: var(--color-danger);
         }
 
         .toast-notif.success {
-            background: var(--blue-primary);
+            background: var(--color-primary);
         }
 
         @media print {
@@ -1574,7 +1998,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             }
         }
 
-        @media(max-width:768px) {
+        @media (max-width:768px) {
             .pos-right {
                 width: 100%;
                 border-left: none;
@@ -1623,6 +2047,15 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         <div class="pos-right">
             <div class="cart-header">
                 <h2><i class="bi bi-receipt"></i> Ticket <span class="cart-badge" id="cartCount">0</span></h2>
+                <!-- Bouton PDF Facture complète (paysage) -->
+                <form method="post" target="_blank" style="margin:0;">
+                    <input type="hidden" name="export_pdf" value="1">
+                    <input type="hidden" name="numero" id="pdfFactureNum" value="">
+                    <input type="hidden" name="format" value="facture">
+                    <button type="submit" class="btn btn-sm btn-outline-danger" id="pdfExportBtn" disabled title="Exporter la facture complète (PDF)">
+                        <i class="bi bi-file-pdf"></i>
+                    </button>
+                </form>
             </div>
             <div class="client-zone">
                 <div class="client-search-wrapper" id="clientSearchWrapper">
@@ -1651,15 +2084,21 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
                 <div class="totals-split-row">
                     <div class="split-item">
                         <div class="split-label">Sous-total HT <select id="taxRate">
-                                <option value="0">0%</option><?php foreach ($taxes as $t): if ($t['type_taxe'] == 'TVA'): ?><option value="<?= floatval($t['taux_taxe']) ?>">TVA <?= floatval($t['taux_taxe']) ?>%</option><?php endif;
-                                                                                                                                                                                                                    endforeach; ?>
+                                <option value="0">0%</option>
+                                <?php foreach ($taxes as $t): if ($t['type_taxe'] == 'TVA'): ?>
+                                        <option value="<?= floatval($t['taux_taxe']) ?>">TVA <?= floatval($t['taux_taxe']) ?>%</option>
+                                <?php endif;
+                                endforeach; ?>
                             </select></div>
                         <div class="split-value" id="totalHT">0 FCFA</div>
                     </div>
                     <div class="split-item">
                         <div class="split-label">Remise <select id="discountRate">
-                                <option value="0">0%</option><?php foreach ($taxes as $t): if ($t['type_taxe'] == 'Remise'): ?><option value="<?= floatval($t['taux_taxe']) ?>"><?= floatval($t['taux_taxe']) ?>%</option><?php endif;
-                                                                                                                                                                                                                    endforeach; ?>
+                                <option value="0">0%</option>
+                                <?php foreach ($taxes as $t): if ($t['type_taxe'] == 'Remise'): ?>
+                                        <option value="<?= floatval($t['taux_taxe']) ?>"><?= floatval($t['taux_taxe']) ?>%</option>
+                                <?php endif;
+                                endforeach; ?>
                             </select></div>
                         <div class="split-value" id="totalRemise">0 FCFA</div>
                     </div>
@@ -1677,7 +2116,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
     <div class="modal-overlay" id="payModal">
         <div class="modal-box">
             <div class="modal-head">
-                <h3><i class="bi bi-credit-card-2-front"></i> Encaissement</h3><button class="modal-close" onclick="closeModal('payModal')"><i class="bi bi-x"></i></button>
+                <h3><i class="bi bi-credit-card-2-front"></i> Encaissement</h3>
+                <button class="modal-close" onclick="closeModal('payModal')"><i class="bi bi-x"></i></button>
             </div>
             <div class="modal-body">
                 <div class="pay-modes">
@@ -1685,7 +2125,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
                     <button class="pay-mode" data-mode="Mobile"><i class="bi bi-phone"></i>Mobile</button>
                     <button class="pay-mode" data-mode="Cheque"><i class="bi bi-receipt"></i>Chèque</button>
                 </div>
-                <div style="font-size:16px;font-weight:700;margin-bottom:16px;display:flex;justify-content:space-between;"><span>Montant à payer</span><span id="payAmount" style="color:var(--blue-primary);">0 FCFA</span></div>
+                <div style="font-size:16px;font-weight:700;margin-bottom:16px;display:flex;justify-content:space-between;"><span>Montant à payer</span><span id="payAmount" style="color:var(--color-primary);">0 FCFA</span></div>
                 <div class="form-group"><label>Montant reçu</label><input type="number" id="receivedAmount" style="font-size:18px;font-weight:700;" placeholder="0"></div>
                 <div class="change-box" id="changeBox">
                     <div class="lbl" id="changeLbl">Monnaie à rendre</div>
@@ -1703,7 +2143,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content" style="border-radius:16px;border:none;">
                 <div class="modal-head">
-                    <h3><i class="bi bi-person-plus"></i> Nouveau Client</h3><button type="button" class="modal-close" data-bs-dismiss="modal"><i class="bi bi-x"></i></button>
+                    <h3><i class="bi bi-person-plus"></i> Nouveau Client</h3>
+                    <button type="button" class="modal-close" data-bs-dismiss="modal"><i class="bi bi-x"></i></button>
                 </div>
                 <div class="modal-body">
                     <form id="clientForm">
@@ -1724,7 +2165,8 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
     <div class="modal-overlay lot-select-modal" id="lotModal">
         <div class="modal-box">
             <div class="modal-head">
-                <h3><i class="bi bi-boxes"></i> Choisir un lot</h3><button class="modal-close" onclick="closeModal('lotModal')"><i class="bi bi-x"></i></button>
+                <h3><i class="bi bi-boxes"></i> Choisir un lot</h3>
+                <button class="modal-close" onclick="closeModal('lotModal')"><i class="bi bi-x"></i></button>
             </div>
             <div class="modal-body">
                 <div id="lotSelectionList"></div>
@@ -1740,12 +2182,20 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
     <div class="modal-overlay" id="ticketModal">
         <div class="modal-box" style="width:480px;">
             <div class="modal-head">
-                <h3><i class="bi bi-receipt"></i> Ticket</h3><button class="modal-close" onclick="closeModal('ticketModal')"><i class="bi bi-x"></i></button>
+                <h3><i class="bi bi-receipt"></i> Ticket</h3>
+                <button class="modal-close" onclick="closeModal('ticketModal')"><i class="bi bi-x"></i></button>
             </div>
             <div class="modal-body" id="printZone"></div>
             <div class="modal-foot">
                 <button class="btn-secondary" onclick="closeModal('ticketModal');resetSale();">Nouvelle vente</button>
                 <button class="btn-primary" onclick="window.print()"><i class="bi bi-printer"></i> Imprimer</button>
+                <!-- Bouton PDF du ticket (format ticket) -->
+                <form method="post" target="_blank" style="margin:0;">
+                    <input type="hidden" name="export_pdf" value="1">
+                    <input type="hidden" name="numero" id="pdfFactureNumTicket" value="">
+                    <input type="hidden" name="format" value="ticket">
+                    <button type="submit" class="btn btn-primary" id="pdfExportTicketBtn"><i class="bi bi-file-pdf"></i> PDF</button>
+                </form>
             </div>
         </div>
     </div>
@@ -1795,6 +2245,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         let hasCategorie = false;
         let pendingProduct = null;
         let selectedLotId = null;
+        let lastFactureNum = null;
 
         const $ = id => document.getElementById(id);
         const fmt = n => new Intl.NumberFormat('fr-FR').format(Math.round(n || 0)) + ' FCFA';
@@ -1968,7 +2419,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
 
         function searchProducts(q) {
             api('search_products', {
-                    q: q,
+                    q,
                     categorie: currentCategory
                 })
                 .then(res => {
@@ -2050,7 +2501,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             $('recentClientsZone').classList.add('hidden');
             clientTimer = setTimeout(() => {
                 api('search_customers', {
-                        q: q
+                        q
                     })
                     .then(res => {
                         if (res.success) renderClientDropdown(res.data || [], q);
@@ -2075,12 +2526,12 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         function renderClientDropdown(data, q) {
             const dd = $('clientDropdown');
             if (data.length === 0) {
-                dd.innerHTML = `<div class="dd-header"><span>Aucun résultat</span></div><div class="dd-empty"><i class="bi bi-emoji-frown"></i>Aucun client pour "${esc(q)}"<br><button style="margin-top:8px;background:var(--blue-primary);color:#fff;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;" data-bs-toggle="modal" data-bs-target="#clientModal"><i class="bi bi-person-plus"></i> Créer</button></div>`;
+                dd.innerHTML = `<div class="dd-header"><span>Aucun résultat</span></div><div class="dd-empty"><i class="bi bi-emoji-frown"></i>Aucun client pour "${esc(q)}"<br><button style="margin-top:8px;background:var(--color-primary);color:#fff;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;" data-bs-toggle="modal" data-bs-target="#clientModal"><i class="bi bi-person-plus"></i> Créer</button></div>`;
                 dd.style.display = 'block';
                 return;
             }
             dd.innerHTML = `
-                <div class="dd-header"><span>${data.length} client(s)</span><span style="color:var(--text-muted);">Entrée = sélectionner</span></div>
+                <div class="dd-header"><span>${data.length} client(s)</span><span style="color:var(--text-tertiary);">Entrée = sélectionner</span></div>
                 ${data.map(c => {
                     const initials = (c.nom_prenom_contact||'').split(' ').map(w=>(w[0]||'')).join('').substring(0,2).toUpperCase();
                     const typeLabel = c.statut_contact || c.type_contact || 'Client';
@@ -2137,7 +2588,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             }
             const payload = {
                 action: 'create_customer',
-                nom: nom,
+                nom,
                 tel: $('newClientPhone').value,
                 adresse: $('newClientAddress').value,
                 csrf_token: CSRF_TOKEN
@@ -2253,7 +2704,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
                 item = {
                     code: product.code_produit,
                     nom: product.titre_produit,
-                    prix: prix,
+                    prix,
                     prix_achat: parseFloat(product.prix_fournisseur) || 0,
                     qte: qty,
                     stock: stock,
@@ -2279,7 +2730,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
                     body: JSON.stringify({
                         action: 'get_product_price',
                         produit_id: produitId,
-                        quantite: quantite
+                        quantite
                     })
                 });
                 const data = await res.json();
@@ -2290,9 +2741,9 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             }
         }
 
-        // ===== FONCTIONS PANIER GLOBALES (pour onclick) =====
+        // ===== FONCTIONS PANIER GLOBALES =====
         window.updateQty = function(code, lotId, delta) {
-            const item = cart.find(p => p.code === code && p.lot_id === lotId);
+            const item = cart.find(p => p.code === code && (p.lot_id || '') === (lotId || ''));
             if (!item) return;
             const newQty = item.qte + delta;
             if (newQty <= 0) {
@@ -2313,7 +2764,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         };
 
         window.removeProduct = function(code, lotId) {
-            cart = cart.filter(p => !(p.code === code && p.lot_id === lotId));
+            cart = cart.filter(p => !(p.code === code && (p.lot_id || '') === (lotId || '')));
             renderCart();
             refreshProductCards();
             toast('Retiré');
@@ -2325,6 +2776,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
                 $('cartItems').innerHTML = `<div class="cart-empty"><i class="bi bi-cart-x"></i><p>Panier vide</p></div>`;
                 $('cartCount').textContent = '0';
                 $('btnCheckout').disabled = true;
+                $('pdfExportBtn').disabled = true;
             } else {
                 let html = '';
                 cart.forEach(p => {
@@ -2352,6 +2804,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
                 $('cartItems').innerHTML = html;
                 $('cartCount').textContent = cart.reduce((s, p) => s + p.qte, 0);
                 $('btnCheckout').disabled = false;
+                $('pdfExportBtn').disabled = !lastFactureNum;
             }
             calculateTotals();
         }
@@ -2405,7 +2858,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             $('payAmount').textContent = fmt(getTTC());
             $('receivedAmount').value = '';
             $('changeAmount').textContent = '0 FCFA';
-            $('changeBox').style.background = 'var(--blue-light)';
+            $('changeBox').style.background = 'var(--color-primary-soft)';
             $('changeLbl').textContent = 'Monnaie à rendre';
             openModal('payModal');
         });
@@ -2425,7 +2878,7 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
             if (change >= 0) {
                 $('changeLbl').textContent = 'Monnaie à rendre';
                 $('changeAmount').textContent = fmt(change);
-                $('changeBox').style.background = 'var(--blue-light)';
+                $('changeBox').style.background = 'var(--color-primary-soft)';
             } else {
                 $('changeLbl').textContent = 'Montant restant';
                 $('changeAmount').textContent = fmt(Math.abs(change));
@@ -2465,6 +2918,11 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
                     this.innerHTML = '<i class="bi bi-check-lg"></i> Valider';
                     if (res.success) {
                         closeModal('payModal');
+                        lastFactureNum = res.facture;
+                        // Activer les boutons PDF
+                        $('pdfExportBtn').disabled = false;
+                        $('pdfFactureNum').value = lastFactureNum;
+                        $('pdfFactureNumTicket').value = lastFactureNum;
                         generateTicket(res);
                         openModal('ticketModal');
                         toast('Vente validée !');
@@ -2514,12 +2972,16 @@ $user = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->f
         function resetSale() {
             cart = [];
             selectedClient = null;
+            lastFactureNum = null;
             renderCart();
             resetClient();
             loadInitialProducts();
             $('taxRate').value = '0';
             $('discountRate').value = '0';
             calculateTotals();
+            $('pdfExportBtn').disabled = true;
+            $('pdfFactureNum').value = '';
+            $('pdfFactureNumTicket').value = '';
         }
 
         // Ouvrir modale client avec pré-remplissage

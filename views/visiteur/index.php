@@ -1,11 +1,23 @@
 <?php
+ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
+
+// Fonction utilitaire pour envoyer une réponse JSON propre
+function sendJson($data)
+{
+    // Supprimer tous les buffers de sortie actifs
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+
 // views/visiteurs/index.php – Gestion des visiteurs
 session_start();
 if (!isset($_SESSION['user_id'])) {
     if (isset($_POST['ajax']) || isset($_POST['action'])) {
-        header('Content-Type: application/json');
-        echo json_encode(['error' => 'Non authentifié']);
-        exit;
+        sendJson(['error' => 'Non authentifié']);
     }
     header('Location: ../utilisateur/login');
     exit;
@@ -19,9 +31,7 @@ $user = $stmt->fetch(PDO::FETCH_ASSOC);
 if (!$user) {
     session_destroy();
     if (isset($_POST['ajax']) || isset($_POST['action'])) {
-        header('Content-Type: application/json');
-        echo json_encode(['error' => 'Utilisateur inactif']);
-        exit;
+        sendJson(['error' => 'Utilisateur inactif']);
     }
     header('Location: ../utilisateur/login');
     exit;
@@ -41,14 +51,12 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-// ---- TRAITEMENT DES ACTIONS AJAX (détail, édition) ----
+// ---- TRAITEMENT DES ACTIONS AJAX (édition uniquement) ----
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = $_POST['action'];
-    if ($action === 'get_visiteur_detail' || $action === 'get_visiteur_edit') {
-        header('Content-Type: application/json');
+    if ($action === 'get_visiteur_edit') {
         if (!isset($_POST['id']) || !is_numeric($_POST['id'])) {
-            echo json_encode(['error' => 'ID invalide']);
-            exit;
+            sendJson(['error' => 'ID invalide']);
         }
         $id = (int)$_POST['id'];
         try {
@@ -56,14 +64,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $stmt->execute([$id]);
             $data = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$data) {
-                echo json_encode(['error' => 'Visiteur non trouvé']);
-                exit;
+                sendJson(['error' => 'Visiteur non trouvé']);
             }
-            echo json_encode($data);
+            sendJson($data);
         } catch (Exception $e) {
-            echo json_encode(['error' => $e->getMessage()]);
+            sendJson(['error' => $e->getMessage()]);
         }
-        exit;
     }
 }
 
@@ -182,7 +188,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                 <td><?= e($v['reference']) ?></td>
                 <td><span class="status-badge <?= strtolower($v['etat_connexion']) == 'terminee' ? 'off' : 'on' ?>"><span class="sdot"></span> <?= e($v['etat_connexion'] ?? '—') ?></span></td>
                 <td class="text-end">
-                    <button class="act-btn v viewBtn" data-id="<?= e($v['id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
+                    <!-- Bouton Voir supprimé -->
                     <button class="act-btn e editBtn" data-id="<?= e($v['id']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
                     <form method="POST" style="display:inline-block;" onsubmit="return confirm('Supprimer ce visiteur ?');">
                         <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
@@ -221,9 +227,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
         </div>
 <?php endif;
     $paginationHtml = ob_get_clean();
-    header('Content-Type: application/json');
-    echo json_encode(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
-    exit;
+    sendJson(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
 }
 ?>
 <!DOCTYPE html>
@@ -398,12 +402,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
 
         .act-btn:hover {
             transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .act-btn.e:hover {
@@ -643,7 +641,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                                     <td><?= e($v['reference']) ?></td>
                                     <td><span class="status-badge <?= strtolower($v['etat_connexion']) == 'terminee' ? 'off' : 'on' ?>"><span class="sdot"></span> <?= e($v['etat_connexion'] ?? '—') ?></span></td>
                                     <td class="text-end">
-                                        <button class="act-btn v viewBtn" data-id="<?= e($v['id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
                                         <button class="act-btn e editBtn" data-id="<?= e($v['id']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
                                         <form method="POST" style="display:inline-block;" onsubmit="return confirm('Supprimer ce visiteur ?');">
                                             <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
@@ -708,33 +705,11 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
         </div>
     </div>
 
-    <!-- Modal Détail -->
-    <div class="modal fade" id="detailModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-lg modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold"><i class="bi bi-eye text-primary me-2"></i> Détail du visiteur</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3">
-                        <div class="col-md-6"><strong>ID :</strong> <span id="detailId"></span></div>
-                        <div class="col-md-6"><strong>Référence :</strong> <span id="detailReference"></span></div>
-                        <div class="col-md-6"><strong>Connexion :</strong> <span id="detailConnexion"></span></div>
-                        <div class="col-md-6"><strong>Déconnexion :</strong> <span id="detailDeconnexion"></span></div>
-                        <div class="col-md-6"><strong>Durée :</strong> <span id="detailDuree"></span></div>
-                        <div class="col-md-6"><strong>État :</strong> <span id="detailEtat"></span></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         $(document).ready(function() {
             const visiteurModal = new bootstrap.Modal(document.getElementById('visiteurModal'));
-            const detailModal = new bootstrap.Modal(document.getElementById('detailModal'));
 
             $('#addBtn').on('click', function() {
                 $('#modalTitle').text('Nouveau visiteur');
@@ -783,43 +758,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                             alert(resp.error || 'Erreur');
                         } catch (e) {
                             alert('Erreur lors du chargement des données.');
-                        }
-                    }
-                });
-            });
-
-            $(document).on('click', '.viewBtn', function() {
-                const id = $(this).data('id');
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        action: 'get_visiteur_detail',
-                        id: id
-                    },
-                    dataType: 'json',
-                    success: function(data) {
-                        if (data.error) {
-                            alert(data.error);
-                            return;
-                        }
-                        $('#detailId').text(data.id);
-                        $('#detailReference').text(data.reference || '—');
-                        $('#detailConnexion').text(data.date_connexion + ' ' + data.heure_connexion);
-                        $('#detailDeconnexion').text(data.date_deconnexion ? data.date_deconnexion + ' ' + data.heure_deconnexion : '—');
-                        let duree = '';
-                        if (data.duree_date > 0) duree += data.duree_date + 'j ';
-                        duree += data.duree_heure || '00:00:00';
-                        $('#detailDuree').text(duree);
-                        $('#detailEtat').text(data.etat_connexion || '—');
-                        detailModal.show();
-                    },
-                    error: function(xhr) {
-                        try {
-                            var resp = JSON.parse(xhr.responseText);
-                            alert(resp.error || 'Erreur');
-                        } catch (e) {
-                            alert('Erreur lors du chargement du détail.');
                         }
                     }
                 });

@@ -1,4 +1,18 @@
 <?php
+ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
+
+// Fonction utilitaire pour envoyer une réponse JSON propre
+function sendJson($data)
+{
+    // Supprimer tous les buffers de sortie actifs
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+
 // views/categorie/index.php – Gestion des catégories
 require __DIR__ . '/../../databases/database.php';
 session_start();
@@ -163,7 +177,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
     if (empty($categories)): ?>
         <tr>
             <td colspan="6" class="text-center py-5 text-muted">
-                <i class="fas fa-inbox fa-2x d-block mb-2 opacity-50"></i>
+                <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucune catégorie trouvée
             </td>
         </tr>
@@ -189,9 +203,9 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-code="<?= e($c['code_categorie']) ?>" title="Voir"><i class="fas fa-eye"></i></button>
-                        <button class="act-btn e editBtn" data-code="<?= e($c['code_categorie']) ?>" title="Modifier"><i class="fas fa-pen"></i></button>
-                        <button class="act-btn d deleteBtn" data-code="<?= e($c['code_categorie']) ?>" data-nom="<?= e($c['titre_categorie']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="fas fa-trash"></i></button>
+                        <!-- Bouton Voir supprimé -->
+                        <button class="act-btn e editBtn" data-code="<?= e($c['code_categorie']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
+                        <button class="act-btn d deleteBtn" data-code="<?= e($c['code_categorie']) ?>" data-nom="<?= e($c['titre_categorie']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                     </div>
                 </td>
             </tr>
@@ -206,7 +220,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
             <nav>
                 <ul class="pagination pagination-sm mb-0">
                     <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="fas fa-chevron-left"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
                     </li>
                     <?php
                     $start = max(1, $page - 2);
@@ -227,7 +241,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                     }
                     ?>
                     <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="fas fa-chevron-right"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
                     </li>
                 </ul>
             </nav>
@@ -253,45 +267,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getTableContent($pdo, $search, $filtres, $page);
-    header('Content-Type: application/json');
-    echo json_encode($result);
-    exit;
-}
-
-// --- AJAX pour voir une catégorie ---
-if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
-    $code = trim($_POST['code'] ?? '');
-    if (empty($code)) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => 'Code non spécifié']);
-        exit;
-    }
-
-    try {
-        $stmt = $pdo->prepare("SELECT * FROM categorie WHERE code_categorie = ?");
-        $stmt->execute([$code]);
-        $c = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($c) {
-            header('Content-Type: application/json');
-            echo json_encode([
-                'success' => true,
-                'code_categorie' => $c['code_categorie'],
-                'titre_categorie' => $c['titre_categorie'],
-                'photo' => !empty($c['photo']) ? base64_encode($c['photo']) : null,
-                'type_photo' => $c['type'] ?? null,
-                'type' => $c['type'] ?? '—',
-                'etat_categorie' => $c['etat_categorie']
-            ]);
-        } else {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'message' => 'Catégorie non trouvée']);
-        }
-    } catch (PDOException $e) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
-    }
-    exit;
+    sendJson($result);
 }
 
 // --- Affichage initial ---
@@ -303,8 +279,9 @@ $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 $initialData = getTableContent($pdo, $search, $filtres, $page);
 
+// Chargement des données pour l'édition (action load_edit)
 $editCategorie = null;
-if ($action === 'edit' && isset($_POST['edit_code'])) {
+if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $code = $_POST['edit_code'];
     $stmt = $pdo->prepare("SELECT * FROM categorie WHERE code_categorie = ?");
     $stmt->execute([$code]);
@@ -320,8 +297,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
     <title>Gestion des catégories</title>
     <!-- Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <!-- Bootstrap Icons -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <!-- Bootstrap SelectPicker (CSS) -->
@@ -667,7 +642,7 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
                 <p class="text-tertiary mt-1">Organisez vos produits par catégories</p>
             </div>
             <div>
-                <button class="btn btn-primary btn-sm" id="addBtn"><i class="fas fa-plus"></i> Nouvelle catégorie</button>
+                <button class="btn btn-primary btn-sm" id="addBtn"><i class="bi bi-plus-circle"></i> Nouvelle catégorie</button>
             </div>
         </div>
 
@@ -688,7 +663,7 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
                     <div class="col-md-4">
                         <label for="searchInput" class="form-label fw-semibold small">Recherche</label>
                         <div class="search-inline" style="min-width:100%;">
-                            <i class="fas fa-search"></i>
+                            <i class="bi bi-search"></i>
                             <input type="text" name="search" id="searchInput" placeholder="Code, titre, type..." value="<?= e($search) ?>">
                         </div>
                     </div>
@@ -701,10 +676,10 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="fas fa-filter"></i> Filtrer</button>
+                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
                     </div>
                     <div class="col-md-2">
-                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="fas fa-undo"></i></button>
+                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
                     </div>
                 </div>
             </form>
@@ -746,7 +721,7 @@ MODAL FORMULAIRE (ajout/modification) avec upload de photo
         <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="fas fa-folder text-primary me-2"></i> Nouvelle catégorie</h5>
+                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-folder text-primary me-2"></i> Nouvelle catégorie</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
                 </div>
                 <form method="post" id="categorieForm" enctype="multipart/form-data">
@@ -755,12 +730,12 @@ MODAL FORMULAIRE (ajout/modification) avec upload de photo
                     <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
                     <div class="modal-body">
                         <!-- Identification -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-tag me-1"></i> Identification</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="code_categorie" class="form-label fw-semibold">Code catégorie</label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-hashtag"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-hash"></i></span>
                                     <input type="text" class="form-control" id="code_categorie" name="code_categorie" readonly value="<?= e($editCategorie['code_categorie'] ?? generateCategorieId($pdo)) ?>">
                                 </div>
                                 <div class="form-text">ID généré automatiquement</div>
@@ -768,14 +743,14 @@ MODAL FORMULAIRE (ajout/modification) avec upload de photo
                             <div class="col-md-6">
                                 <label for="titre_categorie" class="form-label fw-semibold">Titre <span class="text-danger">*</span></label>
                                 <div class="input-group">
-                                    <span class="input-group-text"><i class="fas fa-folder"></i></span>
+                                    <span class="input-group-text"><i class="bi bi-folder"></i></span>
                                     <input type="text" class="form-control" id="titre_categorie" name="titre_categorie" required placeholder="Pièces détachées" value="<?= e($editCategorie['titre_categorie'] ?? '') ?>">
                                 </div>
                             </div>
                         </div>
 
                         <!-- Photo -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-image me-1"></i> Photo</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-image me-1"></i> Photo</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-12">
                                 <label for="photo" class="form-label fw-semibold">Image</label>
@@ -787,14 +762,14 @@ MODAL FORMULAIRE (ajout/modification) avec upload de photo
                                             alt="<?= e($editCategorie['titre_categorie']) ?>"
                                             class="preview-img">
                                     <?php else: ?>
-                                        <div class="img-placeholder"><i class="fas fa-image fa-2x"></i></div>
+                                        <div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>
                                     <?php endif; ?>
                                 </div>
                             </div>
                         </div>
 
                         <!-- Type et état -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="fas fa-info-circle me-1"></i> Informations complémentaires</h6>
+                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-info-circle me-1"></i> Informations complémentaires</h6>
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
                                 <label for="type" class="form-label fw-semibold">Type</label>
@@ -810,30 +785,10 @@ MODAL FORMULAIRE (ajout/modification) avec upload de photo
                         </div>
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="fas fa-times"></i> Annuler</button>
-                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="fas fa-save"></i> Enregistrer</button>
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
+                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="bi bi-save"></i> Enregistrer</button>
                     </div>
                 </form>
-            </div>
-        </div>
-    </div>
-
-    <!-- =========================================================
-MODAL : VUE DÉTAIL
-========================================================= -->
-    <div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="fas fa-eye text-primary me-2"></i> Détails de la catégorie</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3" id="viewGrid"></div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                </div>
             </div>
         </div>
     </div>
@@ -865,7 +820,7 @@ MODAL : CONFIRMATION SUPPRESSION
         <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
     </form>
 
-    <!-- Formulaire caché pour action edit -->
+    <!-- Formulaire caché pour action edit (chargement) -->
     <form method="post" id="actionForm">
         <input type="hidden" name="action" id="actionField">
         <input type="hidden" name="edit_code" id="editCodeField">
@@ -891,7 +846,7 @@ SCRIPTS
                 e.preventDefault();
                 $('#formAction').val('add');
                 $('#oldCode').val('');
-                $('#modalTitle').html('<i class="fas fa-folder text-primary me-2"></i> Nouvelle catégorie');
+                $('#modalTitle').html('<i class="bi bi-folder text-primary me-2"></i> Nouvelle catégorie');
 
                 // Réinitialiser les champs
                 $('#categorieForm')[0].reset();
@@ -900,7 +855,7 @@ SCRIPTS
                 $('#titre_categorie').val('');
                 $('#type').val('');
                 $('#etat_categorie').val('Actif');
-                $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="fas fa-image fa-2x"></i></div>');
+                $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>');
 
                 var modalEl = document.getElementById('categorieModal');
                 var modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
@@ -917,60 +872,17 @@ SCRIPTS
                     };
                     reader.readAsDataURL(file);
                 } else {
-                    $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="fas fa-image fa-2x"></i></div>');
+                    $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>');
                 }
             });
 
-            // --- Édition ---
+            // --- Édition (chargement via formulaire POST) ---
             $(document).on('click', '.editBtn', function(e) {
                 e.preventDefault();
                 const code = $(this).data('code');
-                $('#actionField').val('edit');
+                $('#actionField').val('load_edit');
                 $('#editCodeField').val(code);
                 $('#actionForm').submit();
-            });
-
-            // --- Vue ---
-            $(document).on('click', '.viewBtn', function(e) {
-                e.preventDefault();
-                const code = $(this).data('code');
-                $('#viewModal').modal('hide');
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        ajax_view: '1',
-                        code: code
-                    },
-                    dataType: 'json',
-                    success: function(response) {
-                        if (response.success) {
-                            $('#viewModalLabel').text('Catégorie ' + response.titre_categorie);
-                            const photoHtml = response.photo ?
-                                '<img src="data:' + (response.type_photo || 'image/jpeg') + ';base64,' + response.photo + '" class="preview-img" style="width:100px;height:100px;">' :
-                                '—';
-                            const fields = [
-                                ['Code', response.code_categorie],
-                                ['Titre', response.titre_categorie],
-                                ['Photo', photoHtml],
-                                ['Type', response.type],
-                                ['État', response.etat_categorie]
-                            ];
-                            let html = '';
-                            fields.forEach(([label, value]) => {
-                                let val = value || '—';
-                                html += '<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">' + label + '</div><div class="fw-semibold">' + val + '</div></div></div>';
-                            });
-                            $('#viewGrid').html(html);
-                            $('#viewModal').modal('show');
-                        } else {
-                            alert('Erreur : ' + (response.message || 'Catégorie non trouvée'));
-                        }
-                    },
-                    error: function() {
-                        alert('Erreur lors de la récupération des données.');
-                    }
-                });
             });
 
             // --- Fonction de recherche AJAX ---
@@ -994,8 +906,10 @@ SCRIPTS
                         });
                         $('.selectpicker').selectpicker('refresh');
                     },
-                    error: function() {
-                        alert('Erreur lors de la recherche.');
+                    error: function(xhr, status, error) {
+                        console.error('Statut :', status);
+                        console.error('Réponse brute :', xhr.responseText);
+                        alert('Erreur lors de la recherche (code ' + xhr.status + '). Voir console pour détails.');
                     }
                 });
             }
@@ -1054,12 +968,12 @@ SCRIPTS
                 $('.alert').alert('close');
             }, 5000);
 
-            // --- Si édition via POST ---
-            <?php if (isset($editCategorie) && $action === 'edit'): ?>
+            // --- Si édition via POST (chargement des données) ---
+            <?php if (isset($editCategorie) && $action === 'load_edit'): ?>
                 $(function() {
                     $('#formAction').val('edit');
                     $('#oldCode').val('<?= e($editCategorie['code_categorie']) ?>');
-                    $('#modalTitle').html('<i class="fas fa-folder text-primary me-2"></i> Modifier la catégorie');
+                    $('#modalTitle').html('<i class="bi bi-folder text-primary me-2"></i> Modifier la catégorie');
                     $('#code_categorie').prop('readonly', true);
                     // L'aperçu de la photo est déjà géré par PHP
                     $('.selectpicker').selectpicker('refresh');

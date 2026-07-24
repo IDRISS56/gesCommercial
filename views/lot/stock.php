@@ -1,19 +1,31 @@
 <?php
-// views/lot/stock.php – Stock par boutique avec recherche et modal
+ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
+
+// Fonction utilitaire pour envoyer une réponse JSON propre
+function sendJson($data)
+{
+    // Supprimer tous les buffers de sortie actifs
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
 
 // ---- TRAITEMENT AJAX (AVANT TOUTE SORTIE) ----
 if (isset($_GET['action']) && $_GET['action'] === 'get_produits' && isset($_GET['boutique_id'])) {
     session_start();
     if (!isset($_SESSION['user_id'])) {
         http_response_code(401);
-        echo json_encode(['error' => 'Non authentifié']);
+        sendJson(['error' => 'Non authentifié']);
         exit;
     }
     // Inclusion de la base de données
     $dbFile = __DIR__ . '/../../databases/database.php';
     if (!file_exists($dbFile)) {
         http_response_code(500);
-        echo json_encode(['error' => 'Fichier database.php introuvable']);
+        sendJson(['error' => 'Fichier database.php introuvable']);
         exit;
     }
     require_once $dbFile;
@@ -23,7 +35,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_produits' && isset($_GET[
     if (!$stmt->fetch()) {
         session_destroy();
         http_response_code(401);
-        echo json_encode(['error' => 'Utilisateur invalide']);
+        sendJson(['error' => 'Utilisateur invalide']);
         exit;
     }
 
@@ -58,8 +70,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_produits' && isset($_GET[
     $stmt->execute($params);
     $produits = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    header('Content-Type: application/json');
-    echo json_encode($produits);
+    sendJson($produits);
     exit;
 }
 
@@ -440,10 +451,10 @@ $boutiques = $stmtBoutiques->fetchAll(PDO::FETCH_ASSOC);
                 chargerProduits(boutiqueId, '');
             });
 
-            // ---- NOUVELLE URL AJAX (chemin absolu) ----
+            // ---- URL AJAX dynamique (basée sur la page courante) ----
             function chargerProduits(boutiqueId, search) {
-                const url = '/Mandigo/Gestion commercial/views/lot/stock.php?action=get_produits&boutique_id=' + encodeURIComponent(boutiqueId) + (search ? '&search=' + encodeURIComponent(search) : '');
-                console.log('URL appelée :', url); // pour déboguer
+                var url = window.location.href.split('?')[0] + '?action=get_produits&boutique_id=' + encodeURIComponent(boutiqueId) + (search ? '&search=' + encodeURIComponent(search) : '');
+                console.log('URL appelée :', url);
                 $.ajax({
                     url: url,
                     method: 'GET',

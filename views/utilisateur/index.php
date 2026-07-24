@@ -1,4 +1,23 @@
 <?php
+// Activation du buffer (sera vidé par sendJson)
+ob_start();
+
+// Fonction utilitaire pour envoyer une réponse JSON propre
+// Vide TOUS les buffers de sortie (quel que soit le niveau)
+function sendJson($data)
+{
+    // Supprimer tous les buffers de sortie actifs
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    // Envoyer l'en-tête JSON
+    header('Content-Type: application/json');
+    // Encoder et envoyer les données
+    echo json_encode($data);
+    // Terminer l'exécution
+    exit;
+}
+
 // views/utilisateur/index.php – Gestion des utilisateurs
 require __DIR__ . '/../../databases/database.php';
 session_start();
@@ -76,10 +95,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $etat = trim($_POST['etat'] ?? 'Actif');
 
             $errors = [];
-            if (empty($matricule)) $errors[] = "Le matricule est requis.";
-            if (empty($nom_prenom)) $errors[] = "Le nom et prénom sont requis.";
-            if (empty($login)) $errors[] = "Le login est requis.";
-            if (empty($role)) $errors[] = "Le rôle est requis.";
+            if (empty($matricule)) $errors[] = "";
+            if (empty($nom_prenom)) $errors[] = "";
+            if (empty($login)) $errors[] = "";
+            if (empty($role)) $errors[] = "";
 
             // Vérifier que la boutique est obligatoire pour Vendeur et Caisse
             if (($role === 'Vendeur' || $role === 'Caisse') && empty($boutique_id)) {
@@ -210,7 +229,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
     if (empty($users)): ?>
         <tr>
             <td colspan="11" class="text-center py-5 text-muted">
-                <i class="fas fa-inbox fa-2x d-block mb-2 opacity-50"></i>
+                <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucun utilisateur trouvé
             </td>
         </tr>
@@ -232,12 +251,12 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-id="<?= e($u['id']) ?>" title="Voir"><i class="fas fa-eye"></i></button>
-                        <button class="act-btn e editBtn" data-id="<?= e($u['id']) ?>" title="Modifier"><i class="fas fa-pen"></i></button>
+                        <!-- Bouton Voir supprimé -->
+                        <button class="act-btn e editBtn" data-id="<?= e($u['id']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
                         <?php if ($u['id'] !== $_SESSION['user_id']): ?>
-                            <button class="act-btn d deleteBtn" data-id="<?= e($u['id']) ?>" data-nom="<?= e($u['nom_prenom']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="fas fa-trash"></i></button>
+                            <button class="act-btn d deleteBtn" data-id="<?= e($u['id']) ?>" data-nom="<?= e($u['nom_prenom']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                         <?php else: ?>
-                            <button class="act-btn" style="color:#94a3b8;cursor:not-allowed;" title="Vous ne pouvez pas vous supprimer"><i class="fas fa-trash"></i></button>
+                            <button class="act-btn" style="color:#94a3b8;cursor:not-allowed;" title="Vous ne pouvez pas vous supprimer"><i class="bi bi-trash"></i></button>
                         <?php endif; ?>
                     </div>
                 </td>
@@ -253,7 +272,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
             <nav>
                 <ul class="pagination pagination-sm mb-0">
                     <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="fas fa-chevron-left"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
                     </li>
                     <?php
                     $start = max(1, $page - 2);
@@ -274,7 +293,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                     }
                     ?>
                     <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="fas fa-chevron-right"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
                     </li>
                 </ul>
             </nav>
@@ -302,59 +321,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getTableContent($pdo, $search, $filtres, $page);
-    header('Content-Type: application/json');
-    echo json_encode($result);
-    exit;
-}
-
-// --- AJAX pour voir un utilisateur (détail) ---
-if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
-    $id = trim($_POST['id'] ?? '');
-    if (empty($id)) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => 'ID non spécifié']);
-        exit;
-    }
-
-    try {
-        $stmt = $pdo->prepare("SELECT u.*, b.nom_boutique
-                               FROM utilisateur u
-                               LEFT JOIN boutique b ON u.boutique_id = b.code_boutique
-                               WHERE u.id = ?");
-        $stmt->execute([$id]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($row) {
-            header('Content-Type: application/json');
-            echo json_encode([
-                'success' => true,
-                'id' => $row['id'],
-                'matricule' => $row['matricule'],
-                'nom_prenom' => $row['nom_prenom'],
-                'date_naissance' => $row['date_naissance'] ? date('d/m/Y', strtotime($row['date_naissance'])) : '—',
-                'lieu_naissance' => $row['lieu_naissance'] ?? '—',
-                'sexe' => $row['sexe'] ?? '—',
-                'login' => $row['login'],
-                'telephone' => $row['telephone'] ?? '—',
-                'email' => $row['email'] ?? '—',
-                'profession' => $row['profession'] ?? '—',
-                'nationalite' => $row['nationalite'] ?? '—',
-                'ville' => $row['ville'] ?? '—',
-                'adresse' => $row['adresse'] ?? '—',
-                'boutique' => $row['nom_boutique'] ?? '—',
-                'role' => $row['role'],
-                'date_saisie' => $row['date_saisie'] ? date('d/m/Y', strtotime($row['date_saisie'])) : '—',
-                'etat' => $row['etat']
-            ]);
-        } else {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'message' => 'Utilisateur non trouvé']);
-        }
-    } catch (PDOException $e) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
-    }
-    exit;
+    sendJson($result);
 }
 
 // --- Affichage initial ---
@@ -368,8 +335,9 @@ $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 $initialData = getTableContent($pdo, $search, $filtres, $page);
 
+// Chargement des données pour l'édition (action load_edit)
 $editUser = null;
-if ($action === 'edit' && isset($_POST['edit_id'])) {
+if ($action === 'load_edit' && isset($_POST['edit_id'])) {
     $id = $_POST['edit_id'];
     $stmt = $pdo->prepare("SELECT * FROM utilisateur WHERE id = ?");
     $stmt->execute([$id]);
@@ -539,12 +507,6 @@ if ($action === 'edit' && isset($_POST['edit_id'])) {
 
         .act-btn:hover {
             transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .act-btn.e:hover {
@@ -980,26 +942,6 @@ MODAL FORMULAIRE (ajout/modification)
     </div>
 
     <!-- =========================================================
-MODAL : VUE DÉTAIL
-========================================================= -->
-    <div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="fas fa-eye text-primary me-2"></i> Détails de l'utilisateur</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3" id="viewGrid"></div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- =========================================================
 MODAL : CONFIRMATION SUPPRESSION
 ========================================================= -->
     <div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
@@ -1026,7 +968,7 @@ MODAL : CONFIRMATION SUPPRESSION
         <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
     </form>
 
-    <!-- Formulaire caché pour action edit -->
+    <!-- Formulaire caché pour action edit (chargement) -->
     <form method="post" id="actionForm">
         <input type="hidden" name="action" id="actionField">
         <input type="hidden" name="edit_id" id="editIdField">
@@ -1070,24 +1012,10 @@ SCRIPTS
                 $('#oldId').val('');
                 $('#modalTitle').html('<i class="fas fa-user text-primary me-2"></i> Nouvel utilisateur');
 
-                // Générer un ID automatiquement
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        ajax_generate_id: '1'
-                    },
-                    dataType: 'json',
-                    success: function(res) {
-                        if (res.success) {
-                            $('#id').val(res.id);
-                        }
-                    }
-                });
-
                 // Réinitialiser les champs
                 $('#userForm')[0].reset();
                 $('#id').prop('readonly', true);
+                // L'ID est déjà pré-rempli par PHP, pas besoin d'ajax
                 $('#matricule').val('');
                 $('#nom_prenom').val('');
                 $('#login').val('');
@@ -1112,70 +1040,13 @@ SCRIPTS
                 modal.show();
             });
 
-            // --- Ajout d'un champ pour générer l'ID en AJAX ---
-            $(document).on('click', '#addBtn', function() {
-                // L'ID est déjà pré-rempli par le PHP, on garde la valeur
-            });
-
-            // --- Édition (via formulaire POST) ---
+            // --- Édition (chargement via formulaire POST) ---
             $(document).on('click', '.editBtn', function(e) {
                 e.preventDefault();
                 const id = $(this).data('id');
-                $('#actionField').val('edit');
+                $('#actionField').val('load_edit');
                 $('#editIdField').val(id);
                 $('#actionForm').submit();
-            });
-
-            // --- Vue en AJAX ---
-            $(document).on('click', '.viewBtn', function(e) {
-                e.preventDefault();
-                const id = $(this).data('id');
-                $('#viewModal').modal('hide');
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        ajax_view: '1',
-                        id: id
-                    },
-                    dataType: 'json',
-                    success: function(response) {
-                        if (response.success) {
-                            $('#viewModalLabel').text('Utilisateur ' + response.nom_prenom);
-                            const fields = [
-                                ['ID', response.id],
-                                ['Matricule', response.matricule],
-                                ['Nom & Prénom', response.nom_prenom],
-                                ['Login', response.login],
-                                ['Téléphone', response.telephone],
-                                ['Email', response.email],
-                                ['Sexe', response.sexe],
-                                ['Date de naissance', response.date_naissance],
-                                ['Lieu de naissance', response.lieu_naissance],
-                                ['Nationalité', response.nationalite],
-                                ['Profession', response.profession],
-                                ['Ville', response.ville],
-                                ['Adresse', response.adresse],
-                                ['Boutique', response.boutique],
-                                ['Rôle', response.role],
-                                ['Date de saisie', response.date_saisie],
-                                ['État', response.etat]
-                            ];
-                            let html = '';
-                            fields.forEach(([label, value]) => {
-                                let val = value || '—';
-                                html += '<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">' + label + '</div><div class="fw-semibold">' + val + '</div></div></div>';
-                            });
-                            $('#viewGrid').html(html);
-                            $('#viewModal').modal('show');
-                        } else {
-                            alert('Erreur : ' + (response.message || 'Utilisateur non trouvé'));
-                        }
-                    },
-                    error: function() {
-                        alert('Erreur lors de la récupération des données.');
-                    }
-                });
             });
 
             // --- Fonction de recherche AJAX ---
@@ -1184,7 +1055,7 @@ SCRIPTS
                 var formData = $('#searchForm').serialize();
                 formData += '&page=' + page;
                 $.ajax({
-                    url: window.location.href,
+                    url: window.location.href, // URL courante
                     method: 'POST',
                     data: formData,
                     dataType: 'json',
@@ -1199,8 +1070,10 @@ SCRIPTS
                         });
                         $('.selectpicker').selectpicker('refresh');
                     },
-                    error: function() {
-                        alert('Erreur lors de la recherche.');
+                    error: function(xhr, status, error) {
+                        console.error('Statut :', status);
+                        console.error('Réponse brute :', xhr.responseText);
+                        alert('Erreur lors de la recherche (code ' + xhr.status + '). Voir console pour détails.');
                     }
                 });
             }
@@ -1259,14 +1132,13 @@ SCRIPTS
                 $('.alert').alert('close');
             }, 5000);
 
-            // --- Si édition via POST ---
-            <?php if (isset($editUser) && $action === 'edit'): ?>
+            // --- Si édition via POST (chargement des données) ---
+            <?php if (isset($editUser) && $action === 'load_edit'): ?>
                 $(function() {
                     $('#formAction').val('edit');
                     $('#oldId').val('<?= e($editUser['id']) ?>');
                     $('#modalTitle').html('<i class="fas fa-user text-primary me-2"></i> Modifier l\'utilisateur');
                     $('#id').prop('readonly', true);
-                    // Appliquer la contrainte boutique si le rôle est Vendeur ou Caisse
                     toggleBoutiqueRequired('<?= e($editUser['role']) ?>');
                     $('.selectpicker').selectpicker('refresh');
                     var modalEl = document.getElementById('userModal');

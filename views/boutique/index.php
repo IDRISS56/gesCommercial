@@ -1,4 +1,6 @@
 <?php
+ob_start(); // Début du buffer pour éviter toute sortie parasite
+
 // views/boutique/index.php – Gestion des boutiques (design dashboard)
 require 'databases/database.php';
 session_start();
@@ -18,8 +20,6 @@ if (!$user) {
     header('Location: ../utilisateur/login');
     exit;
 }
-
-
 
 // Fonctions utilitaires
 function e($str)
@@ -82,9 +82,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $messageType = 'warning';
             } else {
                 $errors = [];
-                if (empty($nom)) $errors[] = 'Le nom de la boutique est requis.';
-                if (empty($pays)) $errors[] = 'Le pays est requis.';
-                if (empty($ville)) $errors[] = 'La ville est requise.';
+                if (empty($nom)) $errors[] = '';
+                if (empty($pays)) $errors[] = '';
+                if (empty($ville)) $errors[] = '';
 
                 if (empty($errors)) {
                     try {
@@ -111,7 +111,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 } else {
                     $message = implode('<br>', $errors);
-                    $messageType = 'warning';
                 }
             }
         }
@@ -168,7 +167,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
     if (empty($boutiques)): ?>
         <tr>
             <td colspan="11" class="text-center py-5 text-muted">
-                <i class="fas fa-inbox fa-2x d-block mb-2 opacity-50"></i>
+                <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucune boutique trouvée
             </td>
         </tr>
@@ -197,9 +196,8 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-code="<?= e($b['code_boutique']) ?>" title="Voir"><i class="fas fa-eye"></i></button>
-                        <button class="act-btn e editBtn" data-code="<?= e($b['code_boutique']) ?>" title="Modifier"><i class="fas fa-pen"></i></button>
-                        <button class="act-btn d deleteBtn" data-code="<?= e($b['code_boutique']) ?>" data-nom="<?= e($b['nom_boutique']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="fas fa-trash"></i></button>
+                        <button class="act-btn e editBtn" data-code="<?= e($b['code_boutique']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
+                        <button class="act-btn d deleteBtn" data-code="<?= e($b['code_boutique']) ?>" data-nom="<?= e($b['nom_boutique']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                     </div>
                 </td>
             </tr>
@@ -214,7 +212,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
             <nav>
                 <ul class="pagination pagination-sm mb-0">
                     <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="fas fa-chevron-left"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
                     </li>
                     <?php
                     $start = max(1, $page - 2);
@@ -235,7 +233,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                     }
                     ?>
                     <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="fas fa-chevron-right"></i></a>
+                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
                     </li>
                 </ul>
             </nav>
@@ -259,48 +257,10 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getTableContent($pdo, $search, $filtres, $page);
+    // Nettoyer le buffer avant d'envoyer du JSON
+    ob_clean();
     header('Content-Type: application/json');
     echo json_encode($result);
-    exit;
-}
-
-// --- AJAX pour voir une boutique ---
-if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
-    $code = trim($_POST['code'] ?? '');
-    if (empty($code)) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => 'Code non spécifié']);
-        exit;
-    }
-    try {
-        $stmt = $pdo->prepare("SELECT * FROM boutique WHERE code_boutique = ?");
-        $stmt->execute([$code]);
-        $b = $stmt->fetch(PDO::FETCH_ASSOC);
-        if ($b) {
-            header('Content-Type: application/json');
-            echo json_encode([
-                'success' => true,
-                'code_boutique' => $b['code_boutique'],
-                'nom_boutique' => $b['nom_boutique'],
-                'telephone_boutique' => $b['telephone_boutique'] ?? '—',
-                'email_boutique' => $b['email_boutique'] ?? '—',
-                'pays_boutique' => $b['pays_boutique'],
-                'ville_boutique' => $b['ville_boutique'],
-                'quartier_boutique' => $b['quartier_boutique'] ?? '—',
-                'adresse_boutique' => $b['adresse_boutique'] ?? '—',
-                'latitude' => $b['latitude'] ?? '—',
-                'longitude' => $b['longitude'] ?? '—',
-                'couleur' => $b['couleur'] ?? '—',
-                'etat_boutique' => $b['etat_boutique']
-            ]);
-        } else {
-            header('Content-Type: application/json');
-            echo json_encode(['success' => false, 'message' => 'Boutique non trouvée']);
-        }
-    } catch (PDOException $e) {
-        header('Content-Type: application/json');
-        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
-    }
     exit;
 }
 
@@ -311,8 +271,9 @@ $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 $initialData = getTableContent($pdo, $search, $filtres, $page);
 
+// Chargement des données pour l'édition (action load_edit)
 $editBoutique = null;
-if ($action === 'edit' && isset($_POST['edit_code'])) {
+if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $code = $_POST['edit_code'];
     $stmt = $pdo->prepare("SELECT * FROM boutique WHERE code_boutique = ?");
     $stmt->execute([$code]);
@@ -488,12 +449,6 @@ if ($action === 'edit' && isset($_POST['edit_code'])) {
 
         .act-btn:hover {
             transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .act-btn.e:hover {
@@ -898,26 +853,6 @@ MODAL FORMULAIRE (ajout/modification) avec carte
     </div>
 
     <!-- =========================================================
-MODAL : VUE DÉTAIL
-========================================================= -->
-    <div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="bi bi-eye text-primary me-2"></i> Détails de la boutique</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3" id="viewGrid"></div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- =========================================================
 MODAL : CONFIRMATION SUPPRESSION
 ========================================================= -->
     <div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
@@ -970,7 +905,6 @@ SCRIPTS
             let marker = null;
 
             function initMap(lat, lng) {
-                // Nettoyer l'ancienne carte
                 if (map) {
                     map.remove();
                     map = null;
@@ -1002,7 +936,6 @@ SCRIPTS
                     $('#longitude').val(latlng.lng.toFixed(6));
                 });
 
-                // Redimensionner après affichage
                 setTimeout(() => {
                     if (map) map.invalidateSize();
                 }, 400);
@@ -1015,7 +948,6 @@ SCRIPTS
                 $('#oldCode').val('');
                 $('#modalTitle').html('<i class="bi bi-shop text-primary me-2"></i> Nouvelle boutique');
 
-                // Réinitialiser les champs
                 $('#boutiqueForm')[0].reset();
                 $('#code_boutique').prop('readonly', true);
                 $('#code_boutique').val('<?= generateBoutiqueId($pdo) ?>');
@@ -1025,12 +957,10 @@ SCRIPTS
                 $('#longitude').val('');
                 $('#etat_boutique').val('Actif');
 
-                // Réinitialiser la carte après ouverture du modal
                 const modalEl = document.getElementById('boutiqueModal');
                 const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
                 modal.show();
 
-                // Attendre que le modal soit visible pour initialiser la carte
                 modalEl.addEventListener('shown.bs.modal', function onShown() {
                     initMap(5.35995, -3.99995);
                     modalEl.removeEventListener('shown.bs.modal', onShown);
@@ -1039,63 +969,13 @@ SCRIPTS
                 });
             });
 
-            // --- Édition ---
+            // --- Édition (chargement) ---
             $(document).on('click', '.editBtn', function(e) {
                 e.preventDefault();
                 const code = $(this).data('code');
-                $('#actionField').val('edit');
+                $('#actionField').val('load_edit');
                 $('#editCodeField').val(code);
                 $('#actionForm').submit();
-            });
-
-            // --- Vue ---
-            $(document).on('click', '.viewBtn', function(e) {
-                e.preventDefault();
-                const code = $(this).data('code');
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        ajax_view: '1',
-                        code: code
-                    },
-                    dataType: 'json',
-                    success: function(response) {
-                        if (response.success) {
-                            $('#viewModalLabel').text('Boutique ' + response.nom_boutique);
-                            const fields = [
-                                ['Code', response.code_boutique],
-                                ['Nom', response.nom_boutique],
-                                ['Téléphone', response.telephone_boutique],
-                                ['Email', response.email_boutique],
-                                ['Pays', response.pays_boutique],
-                                ['Ville', response.ville_boutique],
-                                ['Quartier', response.quartier_boutique],
-                                ['Adresse', response.adresse_boutique],
-                                ['Latitude', response.latitude],
-                                ['Longitude', response.longitude],
-                                ['Couleur', response.couleur !== '—' ? '<span class="color-preview" style="background-color:' + response
-                                    .couleur + ';"></span> ' + response.couleur : '—'
-                                ],
-                                ['État', response.etat_boutique]
-                            ];
-                            let html = '';
-                            fields.forEach(function(field) {
-                                const label = field[0];
-                                const value = field[1] || '—';
-                                html += '<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">' +
-                                    label + '</div><div class="fw-semibold">' + value + '</div></div></div>';
-                            });
-                            $('#viewGrid').html(html);
-                            new bootstrap.Modal(document.getElementById('viewModal')).show();
-                        } else {
-                            toast('Erreur : ' + (response.message || 'Boutique non trouvée'), 'error');
-                        }
-                    },
-                    error: function() {
-                        toast('Erreur de connexion', 'error');
-                    }
-                });
             });
 
             // --- Synchronisation couleur ---
@@ -1111,14 +991,9 @@ SCRIPTS
 
             // --- Toast ---
             function toast(msg, type) {
-                // On utilise l'alerte Bootstrap (déjà présente) ou on peut créer une toast custom.
-                // Ici on utilise simplement une alerte en haut de page.
-                // Mais comme nous avons déjà des alertes, on peut les réutiliser.
-                // On crée un élément temporaire.
                 const container = $('.container-crud');
                 const alertHtml =
                     `<div class="alert alert-${type} alert-dismissible fade show" role="alert">${msg}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>`;
-                // Supprimer les anciennes alertes
                 container.find('.alert').remove();
                 container.prepend(alertHtml);
                 setTimeout(() => {
@@ -1126,15 +1001,21 @@ SCRIPTS
                 }, 5000);
             }
 
-            // --- Fonction de recherche AJAX ---
+            // --- Fonction de recherche AJAX (explicite) ---
             function rechercher(page) {
                 page = page || 1;
-                var formData = $('#searchForm').serialize();
-                formData += '&page=' + page;
+                var search = $('#searchInput').val();
+                var etat = $('#etatFilter').val();
+
                 $.ajax({
                     url: window.location.href,
                     method: 'POST',
-                    data: formData,
+                    data: {
+                        ajax: 1,
+                        search: search,
+                        etat: etat,
+                        page: page
+                    },
                     dataType: 'json',
                     success: function(data) {
                         $('#tableBody').html(data.table);
@@ -1148,14 +1029,16 @@ SCRIPTS
                         });
                         $('.selectpicker').selectpicker('refresh');
                     },
-                    error: function() {
+                    error: function(xhr, status, error) {
+                        console.error('Erreur AJAX :', status, error);
                         toast('Erreur lors de la recherche.', 'danger');
                     }
                 });
             }
 
-            // Auto-submit pour le champ recherche
+            // --- Gestionnaires d'événements ---
             var searchTimeout = null;
+
             $('#searchInput').on('input', function() {
                 clearTimeout(searchTimeout);
                 searchTimeout = setTimeout(function() {
@@ -1163,7 +1046,6 @@ SCRIPTS
                 }, 300);
             });
 
-            // Pour les selectpicker du filtre
             $('#etatFilter').on('changed.bs.select', function() {
                 clearTimeout(searchTimeout);
                 searchTimeout = setTimeout(function() {
@@ -1171,12 +1053,10 @@ SCRIPTS
                 }, 300);
             });
 
-            // Bouton Filtrer
             $('#filterBtn').on('click', function() {
                 rechercher(1);
             });
 
-            // Réinitialisation
             $('#resetBtn').on('click', function() {
                 $('#searchInput').val('');
                 $('#etatFilter').selectpicker('val', '');
@@ -1208,8 +1088,8 @@ SCRIPTS
                 $('.alert').alert('close');
             }, 5000);
 
-            // --- Si édition via POST ---
-            <?php if (isset($editBoutique) && $action === 'edit'): ?>
+            // --- Si édition via POST (chargement) ---
+            <?php if (isset($editBoutique) && $action === 'load_edit'): ?>
                 $(function() {
                     $('#formAction').val('edit');
                     $('#oldCode').val('<?= e($editBoutique['code_boutique']) ?>');
@@ -1220,7 +1100,6 @@ SCRIPTS
                     const modal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
                     modal.show();
 
-                    // Initialiser la carte après affichage
                     modalEl.addEventListener('shown.bs.modal', function onShown() {
                         const lat = parseFloat('<?= e($editBoutique['latitude'] ?? '5.35995') ?>') || 5.35995;
                         const lng = parseFloat('<?= e($editBoutique['longitude'] ?? '-3.99995') ?>') || -3.99995;

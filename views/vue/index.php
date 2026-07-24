@@ -1,4 +1,18 @@
 <?php
+ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
+
+// Fonction utilitaire pour envoyer une réponse JSON propre
+function sendJson($data)
+{
+    // Supprimer tous les buffers de sortie actifs
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+
 // views/vue/index.php – Gestion des vues de notifications (design dashboard)
 session_start();
 if (!isset($_SESSION['user_id'])) {
@@ -136,7 +150,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     ob_start();
     if (empty($data['vues'])): ?>
         <tr>
-            <td colspan="7" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucune vue trouvée</td>
+            <td colspan="6" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucune vue trouvée</td>
         </tr>
         <?php else: foreach ($data['vues'] as $v): ?>
             <tr>
@@ -150,7 +164,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                 </td>
                 <td><?= e($v['affichage'] ?? '—') ?></td>
                 <td class="text-end">
-                    <button class="act-btn v viewBtn" data-id="<?= e($v['id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
+                    <!-- Bouton Voir supprimé -->
                     <button class="act-btn e editBtn" data-id="<?= e($v['id']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
                     <form method="POST" style="display:inline-block;" onsubmit="return confirm('Supprimer cette vue ?');">
                         <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
@@ -200,26 +214,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
 <?php endif;
     $paginationHtml = ob_get_clean();
 
-    header('Content-Type: application/json');
-    echo json_encode(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
-    exit;
-}
-
-// ---- DÉTAIL D'UNE VUE (AJAX) ----
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'get_vue_detail') {
-    $id = (int)$_POST['id'];
-    $stmt = $pdo->prepare("
-        SELECT v.*, n.titre AS notification_titre, u.nom_prenom AS utilisateur_nom
-        FROM vue v
-        LEFT JOIN notification n ON v.notification = n.id
-        LEFT JOIN utilisateur u ON v.user = u.id
-        WHERE v.id = ?
-    ");
-    $stmt->execute([$id]);
-    $vue = $stmt->fetch(PDO::FETCH_ASSOC);
-    header('Content-Type: application/json');
-    echo json_encode($vue);
-    exit;
+    sendJson(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
 }
 
 // ---- OBTENIR UNE VUE POUR ÉDITION (AJAX) ----
@@ -228,9 +223,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $stmt = $pdo->prepare("SELECT * FROM vue WHERE id = ?");
     $stmt->execute([$id]);
     $vue = $stmt->fetch(PDO::FETCH_ASSOC);
-    header('Content-Type: application/json');
-    echo json_encode($vue);
-    exit;
+    sendJson($vue);
 }
 ?>
 <!DOCTYPE html>
@@ -416,12 +409,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
         .act-btn:hover {
             transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
         }
 
         .act-btn.e:hover {
@@ -710,7 +697,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                                     </td>
                                     <td><?= e($v['affichage'] ?? '—') ?></td>
                                     <td class="text-end">
-                                        <button class="act-btn v viewBtn" data-id="<?= e($v['id']) ?>" title="Détail"><i class="bi bi-eye"></i></button>
+                                        <!-- Bouton Voir supprimé -->
                                         <button class="act-btn e editBtn" data-id="<?= e($v['id']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
                                         <form method="POST" style="display:inline-block;" onsubmit="return confirm('Supprimer cette vue ?');">
                                             <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
@@ -817,34 +804,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         </div>
     </div>
 
-    <!-- Modal Détail -->
-    <div class="modal fade" id="detailModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-lg modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold"><i class="bi bi-eye text-primary me-2"></i> Détail de la vue</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3">
-                        <div class="col-md-6"><strong>ID :</strong> <span id="detailId"></span></div>
-                        <div class="col-md-6"><strong>Notification :</strong> <span id="detailNotification"></span></div>
-                        <div class="col-md-6"><strong>Utilisateur :</strong> <span id="detailUser"></span></div>
-                        <div class="col-md-6"><strong>Lecture :</strong> <span id="detailLecture"></span></div>
-                        <div class="col-md-6"><strong>Affichage :</strong> <span id="detailAffichage"></span></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         $(document).ready(function() {
             // ---- Modal Ajout ----
             const vueModal = new bootstrap.Modal(document.getElementById('vueModal'));
-            const detailModal = new bootstrap.Modal(document.getElementById('detailModal'));
 
             $('#addBtn').on('click', function() {
                 $('#modalTitle').text('Nouvelle vue');
@@ -877,33 +842,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         $('#affichage').val(data.affichage);
                         vueModal.show();
                     },
-                    error: function() {
-                        alert('Erreur lors du chargement des données.');
-                    }
-                });
-            });
-
-            // ---- Détail ----
-            $(document).on('click', '.viewBtn', function() {
-                const id = $(this).data('id');
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        action: 'get_vue_detail',
-                        id: id
-                    },
-                    dataType: 'json',
-                    success: function(data) {
-                        $('#detailId').text(data.id);
-                        $('#detailNotification').text(data.notification_titre || '—');
-                        $('#detailUser').text(data.utilisateur_nom || '—');
-                        $('#detailLecture').text(data.lecture || 'Non');
-                        $('#detailAffichage').text(data.affichage || '—');
-                        detailModal.show();
-                    },
-                    error: function() {
-                        alert('Erreur lors du chargement du détail.');
+                    error: function(xhr) {
+                        try {
+                            var resp = JSON.parse(xhr.responseText);
+                            alert(resp.error || 'Erreur');
+                        } catch (e) {
+                            alert('Erreur lors du chargement des données.');
+                        }
                     }
                 });
             });
