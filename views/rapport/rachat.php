@@ -4,24 +4,8 @@
 // "La Marchandise" — Design Premium Bleu — Monnaie FCFA
 // ============================================
 
-$host = '127.0.0.1';
-$db   = 'gescommercial';
-$user = 'root';
-$pass = '';
-$charset = 'utf8mb4';
-
-$dsn = "mysql:host=$host;dbname=$db;charset=$charset";
-$options = [
-    PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-    PDO::ATTR_EMULATE_PREPARES   => false,
-];
-
-try {
-    $pdo = new PDO($dsn, $user, $pass, $options);
-} catch (\PDOException $e) {
-    die("Erreur de connexion : " . $e->getMessage());
-}
+require_once 'databases/database.php';
+require_once 'librairies/fpdf/fpdf.php';
 
 // ============================================
 // SOUS-ONGLET A : ACHATS & FOURNISSEURS
@@ -40,18 +24,18 @@ $bilanAchats = $pdo->query("
     LEFT JOIN contact ct ON c.contact_id = ct.code_contact
     LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
     LEFT JOIN categorie cat ON p.categorie_id = cat.code_categorie
-    WHERE c.statut_id IN ('ST001', 'Achat', '011')
+    WHERE c.statut_id = '011' AND etat_commande NOT IN ('En attente','Annulé')
     ORDER BY c.date_commande DESC, c.heure_commande DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $totalAchats = $pdo->query("
     SELECT COALESCE(SUM(CAST(montant_commande AS DECIMAL(12,2))), 0) AS total 
-    FROM commande WHERE statut_id IN ('ST001', 'Achat', '011')
-")->fetch()['total'];
+    FROM commande WHERE statut_id = '011' AND etat_commande NOT IN ('En attente','Annulé')
+")->fetch(PDO::FETCH_ASSOC)['total'];
 
 $nbCommandesAchat = $pdo->query("
-    SELECT COUNT(*) AS nb FROM commande WHERE statut_id IN ('ST001', 'Achat', '011')
-")->fetch()['nb'];
+    SELECT COUNT(*) AS nb FROM commande WHERE statut_id = '011' AND etat_commande NOT IN ('En attente','Annulé')
+")->fetch(PDO::FETCH_ASSOC)['nb'];
 
 $rapportFournisseurs = $pdo->query("
     SELECT 
@@ -63,11 +47,11 @@ $rapportFournisseurs = $pdo->query("
         MAX(c.date_commande) AS derniere_commande
     FROM contact ct
     LEFT JOIN commande c ON ct.code_contact = c.contact_id 
-        AND c.statut_id IN ('ST001', 'Achat', '011')
+        AND c.statut_id = '011' AND etat_commande NOT IN ('En attente','Annulé')
     WHERE ct.type_contact = 'FOURNISSEUR'
     GROUP BY ct.code_contact
     ORDER BY montant_total DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $dettesFournisseurs = $pdo->query("
     SELECT 
@@ -79,7 +63,7 @@ $dettesFournisseurs = $pdo->query("
     WHERE ct.type_contact = 'FOURNISSEUR'
       AND CAST(f.reste AS DECIMAL(12,2)) > 0
     ORDER BY CAST(f.reste AS DECIMAL(12,2)) DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $totalDettes = $pdo->query("
     SELECT COALESCE(SUM(CAST(f.reste AS DECIMAL(12,2))), 0) AS total
@@ -87,7 +71,7 @@ $totalDettes = $pdo->query("
     LEFT JOIN contact ct ON f.contact_id = ct.code_contact
     WHERE ct.type_contact = 'FOURNISSEUR'
       AND CAST(f.reste AS DECIMAL(12,2)) > 0
-")->fetch()['total'];
+")->fetch(PDO::FETCH_ASSOC)['total'];
 
 // ============================================
 // SOUS-ONGLET B : BILAN DU STOCK
@@ -105,23 +89,23 @@ $stockActuel = $pdo->query("
     LEFT JOIN boutique b ON sb.boutique_id = b.code_boutique
     LEFT JOIN categorie cat ON p.categorie_id = cat.code_categorie
     ORDER BY sb.quantite ASC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $valeurStock = $pdo->query("
     SELECT COALESCE(SUM(sb.quantite * CAST(COALESCE(p.prix_fournisseur, '0') AS DECIMAL(12,2))), 0) AS total
     FROM stock_boutique sb
     LEFT JOIN produit p ON sb.produit_id = p.code_produit
-")->fetch()['total'];
+")->fetch(PDO::FETCH_ASSOC)['total'];
 
 $mouvementsEntrees = $pdo->query("
     SELECT COALESCE(SUM(quantite_commande), 0) AS total 
-    FROM commande WHERE statut_id IN ('ST001', 'Achat', '011')
-")->fetch()['total'];
+    FROM commande WHERE statut_id = '011' AND etat_commande NOT IN ('En attente','Annulé')
+")->fetch(PDO::FETCH_ASSOC)['total'];
 
 $mouvementsSorties = $pdo->query("
     SELECT COALESCE(SUM(quantite_commande), 0) AS total 
-    FROM commande WHERE statut_id IN ('ST002', 'Vente', '012')
-")->fetch()['total'];
+    FROM commande WHERE statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé')
+")->fetch(PDO::FETCH_ASSOC)['total'];
 
 $produitsRupture = $pdo->query("
     SELECT p.titre_produit, b.nom_boutique, sb.quantite, p.code_produit
@@ -129,7 +113,7 @@ $produitsRupture = $pdo->query("
     LEFT JOIN produit p ON sb.produit_id = p.code_produit
     LEFT JOIN boutique b ON sb.boutique_id = b.code_boutique
     WHERE sb.quantite <= 0
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $produitsAlerte = $pdo->query("
     SELECT 
@@ -141,13 +125,13 @@ $produitsAlerte = $pdo->query("
     WHERE sb.quantite <= CAST(p.stock_alerte AS UNSIGNED)
       AND sb.quantite > 0
     ORDER BY manque DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $stockNormal = $pdo->query("
     SELECT COUNT(*) AS nb FROM stock_boutique sb
     LEFT JOIN produit p ON sb.produit_id = p.code_produit
     WHERE sb.quantite > CAST(p.stock_alerte AS UNSIGNED)
-")->fetch()['nb'];
+")->fetch(PDO::FETCH_ASSOC)['nb'];
 
 $stockFaible = count($produitsAlerte);
 $stockRupture = count($produitsRupture);
@@ -155,13 +139,13 @@ $stockRupture = count($produitsRupture);
 $achatsVentesMois = $pdo->query("
     SELECT 
         DATE_FORMAT(c.date_commande, '%Y-%m') AS mois,
-        SUM(CASE WHEN c.statut_id IN ('ST001', 'Achat', '011') THEN CAST(c.montant_commande AS DECIMAL(12,2)) ELSE 0 END) AS achats,
-        SUM(CASE WHEN c.statut_id IN ('ST002', 'Vente', '012') THEN CAST(c.montant_commande AS DECIMAL(12,2)) ELSE 0 END) AS ventes
+        SUM(CASE WHEN c.statut_id = '011' AND etat_commande NOT IN ('En attente','Annulé') THEN CAST(c.montant_commande AS DECIMAL(12,2)) ELSE 0 END) AS achats,
+        SUM(CASE WHEN c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé') THEN CAST(c.montant_commande AS DECIMAL(12,2)) ELSE 0 END) AS ventes
     FROM commande c
     WHERE c.date_commande IS NOT NULL
     GROUP BY DATE_FORMAT(c.date_commande, '%Y-%m')
     ORDER BY mois ASC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 // ============================================
 // SOUS-ONGLET C : INVENTAIRE PHYSIQUE
@@ -176,7 +160,7 @@ $stockTheorique = $pdo->query("
     LEFT JOIN produit p ON sb.produit_id = p.code_produit
     LEFT JOIN boutique b ON sb.boutique_id = b.code_boutique
     ORDER BY p.titre_produit, b.nom_boutique
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $transferts = $pdo->query("
     SELECT 
@@ -188,20 +172,320 @@ $transferts = $pdo->query("
     LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
     WHERE c.statut_id IN ('008', '009')
     ORDER BY c.date_commande DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
-$nbProduits = $pdo->query("SELECT COUNT(*) AS nb FROM produit WHERE etat_produit='Actif'")->fetch()['nb'];
-$nbFournisseurs = $pdo->query("SELECT COUNT(*) AS nb FROM contact WHERE type_contact='FOURNISSEUR'")->fetch()['nb'];
-$nbBoutiques = $pdo->query("SELECT COUNT(*) AS nb FROM boutique WHERE etat_boutique='Actif'")->fetch()['nb'];
-$nbCategories = $pdo->query("SELECT COUNT(*) AS nb FROM categorie WHERE etat_categorie='Actif'")->fetch()['nb'];
+$nbProduits = $pdo->query("SELECT COUNT(*) AS nb FROM produit WHERE etat_produit='Actif'")->fetch(PDO::FETCH_ASSOC)['nb'];
+$nbFournisseurs = $pdo->query("SELECT COUNT(*) AS nb FROM contact WHERE type_contact='FOURNISSEUR'")->fetch(PDO::FETCH_ASSOC)['nb'];
+$nbBoutiques = $pdo->query("SELECT COUNT(*) AS nb FROM boutique WHERE etat_boutique='Actif'")->fetch(PDO::FETCH_ASSOC)['nb'];
+$nbCategories = $pdo->query("SELECT COUNT(*) AS nb FROM categorie WHERE etat_categorie='Actif'")->fetch(PDO::FETCH_ASSOC)['nb'];
 
 $totalValSys = 0;
 foreach ($stockTheorique as $st) {
     $totalValSys += floatval($st['valeur_systeme']);
 }
 
-$categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='Actif'")->fetchAll();
-$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique='Actif'")->fetchAll();
+$categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='Actif'")->fetchAll(PDO::FETCH_ASSOC);
+$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique='Actif'")->fetchAll(PDO::FETCH_ASSOC);
+
+// ============================================
+// FONCTIONS D'ENCODAGE POUR FPDF
+// ============================================
+function safeText($str) {
+    return iconv('UTF-8', 'ISO-8859-1//TRANSLIT', $str);
+}
+
+// ============================================
+// TRAITEMENT EXPORT PDF (POST) — PAYSAGE
+// ============================================
+if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && isset($_POST['table'])) {
+    $table = $_POST['table'];
+    $allowedTables = ['achats', 'fournisseurs', 'stock', 'inventaire'];
+    if (!in_array($table, $allowedTables)) {
+        die('Table non autorisée.');
+    }
+
+    error_reporting(0);
+    while (ob_get_level()) ob_end_clean();
+
+    $boutique = $pdo->query("SELECT * FROM boutique WHERE etat_boutique = 'Actif' LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+    if (!$boutique) {
+        $boutique = [
+            'nom_boutique' => 'ABC DISTRIBUTION SARL',
+            'adresse_boutique' => '01 BP 1234 Bouaké 01',
+            'ville_boutique' => 'Bouaké',
+            'pays_boutique' => 'Côte d\'Ivoire',
+            'telephone_boutique' => '+225 07 08 09 10 11',
+            'email_boutique' => 'contact@abcdistribution.ci'
+        ];
+    }
+
+    $pdf = new FPDF('L', 'mm', 'A4');
+    $pdf->AddPage();
+    $pdf->SetFont('Arial', '', 10);
+
+    $blueDark = [0, 51, 102];
+    $toLatin = function($chaine) { return safeText($chaine); };
+
+    $yStart = 10;
+    $pageWidth = 297;
+    $margin = 10;
+    $maxWidth = $pageWidth - 2 * $margin;
+
+    // ---- EN-TÊTE MINIMAL ----
+    $pdf->SetFont('Arial', 'B', 14);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text($margin, $yStart + 6, $toLatin(strtoupper($boutique['nom_boutique'])));
+
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetTextColor(80, 80, 80);
+    $pdf->Text($margin, $yStart + 11, $toLatin("Tél. : " . $boutique['telephone_boutique'] . " | Email : " . $boutique['email_boutique']));
+
+    $titreDoc = match($table) {
+        'achats' => 'RAPPORT D\'ACHATS',
+        'fournisseurs' => 'RAPPORT DES FOURNISSEURS',
+        'stock' => 'BILAN DU STOCK',
+        'inventaire' => 'INVENTAIRE PHYSIQUE'
+    };
+    $pdf->SetFont('Arial', 'B', 22);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->SetXY(0, $yStart + 10);
+    $pdf->Cell($pageWidth, 10, $toLatin($titreDoc), 0, 1, 'C');
+
+    $pdf->SetFont('Arial', '', 9);
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->Text(215, $yStart + 20, $toLatin('Date export : ' . date('d/m/Y H:i')));
+
+    $pdf->SetDrawColor(200, 200, 200);
+    $pdf->Line($margin, 42, $pageWidth - $margin, 42);
+
+    $yTable = 48;
+    $pageBottom = 195;
+    $headerH = 7;
+    $rowH = 6;
+
+    $drawTableHeader = function($pdf, $colWidths, $headers, &$yTable, $headerH, $blueDark, $toLatin, $margin) {
+        $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->SetTextColor(255, 255, 255);
+        $pdf->SetFont('Arial', 'B', 7);
+        $x = $margin;
+        foreach ($headers as $i => $h) {
+            $label = $toLatin($h);
+            $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
+            $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
+            $x += $colWidths[$i];
+        }
+    };
+
+    $drawTableRow = function($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin) {
+        $x = $margin;
+        foreach ($data as $i => $val) {
+            $label = $toLatin((string)$val);
+            $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
+            $pdf->Text($x + 1, $yCurrent + 4.5, $label);
+            $x += $colWidths[$i];
+        }
+    };
+
+    $totalGeneral = 0;
+
+    switch ($table) {
+        case 'achats':
+            if (empty($bilanAchats)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée à afficher.'));
+                break;
+            }
+            $colWidths = [18, 18, 30, 45, 18, 18, 22, 28, 28, 18, 18];
+            $headers = ['N°', 'Date', 'Fournisseur', 'Produit', 'Cat.', 'Qte', 'P.U.', 'Montant', 'Boutique', 'Livr.', 'État'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            foreach ($bilanAchats as $a) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                // Réinitialiser la couleur du texte pour les données
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $data = [
+                    $a['numero_commande'],
+                    $a['date_commande'],
+                    $a['fournisseur'] ?? '—',
+                    $a['titre_produit'] ?? '—',
+                    $a['titre_categorie'] ?? '—',
+                    $a['quantite_commande'] . ' ' . ($a['unite_affichage'] ?? ''),
+                    number_format($a['prix_achat'], 0, ',', ' '),
+                    number_format($a['montant_commande'], 0, ',', ' '),
+                    $a['nom_boutique'] ?? '—',
+                    $a['date_livraison_recue'] ?? '—',
+                    $a['etat_commande']
+                ];
+                $totalGeneral += floatval($a['montant_commande']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('TOTAL GÉNÉRAL DES ACHATS : ' . number_format($totalGeneral, 0, ',', ' ') . ' FCFA'));
+            break;
+
+        case 'fournisseurs':
+            if (empty($rapportFournisseurs)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée.'));
+                break;
+            }
+            $colWidths = [40, 22, 35, 35, 22, 30, 25, 25];
+            $headers = ['Fournisseur', 'Tél.', 'Email', 'Adresse', 'Cmd', 'Total', 'Prix moy.', 'Dern. cmd'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            foreach ($rapportFournisseurs as $f) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $data = [
+                    $f['fournisseur'],
+                    $f['telephone_contact'],
+                    $f['email_contact'],
+                    $f['adresse_contact'] ?? '—',
+                    $f['nb_commandes'],
+                    number_format($f['montant_total'], 0, ',', ' '),
+                    number_format($f['prix_moyen'], 0, ',', ' '),
+                    $f['derniere_commande'] ?? '—'
+                ];
+                $totalGeneral += floatval($f['montant_total']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('MONTANT TOTAL DES COMMANDES : ' . number_format($totalGeneral, 0, ',', ' ') . ' FCFA'));
+            break;
+
+        case 'stock':
+            if (empty($stockActuel)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée.'));
+                break;
+            }
+            $colWidths = [40, 25, 30, 18, 25, 32, 18, 22, 22];
+            $headers = ['Produit', 'Cat.', 'Boutique', 'Qte', 'Prix F.', 'Valeur', 'Seuil', 'État', 'MAJ'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            foreach ($stockActuel as $s) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $qte = intval($s['quantite']);
+                $seuil = intval($s['stock_alerte'] ?? 0);
+                $etatText = $qte <= 0 ? 'Rupture' : ($qte <= $seuil ? 'Faible' : 'Normal');
+                $data = [
+                    $s['titre_produit'],
+                    $s['titre_categorie'] ?? '—',
+                    $s['nom_boutique'],
+                    $qte,
+                    number_format($s['prix_fournisseur'], 0, ',', ' '),
+                    number_format($s['valeur_stock'], 0, ',', ' '),
+                    $seuil,
+                    $etatText,
+                    $s['maj_le'] ?? '—'
+                ];
+                $totalGeneral += floatval($s['valeur_stock']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('VALEUR TOTALE DU STOCK : ' . number_format($totalGeneral, 0, ',', ' ') . ' FCFA'));
+            break;
+
+        case 'inventaire':
+            if (empty($stockTheorique)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée.'));
+                break;
+            }
+            $colWidths = [40, 30, 22, 22, 22, 30, 28];
+            $headers = ['Produit', 'Boutique', 'Système', 'Physique', 'Écart', 'Val. Écart', 'Obs.'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            foreach ($stockTheorique as $st) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $qteSys = intval($st['stock_systeme']);
+                $data = [
+                    $st['titre_produit'],
+                    $st['nom_boutique'],
+                    $qteSys,
+                    '_____',
+                    '...',
+                    '...',
+                    'À saisir'
+                ];
+                $totalGeneral += floatval($st['valeur_systeme']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('VALEUR THÉORIQUE : ' . number_format($totalGeneral, 0, ',', ' ') . ' FCFA'));
+            break;
+    }
+
+    while (ob_get_level()) ob_end_clean();
+    $pdf->Output('D', 'Rapport_' . $table . '_' . date('Ymd') . '.pdf');
+    exit;
+}
+
+// ============================================
+// FIN TRAITEMENT PDF, DEBUT AFFICHAGE HTML
+// ============================================
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -214,6 +498,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
+        /* ===== STYLES CSS (inchangés) ===== */
         :root {
             --primary: #1e40af;
             --primary-dark: #1e3a8a;
@@ -427,35 +712,17 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             flex-shrink: 0;
         }
 
-        .stat-icon-wrap.blue {
-            background: linear-gradient(135deg, var(--primary-mid), var(--primary));
-        }
-
-        .stat-icon-wrap.blue-dark {
-            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-        }
-
-        .stat-icon-wrap.sky {
-            background: linear-gradient(135deg, #0284c7, #0369a1);
-        }
-
-        .stat-icon-wrap.amber {
-            background: linear-gradient(135deg, var(--accent), #b45309);
-        }
-
-        .stat-icon-wrap.rose {
-            background: linear-gradient(135deg, #e11d48, #be123c);
-        }
-
-        .stat-icon-wrap.violet {
-            background: linear-gradient(135deg, var(--purple), #6d28d9);
-        }
+        .stat-icon-wrap.blue { background: linear-gradient(135deg, var(--primary-mid), var(--primary)); }
+        .stat-icon-wrap.blue-dark { background: linear-gradient(135deg, var(--primary), var(--primary-dark)); }
+        .stat-icon-wrap.sky { background: linear-gradient(135deg, #0284c7, #0369a1); }
+        .stat-icon-wrap.amber { background: linear-gradient(135deg, var(--accent), #b45309); }
+        .stat-icon-wrap.rose { background: linear-gradient(135deg, #e11d48, #be123c); }
+        .stat-icon-wrap.violet { background: linear-gradient(135deg, var(--purple), #6d28d9); }
 
         .stat-body {
             flex: 1;
             min-width: 0;
         }
-
         .stat-value {
             font-size: 1.15rem;
             font-weight: 800;
@@ -466,7 +733,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             overflow: hidden;
             text-overflow: ellipsis;
         }
-
         .stat-label {
             font-size: 0.7rem;
             color: var(--text-soft);
@@ -474,7 +740,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             margin-top: 1px;
             line-height: 1.2;
         }
-
         .stat-spark {
             font-size: 0.62rem;
             padding: 2px 6px;
@@ -485,12 +750,10 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             gap: 3px;
             margin-top: 3px;
         }
-
         .stat-spark.up {
             background: var(--success-light);
             color: var(--success);
         }
-
         .stat-spark.down {
             background: var(--danger-light);
             color: var(--danger);
@@ -500,7 +763,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
         .tabs-container {
             margin-bottom: 0;
         }
-
         .tabs {
             display: flex;
             gap: 4px;
@@ -512,7 +774,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             border-bottom: none;
             flex-wrap: wrap;
         }
-
         .tab-btn {
             padding: 9px 18px;
             border: none;
@@ -528,22 +789,18 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             align-items: center;
             gap: 6px;
         }
-
         .tab-btn i {
             font-size: 0.8rem;
         }
-
         .tab-btn:hover {
             background: var(--primary-light);
             color: var(--primary);
         }
-
         .tab-btn.active {
             background: var(--primary-mid);
             color: white;
             box-shadow: 0 3px 10px var(--primary-glow);
         }
-
         .tab-btn .count-badge {
             background: var(--danger);
             color: white;
@@ -553,9 +810,8 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             font-weight: 700;
             line-height: 1.3;
         }
-
         .tab-btn.active .count-badge {
-            background: rgba(255, 255, 255, 0.25);
+            background: rgba(255,255,255,0.25);
         }
 
         /* ── TAB CONTENT ── */
@@ -570,21 +826,12 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             margin-bottom: 28px;
             animation: tabFadeIn 0.3s ease;
         }
-
         .tab-content.active {
             display: block;
         }
-
         @keyframes tabFadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(6px);
-            }
-
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         /* ── SECTION TITLE ── */
@@ -601,27 +848,22 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             flex-wrap: wrap;
             gap: 8px;
         }
-
         .section-title:first-child {
             margin-top: 0;
         }
-
         .section-title-left {
             display: flex;
             align-items: center;
             gap: 8px;
         }
-
         .section-title-left i {
             color: var(--primary-mid);
             font-size: 0.85rem;
         }
-
         .section-actions {
             display: flex;
             gap: 6px;
         }
-
         .btn-action {
             padding: 6px 12px;
             background: var(--card-alt);
@@ -636,15 +878,15 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             display: flex;
             align-items: center;
             gap: 5px;
+            text-decoration: none;
+            border: none;
         }
-
         .btn-action:hover {
             background: var(--primary-mid);
             color: white;
             border-color: var(--primary-mid);
             box-shadow: 0 2px 8px var(--primary-glow);
         }
-
         .btn-action.accent:hover {
             background: var(--accent);
             border-color: var(--accent);
@@ -663,7 +905,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             border: 1px solid var(--border);
             transition: all 0.3s;
         }
-
         .filter-group {
             display: flex;
             flex-direction: column;
@@ -671,7 +912,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             flex: 1;
             min-width: 140px;
         }
-
         .filter-group label {
             font-size: 0.68rem;
             font-weight: 700;
@@ -682,12 +922,10 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             align-items: center;
             gap: 4px;
         }
-
         .filter-group label i {
             color: var(--primary-mid);
             font-size: 0.6rem;
         }
-
         .filter-group select,
         .filter-group input[type="date"] {
             padding: 7px 10px;
@@ -700,27 +938,23 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             transition: all 0.25s;
             appearance: none;
         }
-
         .filter-group select {
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: right 10px center;
             padding-right: 28px;
         }
-
         .filter-group select:focus,
         .filter-group input:focus {
             outline: none;
             border-color: var(--primary-mid);
             box-shadow: 0 0 0 3px var(--primary-glow);
         }
-
         .filter-actions {
             display: flex;
             gap: 6px;
             align-items: flex-end;
         }
-
         .btn-filter {
             padding: 7px 14px;
             background: var(--primary-mid);
@@ -737,25 +971,21 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             gap: 5px;
             white-space: nowrap;
         }
-
         .btn-filter:hover {
             background: var(--primary);
             transform: translateY(-1px);
             box-shadow: 0 3px 10px var(--primary-glow);
         }
-
         .btn-filter.secondary {
             background: white;
             color: var(--text-mid);
             border: 1px solid var(--border);
         }
-
         .btn-filter.secondary:hover {
             background: var(--card-alt);
             color: var(--dark);
             box-shadow: var(--shadow-sm);
         }
-
         .filters-summary {
             display: flex;
             flex-wrap: wrap;
@@ -767,11 +997,9 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             align-items: center;
             border: 1px solid rgba(37, 99, 235, 0.15);
         }
-
         .filters-summary.hidden {
             display: none;
         }
-
         .filter-tag {
             background: white;
             color: var(--primary);
@@ -784,7 +1012,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             gap: 5px;
             border: 1px solid var(--primary-mid);
         }
-
         .filter-tag .remove {
             cursor: pointer;
             color: var(--danger);
@@ -792,11 +1019,9 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             font-size: 0.8rem;
             transition: transform 0.15s;
         }
-
         .filter-tag .remove:hover {
             transform: scale(1.15);
         }
-
         .results-counter {
             margin-left: auto;
             font-size: 0.78rem;
@@ -810,7 +1035,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             margin-bottom: 14px;
             max-width: 380px;
         }
-
         .search-bar input {
             width: 100%;
             padding: 9px 14px 9px 38px;
@@ -822,13 +1046,11 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             color: var(--text);
             transition: all 0.25s;
         }
-
         .search-bar input:focus {
             outline: none;
             border-color: var(--primary-mid);
             box-shadow: 0 0 0 3px var(--primary-glow);
         }
-
         .search-bar .search-icon {
             position: absolute;
             left: 12px;
@@ -847,13 +1069,11 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             position: relative;
             background: white;
         }
-
         table {
             width: 100%;
             border-collapse: collapse;
             font-size: 0.82rem;
         }
-
         thead {
             background: linear-gradient(135deg, var(--primary-deeper), var(--primary-dark));
             color: white;
@@ -861,7 +1081,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             top: 0;
             z-index: 10;
         }
-
         th {
             padding: 10px 14px;
             text-align: left;
@@ -874,50 +1093,40 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             cursor: default;
             user-select: none;
         }
-
         th.sortable {
             cursor: pointer;
         }
-
         th.sortable:hover {
-            background: rgba(255, 255, 255, 0.08);
+            background: rgba(255,255,255,0.08);
         }
-
         th .sort-icon {
             margin-left: 3px;
             opacity: 0.4;
             font-size: 0.6rem;
             transition: opacity 0.2s;
         }
-
         th.sort-asc .sort-icon,
         th.sort-desc .sort-icon {
             opacity: 1;
         }
-
         td {
             padding: 9px 14px;
             border-bottom: 1px solid var(--border);
             color: var(--text);
             vertical-align: middle;
         }
-
         tbody tr {
             transition: background 0.15s;
         }
-
         tbody tr:hover {
             background: var(--primary-light);
         }
-
         tbody tr:last-child td {
             border-bottom: none;
         }
-
         tbody tr.hidden-row {
             display: none;
         }
-
         tfoot td {
             background: var(--card-alt);
             font-weight: 700;
@@ -937,42 +1146,34 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             gap: 4px;
             letter-spacing: 0.2px;
         }
-
         .badge-success {
             background: var(--success-light);
             color: #065f46;
         }
-
         .badge-warning {
             background: var(--warning-light);
             color: #9a3412;
         }
-
         .badge-danger {
             background: var(--danger-light);
             color: #991b1b;
         }
-
         .badge-info {
             background: var(--info-light);
             color: #075985;
         }
-
         .badge-purple {
             background: var(--purple-light);
             color: #5b21b6;
         }
-
         .badge-secondary {
             background: #e2e8f0;
             color: #475569;
         }
-
         .badge-blue {
             background: var(--primary-light);
             color: var(--primary);
         }
-
         .badge-amber {
             background: #fef3c7;
             color: #92400e;
@@ -985,7 +1186,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             gap: 16px;
             margin-bottom: 20px;
         }
-
         .chart-card {
             background: var(--card-alt);
             border-radius: 10px;
@@ -993,12 +1193,10 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             border: 1px solid var(--border);
             transition: all 0.3s;
         }
-
         .chart-card:hover {
             box-shadow: var(--shadow);
             border-color: var(--primary-mid);
         }
-
         .chart-card h4 {
             font-size: 0.88rem;
             font-weight: 700;
@@ -1008,7 +1206,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             align-items: center;
             gap: 7px;
         }
-
         .chart-card h4 i {
             color: var(--primary-mid);
             font-size: 0.82rem;
@@ -1021,7 +1218,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             gap: 12px;
             margin-bottom: 20px;
         }
-
         .alert-card {
             padding: 14px 14px 12px;
             border-radius: 10px;
@@ -1032,7 +1228,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             position: relative;
             overflow: hidden;
         }
-
         .alert-card::after {
             content: '';
             position: absolute;
@@ -1041,32 +1236,26 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             opacity: 0.03;
             pointer-events: none;
         }
-
         .alert-card:hover {
             transform: translateY(-3px);
             box-shadow: var(--shadow);
         }
-
         .alert-card.critical {
             border-color: var(--danger);
             background: var(--danger-light);
         }
-
         .alert-card.warning {
             border-color: var(--warning);
             background: var(--warning-light);
         }
-
         .alert-card.info {
             border-color: var(--info);
             background: var(--info-light);
         }
-
         .alert-card.success {
             border-color: var(--success);
             background: var(--success-light);
         }
-
         .alert-card h5 {
             font-size: 0.7rem;
             font-weight: 600;
@@ -1078,30 +1267,16 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             text-transform: uppercase;
             letter-spacing: 0.4px;
         }
-
         .alert-card .number {
             font-size: 1.6rem;
             font-weight: 800;
             letter-spacing: -0.8px;
             line-height: 1;
         }
-
-        .alert-card.critical .number {
-            color: var(--danger);
-        }
-
-        .alert-card.warning .number {
-            color: var(--warning);
-        }
-
-        .alert-card.info .number {
-            color: var(--info);
-        }
-
-        .alert-card.success .number {
-            color: var(--success);
-        }
-
+        .alert-card.critical .number { color: var(--danger); }
+        .alert-card.warning .number { color: var(--warning); }
+        .alert-card.info .number { color: var(--info); }
+        .alert-card.success .number { color: var(--success); }
         .alert-card .alert-sub {
             font-size: 0.68rem;
             color: var(--text-soft);
@@ -1120,29 +1295,24 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             font-size: 0.82rem;
             transition: all 0.2s;
         }
-
         .inventory-input:focus {
             outline: none;
             border-color: var(--primary-mid);
             box-shadow: 0 0 0 3px var(--primary-glow);
         }
-
         .inventory-input.modified {
             background: #fef3c7;
             border-color: var(--accent);
             box-shadow: 0 0 0 3px var(--accent-glow);
         }
-
         .ecart-positive {
             color: var(--success);
             font-weight: 700;
         }
-
         .ecart-negative {
             color: var(--danger);
             font-weight: 700;
         }
-
         .ecart-zero {
             color: var(--text-soft);
         }
@@ -1153,14 +1323,12 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             padding: 40px 20px;
             color: var(--text-soft);
         }
-
         .empty-state i {
             font-size: 2.5rem;
             margin-bottom: 12px;
             opacity: 0.25;
             color: var(--primary-mid);
         }
-
         .empty-state p {
             font-size: 0.85rem;
             font-weight: 500;
@@ -1176,7 +1344,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             flex-direction: column;
             gap: 10px;
         }
-
         .toast {
             background: var(--card);
             padding: 12px 16px;
@@ -1190,107 +1357,34 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             animation: toastSlideIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             border-left: 4px solid;
         }
-
-        .toast.success {
-            border-color: var(--success);
-        }
-
-        .toast.error {
-            border-color: var(--danger);
-        }
-
-        .toast.warning {
-            border-color: var(--warning);
-        }
-
-        .toast.info {
-            border-color: var(--primary-mid);
-        }
-
-        .toast-icon {
-            font-size: 1.1rem;
-            flex-shrink: 0;
-        }
-
-        .toast.success .toast-icon {
-            color: var(--success);
-        }
-
-        .toast.error .toast-icon {
-            color: var(--danger);
-        }
-
-        .toast.warning .toast-icon {
-            color: var(--warning);
-        }
-
-        .toast.info .toast-icon {
-            color: var(--primary-mid);
-        }
-
-        .toast-content {
-            flex: 1;
-        }
-
-        .toast-title {
-            font-weight: 700;
-            font-size: 0.82rem;
-            color: var(--dark);
-        }
-
-        .toast-message {
-            font-size: 0.75rem;
-            color: var(--text-soft);
-            margin-top: 1px;
-        }
-
-        .toast-close {
-            background: none;
-            border: none;
-            color: var(--text-soft);
-            cursor: pointer;
-            font-size: 1rem;
-            padding: 0;
-            transition: color 0.2s;
-        }
-
-        .toast-close:hover {
-            color: var(--dark);
-        }
-
+        .toast.success { border-color: var(--success); }
+        .toast.error { border-color: var(--danger); }
+        .toast.warning { border-color: var(--warning); }
+        .toast.info { border-color: var(--primary-mid); }
+        .toast-icon { font-size: 1.1rem; flex-shrink: 0; }
+        .toast.success .toast-icon { color: var(--success); }
+        .toast.error .toast-icon { color: var(--danger); }
+        .toast.warning .toast-icon { color: var(--warning); }
+        .toast.info .toast-icon { color: var(--primary-mid); }
+        .toast-content { flex: 1; }
+        .toast-title { font-weight: 700; font-size: 0.82rem; color: var(--dark); }
+        .toast-message { font-size: 0.75rem; color: var(--text-soft); margin-top: 1px; }
+        .toast-close { background: none; border: none; color: var(--text-soft); cursor: pointer; font-size: 1rem; padding: 0; transition: color 0.2s; }
+        .toast-close:hover { color: var(--dark); }
         @keyframes toastSlideIn {
-            from {
-                transform: translateX(120%);
-                opacity: 0;
-            }
-
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
+            from { transform: translateX(120%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
         }
-
         @keyframes toastSlideOut {
-            from {
-                transform: translateX(0);
-                opacity: 1;
-            }
-
-            to {
-                transform: translateX(120%);
-                opacity: 0;
-            }
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(120%); opacity: 0; }
         }
-
-        .toast.hiding {
-            animation: toastSlideOut 0.3s ease forwards;
-        }
+        .toast.hiding { animation: toastSlideOut 0.3s ease forwards; }
 
         /* ── PROGRESS ── */
         .progress-container {
             margin: 12px 0;
         }
-
         .progress-label {
             display: flex;
             justify-content: space-between;
@@ -1298,14 +1392,12 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             font-size: 0.78rem;
             font-weight: 600;
         }
-
         .progress-bar {
             height: 6px;
             background: var(--border);
             border-radius: 3px;
             overflow: hidden;
         }
-
         .progress-fill {
             height: 100%;
             background: linear-gradient(90deg, var(--primary-mid), var(--accent));
@@ -1324,18 +1416,15 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             border: 1px solid rgba(220, 38, 38, 0.15);
             margin-bottom: 16px;
         }
-
         .dettes-summary i {
             font-size: 1.1rem;
             color: var(--danger);
         }
-
         .dettes-summary .dettes-total {
             font-size: 1.05rem;
             font-weight: 800;
             color: var(--danger);
         }
-
         .dettes-summary .dettes-text {
             font-size: 0.78rem;
             color: var(--text-mid);
@@ -1343,105 +1432,34 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
 
         /* ── ANIMATIONS ── */
         @keyframes pulseGlow {
-
-            0%,
-            100% {
-                box-shadow: var(--shadow-sm);
-            }
-
-            50% {
-                box-shadow: 0 0 16px 3px var(--primary-glow);
-            }
+            0%, 100% { box-shadow: var(--shadow-sm); }
+            50% { box-shadow: 0 0 16px 3px var(--primary-glow); }
         }
-
-        .stat-card.pulse {
-            animation: pulseGlow 2.5s ease infinite;
-        }
+        .stat-card.pulse { animation: pulseGlow 2.5s ease infinite; }
 
         /* ── RESPONSIVE ── */
         @media (max-width: 1100px) {
-            .stats-row {
-                grid-template-columns: repeat(3, 1fr);
-            }
+            .stats-row { grid-template-columns: repeat(3, 1fr); }
         }
-
         @media (max-width: 768px) {
-            .page-wrapper {
-                padding: 12px 10px 40px;
-            }
-
-            .stats-row {
-                grid-template-columns: repeat(2, 1fr);
-            }
-
-            .tab-content {
-                padding: 16px 12px 20px;
-            }
-
-            .charts-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .page-header {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 10px;
-            }
-
-            .page-header-right {
-                width: 100%;
-            }
+            .page-wrapper { padding: 12px 10px 40px; }
+            .stats-row { grid-template-columns: repeat(2, 1fr); }
+            .tab-content { padding: 16px 12px 20px; }
+            .charts-grid { grid-template-columns: 1fr; }
+            .page-header { flex-direction: column; align-items: flex-start; gap: 10px; }
+            .page-header-right { width: 100%; }
         }
-
         @media (max-width: 480px) {
-            .stats-row {
-                grid-template-columns: 1fr 1fr;
-            }
-
-            .stat-card {
-                padding: 10px 10px 8px;
-            }
+            .stats-row { grid-template-columns: 1fr 1fr; }
+            .stat-card { padding: 10px 10px 8px; }
         }
-
         @media print {
-
-            .tabs,
-            .filters-bar,
-            .section-actions,
-            .btn-action,
-            .page-header-right,
-            .search-bar,
-            .toast-container {
-                display: none !important;
-            }
-
-            .tab-content {
-                display: block !important;
-                margin: 0;
-                box-shadow: none;
-                border: none;
-                padding: 0;
-            }
-
-            body {
-                background: white;
-            }
-
-            body::before,
-            body::after {
-                display: none;
-            }
-
-            .page-wrapper {
-                padding: 0;
-                max-width: none;
-            }
-
-            .stat-card,
-            .alert-card {
-                box-shadow: none;
-                border: 1px solid #ccc;
-            }
+            .tabs, .filters-bar, .section-actions, .btn-action, .page-header-right, .search-bar, .toast-container { display: none !important; }
+            .tab-content { display: block !important; margin: 0; box-shadow: none; border: none; padding: 0; }
+            body { background: white; }
+            body::before, body::after { display: none; }
+            .page-wrapper { padding: 0; max-width: none; }
+            .stat-card, .alert-card { box-shadow: none; border: 1px solid #ccc; }
         }
     </style>
 </head>
@@ -1461,7 +1479,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                 </div>
             </div>
             <div class="page-header-right">
-                <button class="header-btn" onclick="window.print()"><i class="fas fa-print"></i> Imprimer</button>
                 <button class="header-btn accent" onclick="rafraichirDonnees()"><i class="fas fa-sync-alt"></i> Rafraichir</button>
             </div>
         </header>
@@ -1611,7 +1628,13 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             <h3 class="section-title">
                 <div class="section-title-left"><i class="fas fa-chart-line"></i> Bilan des Achats</div>
                 <div class="section-actions">
-                    <button class="btn-action" onclick="exporterTableCSV('tableAchats','achats')"><i class="fas fa-file-csv"></i> CSV</button>
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="achats">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);">
+                            <i class="fas fa-file-pdf"></i> PDF
+                        </button>
+                    </form>
                 </div>
             </h3>
 
@@ -1666,7 +1689,13 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             <h3 class="section-title">
                 <div class="section-title-left"><i class="fas fa-truck"></i> Fournisseurs</div>
                 <div class="section-actions">
-                    <button class="btn-action" onclick="exporterTableCSV('tableFournisseurs','fournisseurs')"><i class="fas fa-file-csv"></i> CSV</button>
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="fournisseurs">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);">
+                            <i class="fas fa-file-pdf"></i> PDF
+                        </button>
+                    </form>
                 </div>
             </h3>
 
@@ -1702,9 +1731,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                     </table>
                 </div>
             <?php else: ?>
-                <div class="empty-state"><i class="fas fa-truck"></i>
-                    <p>Aucun fournisseur.</p>
-                </div>
+                <div class="empty-state"><i class="fas fa-truck"></i><p>Aucun fournisseur.</p></div>
             <?php endif; ?>
 
             <h3 class="section-title">
@@ -1810,7 +1837,13 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             <h3 class="section-title">
                 <div class="section-title-left"><i class="fas fa-warehouse"></i> Stock par Boutique</div>
                 <div class="section-actions">
-                    <button class="btn-action" onclick="exporterTableCSV('tableStock','stock')"><i class="fas fa-file-csv"></i> CSV</button>
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="stock">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);">
+                            <i class="fas fa-file-pdf"></i> PDF
+                        </button>
+                    </form>
                 </div>
             </h3>
 
@@ -1862,9 +1895,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                     </table>
                 </div>
             <?php else: ?>
-                <div class="empty-state"><i class="fas fa-warehouse"></i>
-                    <p>Aucun stock.</p>
-                </div>
+                <div class="empty-state"><i class="fas fa-warehouse"></i><p>Aucun stock.</p></div>
             <?php endif; ?>
 
             <?php if (count($produitsRupture) > 0): ?>
@@ -1946,7 +1977,13 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                 <div class="section-title-left"><i class="fas fa-clipboard-check"></i> Inventaire Physique</div>
                 <div class="section-actions">
                     <button class="btn-action accent" onclick="validerInventaire()"><i class="fas fa-check-double"></i> Valider</button>
-                    <button class="btn-action" onclick="exporterTableCSV('tableInventaire','inventaire')"><i class="fas fa-file-csv"></i> CSV</button>
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="inventaire">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);">
+                            <i class="fas fa-file-pdf"></i> PDF
+                        </button>
+                    </form>
                 </div>
             </h3>
 
@@ -1981,9 +2018,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                     </table>
                 </div>
             <?php else: ?>
-                <div class="empty-state"><i class="fas fa-clipboard-check"></i>
-                    <p>Aucun produit.</p>
-                </div>
+                <div class="empty-state"><i class="fas fa-clipboard-check"></i><p>Aucun produit.</p></div>
             <?php endif; ?>
 
             <?php if (count($transferts) > 0): ?>
@@ -2022,6 +2057,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
     </div>
 
     <script>
+        // ===== SCRIPTS JAVASCRIPT (inchangés) =====
         function switchTab(btn, tabId) {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -2031,15 +2067,10 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
 
         function showToast(type, title, message) {
             const container = document.getElementById('toastContainer');
-            const icons = {
-                success: 'fa-check-circle',
-                error: 'fa-times-circle',
-                warning: 'fa-exclamation-circle',
-                info: 'fa-info-circle'
-            };
+            const icons = { success: 'fa-check-circle', error: 'fa-times-circle', warning: 'fa-exclamation-circle', info: 'fa-info-circle' };
             const toast = document.createElement('div');
-            toast.className = `toast ${type}`;
-            toast.innerHTML = `<i class="fas ${icons[type]} toast-icon"></i><div class="toast-content"><div class="toast-title">${title}</div><div class="toast-message">${message}</div></div><button class="toast-close" onclick="closeToast(this)"><i class="fas fa-times"></i></button>`;
+            toast.className = 'toast ' + type;
+            toast.innerHTML = '<i class="fas ' + icons[type] + ' toast-icon"></i><div class="toast-content"><div class="toast-title">' + title + '</div><div class="toast-message">' + message + '</div></div><button class="toast-close" onclick="closeToast(this)"><i class="fas fa-times"></i></button>';
             container.appendChild(toast);
             setTimeout(() => closeToast(toast.querySelector('.toast-close')), 5000);
         }
@@ -2064,9 +2095,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                 text.textContent = 'Reduire';
                 bar.dataset.collapsed = '0';
             } else {
-                groups.forEach((g, i) => {
-                    if (i > 1) g.style.display = 'none';
-                });
+                groups.forEach((g, i) => { if (i > 1) g.style.display = 'none'; });
                 bar.querySelector('.filter-actions').style.display = 'none';
                 icon.className = 'fas fa-chevron-down';
                 text.textContent = 'Plus';
@@ -2084,8 +2113,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             const dateFin = document.getElementById('dateFin').value;
             const recherche = document.getElementById('rechercheGlobale').value.toLowerCase();
             const now = new Date();
-            let visibleCount = 0,
-                totalVisible = 0;
+            let visibleCount = 0, totalVisible = 0;
 
             rows.forEach(row => {
                 let show = true;
@@ -2122,11 +2150,11 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             if (activeFilters.length > 0) {
                 summary.classList.remove('hidden');
                 tagsDiv.innerHTML = '';
-                if (periode) tagsDiv.innerHTML += `<span class="filter-tag">Periode <span class="remove" onclick="document.getElementById('filtrePeriode').value='';appliquerFiltres()">x</span></span>`;
-                if (fournisseur) tagsDiv.innerHTML += `<span class="filter-tag">Fourn. <span class="remove" onclick="document.getElementById('filtreFournisseur').value='';appliquerFiltres()">x</span></span>`;
-                if (categorie) tagsDiv.innerHTML += `<span class="filter-tag">Cat. <span class="remove" onclick="document.getElementById('filtreCategorie').value='';appliquerFiltres()">x</span></span>`;
-                if (boutique) tagsDiv.innerHTML += `<span class="filter-tag">Bout. <span class="remove" onclick="document.getElementById('filtreBoutique').value='';appliquerFiltres()">x</span></span>`;
-                if (recherche) tagsDiv.innerHTML += `<span class="filter-tag">"${recherche}" <span class="remove" onclick="document.getElementById('rechercheGlobale').value='';appliquerFiltres()">x</span></span>`;
+                if (periode) tagsDiv.innerHTML += '<span class="filter-tag">Periode <span class="remove" onclick="document.getElementById(\'filtrePeriode\').value=\'\';appliquerFiltres()">x</span></span>';
+                if (fournisseur) tagsDiv.innerHTML += '<span class="filter-tag">Fourn. <span class="remove" onclick="document.getElementById(\'filtreFournisseur\').value=\'\';appliquerFiltres()">x</span></span>';
+                if (categorie) tagsDiv.innerHTML += '<span class="filter-tag">Cat. <span class="remove" onclick="document.getElementById(\'filtreCategorie\').value=\'\';appliquerFiltres()">x</span></span>';
+                if (boutique) tagsDiv.innerHTML += '<span class="filter-tag">Bout. <span class="remove" onclick="document.getElementById(\'filtreBoutique\').value=\'\';appliquerFiltres()">x</span></span>';
+                if (recherche) tagsDiv.innerHTML += '<span class="filter-tag">"'+recherche+'" <span class="remove" onclick="document.getElementById(\'rechercheGlobale\').value=\'\';appliquerFiltres()">x</span></span>';
                 counter.textContent = visibleCount + ' resultats';
             } else {
                 summary.classList.add('hidden');
@@ -2140,7 +2168,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
         }
 
         let sortStates = {};
-
         function trierTable(tableId, colIdx) {
             const table = document.getElementById(tableId);
             const tbody = table.querySelector('tbody');
@@ -2162,25 +2189,6 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
             rows.forEach(r => tbody.appendChild(r));
         }
 
-        function exporterTableCSV(tableId, filename) {
-            const table = document.getElementById(tableId);
-            if (!table) return;
-            let csv = '';
-            table.querySelectorAll('tr').forEach(row => {
-                if (row.classList.contains('hidden-row')) return;
-                const cells = row.querySelectorAll('th,td');
-                csv += Array.from(cells).map(c => '"' + c.textContent.trim().replace(/\n/g, ' ').replace(/"/g, '""') + '"').join(';') + '\n';
-            });
-            const blob = new Blob([csv], {
-                type: 'text/csv;charset=utf-8;'
-            });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = filename + '_' + new Date().toISOString().slice(0, 10) + '.csv';
-            link.click();
-            showToast('success', 'Export', link.download + ' genere.');
-        }
-
         function filtrerStock() {
             const search = document.getElementById('rechercheStock').value.toLowerCase();
             document.querySelectorAll('#tbodyStock tr').forEach(row => {
@@ -2197,7 +2205,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                 if (etat === 'faible' && (qte <= 0 || qte > seuil)) show = false;
                 row.classList.toggle('hidden-row', !show);
             });
-            showToast('info', 'Filtre', `Produits en ${etat==='rupture'?'rupture':'stock faible'}.`);
+            showToast('info', 'Filtre', 'Produits en ' + (etat==='rupture'?'rupture':'stock faible') + '.');
         }
 
         function calculerEcart(input) {
@@ -2232,14 +2240,13 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                 showToast('info', 'Inventaire', 'Aucun ecart.');
                 return;
             }
-            let m = 0,
-                e = 0;
+            let m = 0, e = 0;
             inputs.forEach(i => {
                 const ec = parseInt(i.value) - parseInt(i.dataset.system);
                 if (ec < 0) m++;
                 else e++;
             });
-            showToast('warning', 'Inventaire', `${inputs.length} ecarts : ${m} manquants, ${e} excedents.`);
+            showToast('warning', 'Inventaire', inputs.length + ' ecarts : ' + m + ' manquants, ' + e + ' excedents.');
         }
 
         function number_format(number, decimals, dec_point, thousands_sep) {
@@ -2273,17 +2280,7 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                     options: {
                         responsive: true,
                         plugins: {
-                            legend: {
-                                position: 'bottom',
-                                labels: {
-                                    padding: 12,
-                                    usePointStyle: true,
-                                    font: {
-                                        family: 'Plus Jakarta Sans',
-                                        size: 12
-                                    }
-                                }
-                            }
+                            legend: { position: 'bottom', labels: { padding: 12, usePointStyle: true, font: { family: 'Plus Jakarta Sans', size: 12 } } }
                         },
                         cutout: '55%'
                     }
@@ -2295,61 +2292,19 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
                     type: 'bar',
                     data: {
                         labels: <?= json_encode(array_column($achatsVentesMois, 'mois')) ?>,
-                        datasets: [{
-                                label: 'Achats',
-                                data: <?= json_encode(array_column($achatsVentesMois, 'achats')) ?>,
-                                backgroundColor: 'rgba(30,64,175,0.7)',
-                                borderColor: '#1e40af',
-                                borderWidth: 1,
-                                borderRadius: 4
-                            },
-                            {
-                                label: 'Ventes',
-                                data: <?= json_encode(array_column($achatsVentesMois, 'ventes')) ?>,
-                                backgroundColor: 'rgba(217,119,6,0.7)',
-                                borderColor: '#d97706',
-                                borderWidth: 1,
-                                borderRadius: 4
-                            }
+                        datasets: [
+                            { label: 'Achats', data: <?= json_encode(array_column($achatsVentesMois, 'achats')) ?>, backgroundColor: 'rgba(30,64,175,0.7)', borderColor: '#1e40af', borderWidth: 1, borderRadius: 4 },
+                            { label: 'Ventes', data: <?= json_encode(array_column($achatsVentesMois, 'ventes')) ?>, backgroundColor: 'rgba(217,119,6,0.7)', borderColor: '#d97706', borderWidth: 1, borderRadius: 4 }
                         ]
                     },
                     options: {
                         responsive: true,
                         plugins: {
-                            legend: {
-                                position: 'bottom',
-                                labels: {
-                                    padding: 12,
-                                    usePointStyle: true,
-                                    font: {
-                                        family: 'Plus Jakarta Sans',
-                                        size: 12
-                                    }
-                                }
-                            }
+                            legend: { position: 'bottom', labels: { padding: 12, usePointStyle: true, font: { family: 'Plus Jakarta Sans', size: 12 } } }
                         },
                         scales: {
-                            y: {
-                                beginAtZero: true,
-                                ticks: {
-                                    font: {
-                                        family: 'Plus Jakarta Sans'
-                                    }
-                                },
-                                grid: {
-                                    color: '#e2e8f0'
-                                }
-                            },
-                            x: {
-                                ticks: {
-                                    font: {
-                                        family: 'Plus Jakarta Sans'
-                                    }
-                                },
-                                grid: {
-                                    display: false
-                                }
-                            }
+                            y: { beginAtZero: true, ticks: { font: { family: 'Plus Jakarta Sans' } }, grid: { color: '#e2e8f0' } },
+                            x: { ticks: { font: { family: 'Plus Jakarta Sans' } }, grid: { display: false } }
                         }
                     }
                 });
@@ -2358,5 +2313,4 @@ $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE
     </script>
 
 </body>
-
 </html>

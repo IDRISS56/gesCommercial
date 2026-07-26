@@ -4,9 +4,8 @@
 // "Le Pilotage Strategique" — Bleu — FCFA
 // ============================================================
 require_once 'databases/database.php';
+require_once 'librairies/fpdf/fpdf.php';
 session_start();
-
-
 
 function e($str)
 {
@@ -16,6 +15,22 @@ function e($str)
 function fmt($n)
 {
     return number_format(floatval($n), 0, ',', ' ');
+}
+
+function safeText($str) {
+    return iconv('UTF-8', 'ISO-8859-1//TRANSLIT', $str);
+}
+
+$boutique = $pdo->query("SELECT * FROM boutique WHERE etat_boutique = 'Actif' LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+if (!$boutique) {
+    $boutique = [
+        'nom_boutique' => 'ABC DISTRIBUTION SARL',
+        'adresse_boutique' => '01 BP 1234 Bouaké 01',
+        'ville_boutique' => 'Bouaké',
+        'pays_boutique' => 'Côte d\'Ivoire',
+        'telephone_boutique' => '+225 07 08 09 10 11',
+        'email_boutique' => 'contact@abcdistribution.ci'
+    ];
 }
 
 // ── Référentiels ──
@@ -38,8 +53,8 @@ $periodes = [
 ];
 
 $periode    = $_GET['periode']    ?? 'month';
-$boutique   = $_GET['boutique']   ?? '';
-$vendeur    = $_GET['vendeur']    ?? '';
+$boutiqueFilter   = $_GET['boutique']   ?? '';
+$vendeurFilter    = $_GET['vendeur']    ?? '';
 $date_debut = $_GET['date_debut'] ?? '';
 $date_fin   = $_GET['date_fin']   ?? '';
 
@@ -71,8 +86,8 @@ function getDateCondition($periode, $date_debut, $date_fin, $alias = 'c', $col =
 }
 
 $dateCondition  = getDateCondition($periode, $date_debut, $date_fin);
-$filtreBoutique = !empty($boutique) ? "AND c.boutique_id='$boutique'" : '';
-$filtreVendeur  = !empty($vendeur)  ? "AND c.utilisateur_id='$vendeur'" : '';
+$filtreBoutique = !empty($boutiqueFilter) ? "AND c.boutique_id='$boutiqueFilter'" : '';
+$filtreVendeur  = !empty($vendeurFilter)  ? "AND c.utilisateur_id='$vendeurFilter'" : '';
 $today = date('Y-m-d');
 
 // ── KPI principaux ──
@@ -81,7 +96,7 @@ $stats = $pdo->query(
         . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout,"
         . "COUNT(DISTINCT c.numero_commande) as nb "
         . "FROM commande c "
-        . "WHERE c.statut_id IN ('ST002','012','Vente') "
+        . "WHERE c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
         . "AND c.etat_commande='Valider' "
         . "AND DATE(c.date_commande)='$today' "
         . $filtreBoutique . " " . $filtreVendeur
@@ -95,7 +110,7 @@ $marge_brute = $ca_jour - $cout_jour;
 $achats_jour = $pdo->query(
     "SELECT COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) "
         . "FROM commande c "
-        . "WHERE c.statut_id IN ('ST001','011','Achat') "
+        . "WHERE c.statut_id = '011' AND c.etat_commande NOT IN ('En attente','Annulé') "
         . "AND c.etat_commande='Valider' "
         . "AND DATE(c.date_commande)='$today'"
 )->fetchColumn() ?: 0;
@@ -159,7 +174,7 @@ $evol = $pdo->query(
         . "COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) as ca,"
         . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout "
         . "FROM commande c "
-        . "WHERE c.statut_id IN ('ST002','012','Vente') "
+        . "WHERE c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
         . "AND c.etat_commande='Valider' "
         . "AND c.date_commande>=DATE_SUB(CURDATE(),INTERVAL 12 MONTH) "
         . $filtreBoutique . " " . $filtreVendeur . " "
@@ -189,7 +204,7 @@ $perfV = $pdo->query(
         . "COUNT(DISTINCT c.numero_commande) as nb,"
         . "COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) as ca "
         . "FROM commande c JOIN utilisateur u ON c.utilisateur_id=u.id "
-        . "WHERE c.statut_id IN ('ST002','012','Vente') "
+        . "WHERE c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
         . "AND c.etat_commande='Valider' "
         . "AND $dateCondition " . $filtreBoutique . " "
         . "GROUP BY c.utilisateur_id ORDER BY ca DESC"
@@ -202,7 +217,7 @@ $perfB = $pdo->query(
         . "COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) as ca,"
         . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout "
         . "FROM commande c JOIN boutique b ON c.boutique_id=b.code_boutique "
-        . "WHERE c.statut_id IN ('ST002','012','Vente') "
+        . "WHERE c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
         . "AND c.etat_commande='Valider' "
         . "AND $dateCondition " . $filtreVendeur . " "
         . "GROUP BY c.boutique_id ORDER BY ca DESC"
@@ -215,7 +230,7 @@ $bilan = $pdo->query(
         . "COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) as ca,"
         . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout "
         . "FROM commande c "
-        . "WHERE c.statut_id IN ('ST002','012','Vente') "
+        . "WHERE c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
         . "AND c.etat_commande='Valider' "
         . "AND $dateCondition " . $filtreBoutique . " " . $filtreVendeur . " "
         . "GROUP BY jour ORDER BY jour DESC"
@@ -254,7 +269,7 @@ $rappU = $pdo->query(
         . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout "
         . "FROM utilisateur u "
         . "LEFT JOIN commande c ON u.id=c.utilisateur_id "
-        . "AND c.statut_id IN ('ST002','012','Vente') "
+        . "AND c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
         . "AND c.etat_commande='Valider' "
         . "AND $dateCondition " . $filtreBoutique . " "
         . "WHERE u.etat='Actif' "
@@ -269,7 +284,7 @@ $rappB = $pdo->query(
         . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout "
         . "FROM boutique b "
         . "LEFT JOIN commande c ON b.code_boutique=c.boutique_id "
-        . "AND c.statut_id IN ('ST002','012','Vente') "
+        . "AND c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
         . "AND c.etat_commande='Valider' "
         . "AND $dateCondition " . $filtreVendeur . " "
         . "WHERE b.etat_boutique='Actif' "
@@ -282,11 +297,13 @@ $journal = $pdo->query(
         . "c.date_commande as dop,"
         . "c.heure_commande as hop,"
         . "CASE "
-        . "WHEN c.statut_id IN ('ST002','012','Vente') THEN 'VENTE' "
-        . "WHEN c.statut_id IN ('ST001','011','Achat') THEN 'ACHAT' "
+        . "WHEN c.statut_id = '012' THEN 'VENTE' "
+        . "WHEN c.statut_id = '011' THEN 'ACHAT' "
         . "WHEN c.statut_id='008' THEN 'TRANSF. S.' "
         . "WHEN c.statut_id='009' THEN 'TRANSF. E.' "
         . "WHEN c.statut_id='010' THEN 'RETOUR' "
+        . "WHEN c.statut_id IN ('001','002','003','004') THEN 'PERTE' "
+        . "WHEN c.statut_id IN ('006','007') THEN 'AJUSTEMENT' "
         . "ELSE 'AUTRE' END as type,"
         . "p.titre_produit,"
         . "c.quantite_commande as qte,"
@@ -302,7 +319,285 @@ $journal = $pdo->query(
         . "ORDER BY c.date_commande DESC, c.heure_commande DESC LIMIT 200"
 )->fetchAll(PDO::FETCH_ASSOC);
 
-// ── AJAX ──
+// ============================================================
+// TRAITEMENT EXPORT PDF (POST) — PAYSAGE
+// ============================================================
+if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && isset($_POST['table'])) {
+    $table = $_POST['table'];
+    $allowedTables = ['financier', 'vendeurs', 'boutiques', 'journal'];
+    if (!in_array($table, $allowedTables)) {
+        die('Table non autorisée.');
+    }
+
+    error_reporting(0);
+    while (ob_get_level()) ob_end_clean();
+
+    $pdf = new FPDF('L', 'mm', 'A4');
+    $pdf->AddPage();
+    $pdf->SetFont('Arial', '', 10);
+
+    $blueDark = [0, 51, 102];
+    $toLatin = function($chaine) { return safeText($chaine); };
+
+    $yStart = 10;
+    $pageWidth = 297;
+    $margin = 10;
+    $maxWidth = $pageWidth - 2 * $margin;
+
+    // ---- EN-TÊTE MINIMAL ----
+    $pdf->SetFont('Arial', 'B', 14);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text($margin, $yStart + 6, $toLatin(strtoupper($boutique['nom_boutique'])));
+
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetTextColor(80, 80, 80);
+    $pdf->Text($margin, $yStart + 11, $toLatin("Tél. : " . $boutique['telephone_boutique'] . " | Email : " . $boutique['email_boutique']));
+
+    $titreDoc = match($table) {
+        'financier' => 'BILAN FINANCIER',
+        'vendeurs' => 'RAPPORT VENDEURS',
+        'boutiques' => 'RAPPORT BOUTIQUES',
+        'journal' => 'JOURNAL DES MOUVEMENTS'
+    };
+    $pdf->SetFont('Arial', 'B', 22);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->SetXY(0, $yStart + 10);
+    $pdf->Cell($pageWidth, 10, $toLatin($titreDoc), 0, 1, 'C');
+
+    $pdf->SetFont('Arial', '', 9);
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->Text(215, $yStart + 20, $toLatin('Date export : ' . date('d/m/Y H:i')));
+
+    $pdf->SetDrawColor(200, 200, 200);
+    $pdf->Line($margin, 42, $pageWidth - $margin, 42);
+
+    $yTable = 48;
+    $pageBottom = 195;
+    $headerH = 7;
+    $rowH = 6;
+
+    $drawTableHeader = function($pdf, $colWidths, $headers, &$yTable, $headerH, $blueDark, $toLatin, $margin) {
+        $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->SetTextColor(255, 255, 255);
+        $pdf->SetFont('Arial', 'B', 7);
+        $x = $margin;
+        foreach ($headers as $i => $h) {
+            $label = $toLatin($h);
+            $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
+            $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
+            $x += $colWidths[$i];
+        }
+    };
+
+    $drawTableRow = function($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin) {
+        $x = $margin;
+        foreach ($data as $i => $val) {
+            $label = $toLatin((string)$val);
+            $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
+            $pdf->Text($x + 1, $yCurrent + 4.5, $label);
+            $x += $colWidths[$i];
+        }
+    };
+
+    $totalGeneral = 0;
+
+    switch ($table) {
+        case 'financier':
+            if (empty($bilan)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée à afficher.'));
+                break;
+            }
+            $colWidths = [22, 18, 28, 28, 28, 28, 30];
+            $headers = ['Date', 'Nb Ventes', 'CA', 'Cout', 'Marge Brute', 'TVA Est.', 'Benefice Net'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            $totCa = $totCout = $totNb = $totDep = 0;
+            foreach ($bilan as $r) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                // Réinitialiser la couleur du texte pour les données
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $m  = floatval($r['ca']) - floatval($r['cout']);
+                $dp = floatval($depJour[$r['jour']] ?? 0);
+                $bn = $m - $dp;
+                $totCa   += floatval($r['ca']);
+                $totCout += floatval($r['cout']);
+                $totNb   += intval($r['nb']);
+                $totDep  += $dp;
+                $data = [
+                    $r['jour'],
+                    $r['nb'],
+                    fmt($r['ca']),
+                    fmt($r['cout']),
+                    fmt($m),
+                    fmt(floatval($r['ca']) * 0.2 / 1.2),
+                    fmt($bn)
+                ];
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('TOTAL : ' . $totNb . ' ventes | CA ' . fmt($totCa) . ' F | Cout ' . fmt($totCout) . ' F | Benefice ' . fmt($totCa - $totCout - $totDep) . ' F'));
+            break;
+
+        case 'vendeurs':
+            if (empty($rappU)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée.'));
+                break;
+            }
+            $colWidths = [45, 25, 25, 35, 35];
+            $headers = ['Vendeur', 'Role', 'Nb Ventes', 'CA', 'Marge'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            $totCA = 0; $totMarge = 0;
+            foreach ($rappU as $r) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $m = floatval($r['ca']) - floatval($r['cout']);
+                $totCA += floatval($r['ca']);
+                $totMarge += $m;
+                $data = [
+                    $r['nom_prenom'],
+                    $r['role'] ?? '—',
+                    $r['nb'],
+                    fmt($r['ca']),
+                    fmt($m)
+                ];
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('CA TOTAL : ' . fmt($totCA) . ' F  |  MARGE TOTALE : ' . fmt($totMarge) . ' F'));
+            break;
+
+        case 'boutiques':
+            if (empty($rappB)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée.'));
+                break;
+            }
+            $colWidths = [45, 25, 35, 35, 35];
+            $headers = ['Boutique', 'Nb Ventes', 'CA', 'Cout', 'Marge'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            $totCA = 0; $totMarge = 0;
+            foreach ($rappB as $r) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $m = floatval($r['ca']) - floatval($r['cout']);
+                $totCA += floatval($r['ca']);
+                $totMarge += $m;
+                $data = [
+                    $r['nom_boutique'],
+                    $r['nb'],
+                    fmt($r['ca']),
+                    fmt($r['cout']),
+                    fmt($m)
+                ];
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('CA TOTAL : ' . fmt($totCA) . ' F  |  MARGE TOTALE : ' . fmt($totMarge) . ' F'));
+            break;
+
+        case 'journal':
+            if (empty($journal)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucun mouvement.'));
+                break;
+            }
+            $colWidths = [22, 28, 22, 35, 15, 25, 25, 25, 18];
+            $headers = ['Ref', 'Date/Heure', 'Type', 'Produit', 'Qte', 'Montant', 'Vendeur', 'Boutique', 'Etat'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            $totMontant = 0;
+            foreach ($journal as $r) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $data = [
+                    $r['ref'],
+                    $r['dop'] . ' ' . substr($r['hop'] ?? '', 0, 5),
+                    $r['type'],
+                    $r['titre_produit'] ?? '—',
+                    $r['qte'],
+                    fmt($r['mt']),
+                    $r['usr'] ?? '—',
+                    $r['bout'] ?? '—',
+                    $r['etat']
+                ];
+                $totMontant += floatval($r['mt']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('MONTANT TOTAL : ' . fmt($totMontant) . ' FCFA'));
+            break;
+    }
+
+    while (ob_get_level()) ob_end_clean();
+    $pdf->Output('D', 'Rapport_' . $table . '_' . date('Ymd') . '.pdf');
+    exit;
+}
+
+// ── AJAX (inchangé) ──
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $p    = $_POST['periode']    ?? 'month';
     $b    = $_POST['boutique']   ?? '';
@@ -325,7 +620,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                     . "COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) as ca,"
                     . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout "
                     . "FROM commande c "
-                    . "WHERE c.statut_id IN ('ST002','012','Vente') "
+                    . "WHERE c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
                     . "AND c.etat_commande='Valider' AND $dc $fb $fv "
                     . "GROUP BY jour ORDER BY jour DESC"
             )->fetchAll(PDO::FETCH_ASSOC);
@@ -358,7 +653,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                     . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout "
                     . "FROM utilisateur u "
                     . "LEFT JOIN commande c ON u.id=c.utilisateur_id "
-                    . "AND c.statut_id IN ('ST002','012','Vente') "
+                    . "AND c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
                     . "AND c.etat_commande='Valider' AND $dc $fb "
                     . "WHERE u.etat='Actif' "
                     . "GROUP BY u.id ORDER BY ca DESC"
@@ -389,7 +684,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                     . "COALESCE(SUM(CAST(c.prix_achat AS DECIMAL(12,2))*c.quantite_commande),0) as cout "
                     . "FROM boutique b "
                     . "LEFT JOIN commande c ON b.code_boutique=c.boutique_id "
-                    . "AND c.statut_id IN ('ST002','012','Vente') "
+                    . "AND c.statut_id = '012' AND c.etat_commande NOT IN ('En attente','Annulé') "
                     . "AND c.etat_commande='Valider' AND $dc $fv "
                     . "WHERE b.etat_boutique='Actif' "
                     . "GROUP BY b.code_boutique ORDER BY ca DESC"
@@ -418,11 +713,13 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                     . "c.date_commande as dop,"
                     . "c.heure_commande as hop,"
                     . "CASE "
-                    . "WHEN c.statut_id IN ('ST002','012','Vente') THEN 'VENTE' "
-                    . "WHEN c.statut_id IN ('ST001','011','Achat') THEN 'ACHAT' "
+                    . "WHEN c.statut_id = '012' THEN 'VENTE' "
+                    . "WHEN c.statut_id = '011' THEN 'ACHAT' "
                     . "WHEN c.statut_id='008' THEN 'TRANSF. S.' "
                     . "WHEN c.statut_id='009' THEN 'TRANSF. E.' "
                     . "WHEN c.statut_id='010' THEN 'RETOUR' "
+                    . "WHEN c.statut_id IN ('001','002','003','004') THEN 'PERTE' "
+                    . "WHEN c.statut_id IN ('006','007') THEN 'AJUSTEMENT' "
                     . "ELSE 'AUTRE' END as type,"
                     . "p.titre_produit,"
                     . "c.quantite_commande as qte,"
@@ -484,6 +781,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
+        /* ===== STYLES CSS (inchangés) ===== */
         :root {
             --primary: #1e40af;
             --primary-dark: #1e3a8a;
@@ -1211,6 +1509,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             display: flex;
             align-items: center;
             gap: 5px;
+            border: none;
         }
 
         .btn-action:hover {
@@ -1688,7 +1987,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                 <select name="boutique" id="filterBoutique">
                     <option value="">Toutes</option>
                     <?php foreach ($boutiques as $bt): ?>
-                        <option value="<?= e($bt['code_boutique']) ?>" <?= $boutique === $bt['code_boutique'] ? 'selected' : '' ?>><?= e($bt['nom_boutique']) ?></option>
+                        <option value="<?= e($bt['code_boutique']) ?>" <?= $boutiqueFilter === $bt['code_boutique'] ? 'selected' : '' ?>><?= e($bt['nom_boutique']) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -1697,7 +1996,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                 <select name="vendeur" id="filterVendeur">
                     <option value="">Tous</option>
                     <?php foreach ($vendeurs as $vd): ?>
-                        <option value="<?= e($vd['id']) ?>" <?= $vendeur === $vd['id'] ? 'selected' : '' ?>><?= e($vd['nom_prenom']) ?></option>
+                        <option value="<?= e($vd['id']) ?>" <?= $vendeurFilter === $vd['id'] ? 'selected' : '' ?>><?= e($vd['nom_prenom']) ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -1755,7 +2054,11 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             <div class="section-title">
                 <div class="section-title-left"><i class="fas fa-table"></i> Detail Journalier</div>
                 <div class="section-actions">
-                    <button class="btn-action" onclick="exportTable('bilanFinancier')"><i class="fas fa-download"></i> Export</button>
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="financier">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);"><i class="fas fa-file-pdf"></i> PDF</button>
+                    </form>
                 </div>
             </div>
             <div class="table-wrapper">
@@ -1829,7 +2132,11 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             <div class="section-title">
                 <div class="section-title-left"><i class="fas fa-user-tie"></i> Performance Vendeurs</div>
                 <div class="section-actions">
-                    <button class="btn-action" onclick="exportTable('tableVendeurs')"><i class="fas fa-download"></i> Export</button>
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="vendeurs">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);"><i class="fas fa-file-pdf"></i> PDF</button>
+                    </form>
                 </div>
             </div>
             <div class="table-wrapper">
@@ -1875,7 +2182,11 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             <div class="section-title">
                 <div class="section-title-left"><i class="fas fa-store-alt"></i> Performance Boutiques</div>
                 <div class="section-actions">
-                    <button class="btn-action" onclick="exportTable('tableBoutiques')"><i class="fas fa-download"></i> Export</button>
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="boutiques">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);"><i class="fas fa-file-pdf"></i> PDF</button>
+                    </form>
                 </div>
             </div>
             <div class="table-wrapper">
@@ -1950,7 +2261,11 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             <div class="section-title">
                 <div class="section-title-left"><i class="fas fa-scroll"></i> Journal des Mouvements</div>
                 <div class="section-actions">
-                    <button class="btn-action" onclick="exportTable('tableJournal')"><i class="fas fa-download"></i> Export</button>
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="journal">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);"><i class="fas fa-file-pdf"></i> PDF</button>
+                    </form>
                 </div>
             </div>
             <div class="table-wrapper">
@@ -2068,30 +2383,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             document.getElementById('customDates').style.display = show ? '' : 'none';
             document.getElementById('customDateFin').style.display = show ? '' : 'none';
         });
-
-        // ── Export CSV ──
-        function exportTable(tableId) {
-            var table = document.getElementById(tableId);
-            if (!table) return;
-            var csv = '';
-            table.querySelectorAll('tr').forEach(function(row) {
-                var cols = [];
-                row.querySelectorAll('th, td').forEach(function(cell) {
-                    cols.push(cell.innerText.trim().replace(/\s+/g, ' '));
-                });
-                csv += cols.join(';') + '\n';
-            });
-            var blob = new Blob([csv], {
-                type: 'text/csv;charset=utf-8;'
-            });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = url;
-            a.download = tableId + '_' + new Date().toISOString().slice(0, 10) + '.csv';
-            a.click();
-            URL.revokeObjectURL(url);
-            showToast('Export', 'Fichier CSV genere', 'success');
-        }
 
         // ── Charts ──
         var moisLabels = <?= json_encode($moisLabels) ?>;

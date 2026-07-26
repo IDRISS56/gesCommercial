@@ -1,6 +1,7 @@
 <?php
 // views/ventes/index.php – Gestion des bons de commande client
 // Design dashboard identique à la gestion des prix
+// Intègre la validation des ventes via une modale (style inventaire)
 
 session_start();
 if (!isset($_SESSION['user_id'])) {
@@ -84,13 +85,13 @@ while ($lot = $stmtLots->fetch(PDO::FETCH_ASSOC)) {
     $lotsParProduit[$lot['produit_id']][] = $lot;
 }
 
-// ---- PRIX DE VENTE (on ne l'utilise plus, on le garde pour compatibilité) ----
+// ---- PRIX DE VENTE (pour compatibilité) ----
 $prixVente = [];
 foreach ($produits as $p) {
     $prixVente[$p['code_produit']] = $p['prix_produit'] ?? 0;
 }
 
-// ---- TRAITEMENT DU FORMULAIRE ----
+// ---- TRAITEMENT DU FORMULAIRE DE CRÉATION DE BON ----
 $message = '';
 $messageType = '';
 $bonData = null;
@@ -170,21 +171,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     foreach ($lignesValides as $ligne) {
                         $numCommandeUnique = $numBon . '-' . date('His') . rand(100, 999);
 
-                        $stmtLock = $pdo->prepare("SELECT quantite FROM stock_boutique WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                        // Vérifie la disponibilité NETTE (stock réel - déjà réservé par d'autres ventes en attente)
+                        $stmtLock = $pdo->prepare("SELECT quantite, quantite_reservee FROM stock_boutique WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
                         $stmtLock->execute([$ligne['produit_id'], $boutiqueId]);
                         $ligneStock = $stmtLock->fetch(PDO::FETCH_ASSOC);
-                        $stockAvant = $ligneStock ? (int)$ligneStock['quantite'] : 0;
-                        $stockApres = $stockAvant - $ligne['quantite_base'];
-                        if ($stockApres < 0) {
-                            throw new Exception("Stock insuffisant pour {$ligne['produit_id']} dans la boutique $boutiqueId (disponible : $stockAvant, demandé : {$ligne['quantite_base']}).");
+                        $stockReel = $ligneStock ? (int)$ligneStock['quantite'] : 0;
+                        $reserveActuelle = $ligneStock ? (int)($ligneStock['quantite_reservee'] ?? 0) : 0;
+                        $disponibleNet = $stockReel - $reserveActuelle;
+                        if ($disponibleNet < $ligne['quantite_base']) {
+                            throw new Exception("Stock disponible insuffisant pour {$ligne['produit_id']} dans la boutique $boutiqueId (disponible net : $disponibleNet, demandé : {$ligne['quantite_base']}).");
                         }
 
                         $stmt = $pdo->prepare("INSERT INTO commande 
-                            (numero_commande, produit_id, contact_id, facture_id, statut_id, date_commande, heure_commande, 
+                            (numero_commande, produit_id, contact_id, facture_id, statut_id,
+                             date_commande, heure_commande, 
                              prix_achat, prix_commande, quantite_commande, montant_commande, utilisateur_id, 
                              boutique_id, etat_commande, lot_produit_id, unite_affichage, facteur_conversion,
                              reference_liee)
-                            VALUES (?, ?, ?, ?, '012', ?, CURTIME(), 0, ?, ?, ?, ?, ?, 'Valider', ?, ?, ?, ?)");
+                            VALUES (?, ?, ?, ?, '012', ?, CURTIME(), 0, ?, ?, ?, ?, ?, 'En attente', ?, ?, ?, ?)");
                         $stmt->execute([
                             $numCommandeUnique,
                             $ligne['produit_id'],
@@ -202,12 +206,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             $numBon
                         ]);
 
-                        $pdo->prepare("UPDATE stock_boutique SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
-                            ->execute([$stockApres, $ligne['produit_id'], $boutiqueId]);
-                        $pdo->prepare("UPDATE produit SET stock_produit = (
-                                SELECT COALESCE(SUM(quantite), 0) FROM stock_boutique WHERE produit_id = ?
-                            ) WHERE code_produit = ?")
-                            ->execute([$ligne['produit_id'], $ligne['produit_id']]);
+                        // Réserver le stock
+                        if ($ligneStock === false) {
+                            $pdo->prepare("INSERT INTO stock_boutique (produit_id, boutique_id, quantite, quantite_reservee) VALUES (?, ?, 0, 0)")
+                                ->execute([$ligne['produit_id'], $boutiqueId]);
+                        }
+                        $pdo->prepare("UPDATE stock_boutique SET quantite_reservee = quantite_reservee + ? WHERE produit_id = ? AND boutique_id = ?")
+                            ->execute([$ligne['quantite_base'], $ligne['produit_id'], $boutiqueId]);
                     }
 
                     $numFacture = 'FAC-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
@@ -239,7 +244,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
                     $pdo->commit();
 
-                    $message = "Bon de commande client $numBon enregistré avec " . count($lignesValides) . " ligne(s). Facture $numFacture créée en attente.";
+                    $message = "Bon de commande client $numBon enregistré en attente de validation (stock réservé). Facture $numFacture créée en attente.";
                     $messageType = 'success';
                     $bonData = [
                         'num' => $numBon,
@@ -256,6 +261,93 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     $message = "Erreur : " . $e->getMessage();
                     $messageType = 'error';
                 }
+            }
+        }
+    }
+}
+
+// ---- TRAITEMENT DE LA VALIDATION / ANNULATION DES VENTES (MODALE) ----
+$validationMessage = '';
+$validationMessageType = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_validation'])) {
+    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $csrf_token) {
+        $validationMessage = "Token de sécurité invalide.";
+        $validationMessageType = 'error';
+    } else {
+        $reference = $_POST['reference_liee'] ?? '';
+        $action = $_POST['action_validation'];
+
+        $stmtLignes = $pdo->prepare("SELECT * FROM commande WHERE reference_liee = ? AND statut_id = '012' AND etat_commande = 'En attente'");
+        $stmtLignes->execute([$reference]);
+        $lignes = $stmtLignes->fetchAll(PDO::FETCH_ASSOC);
+
+        if (empty($lignes)) {
+            $validationMessage = "Cette vente n'a plus de ligne en attente.";
+            $validationMessageType = 'error';
+        } elseif ($action === 'valider') {
+            try {
+                $pdo->beginTransaction();
+                foreach ($lignes as $ligne) {
+                    $qte = (int) $ligne['quantite_commande'];
+                    $produitId = $ligne['produit_id'];
+                    $boutiqueId = $ligne['boutique_id'];
+
+                    $stmtLock = $pdo->prepare("SELECT quantite, quantite_reservee FROM stock_boutique WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                    $stmtLock->execute([$produitId, $boutiqueId]);
+                    $ligneStock = $stmtLock->fetch(PDO::FETCH_ASSOC);
+                    $stockAvant = $ligneStock ? (int) $ligneStock['quantite'] : 0;
+                    $stockApres = $stockAvant - $qte;
+                    if ($stockApres < 0) {
+                        throw new Exception("Stock physique insuffisant pour $produitId (disponible : $stockAvant, demandé : $qte).");
+                    }
+
+                    // Consommation réelle du stock + libération de la réservation correspondante
+                    $pdo->prepare("UPDATE stock_boutique SET quantite = ?, quantite_reservee = GREATEST(0, quantite_reservee - ?) WHERE produit_id = ? AND boutique_id = ?")
+                        ->execute([$stockApres, $qte, $produitId, $boutiqueId]);
+
+                    $pdo->prepare("UPDATE produit SET stock_produit = (
+                            SELECT COALESCE(SUM(quantite), 0) FROM stock_boutique WHERE produit_id = ?
+                        ) WHERE code_produit = ?")
+                        ->execute([$produitId, $produitId]);
+
+                    $pdo->prepare("UPDATE commande SET etat_commande = 'Validé', stock_avant = ?, stock_apres = ?,
+                            date_validation = NOW(), utilisateur_validation_id = ?
+                        WHERE numero_commande = ?")
+                        ->execute([$stockAvant, $stockApres, $user['id'], $ligne['numero_commande']]);
+                }
+                // La facture liée passe de "En attente" à "Validée"
+                $pdo->prepare("UPDATE facture SET etat_facture = 'Validée' WHERE numero_facture = (
+                        SELECT facture_id FROM commande WHERE reference_liee = ? AND facture_id IS NOT NULL LIMIT 1
+                    )")->execute([$reference]);
+                $pdo->commit();
+                $validationMessage = "Vente $reference validée : stock décrémenté et facture confirmée.";
+                $validationMessageType = 'success';
+            } catch (Exception $ex) {
+                $pdo->rollBack();
+                $validationMessage = "Erreur lors de la validation : " . $ex->getMessage();
+                $validationMessageType = 'error';
+            }
+        } elseif ($action === 'annuler') {
+            try {
+                $pdo->beginTransaction();
+                foreach ($lignes as $ligne) {
+                    $qte = (int) $ligne['quantite_commande'];
+                    $pdo->prepare("UPDATE stock_boutique SET quantite_reservee = GREATEST(0, quantite_reservee - ?) WHERE produit_id = ? AND boutique_id = ?")
+                        ->execute([$qte, $ligne['produit_id'], $ligne['boutique_id']]);
+                    $pdo->prepare("UPDATE commande SET etat_commande = 'Annulé', date_validation = NOW(), utilisateur_validation_id = ?
+                            WHERE numero_commande = ?")
+                        ->execute([$user['id'], $ligne['numero_commande']]);
+                }
+                $pdo->prepare("UPDATE facture SET etat_facture = 'Annulée' WHERE numero_facture = (
+                        SELECT facture_id FROM commande WHERE reference_liee = ? AND facture_id IS NOT NULL LIMIT 1
+                    )")->execute([$reference]);
+                $pdo->commit();
+                $validationMessage = "Vente $reference annulée : la réservation de stock a été libérée.";
+                $validationMessageType = 'success';
+            } catch (Exception $ex) {
+                $pdo->rollBack();
+                $validationMessage = "Erreur lors de l'annulation : " . $ex->getMessage();
+                $validationMessageType = 'error';
             }
         }
     }
@@ -301,7 +393,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         LEFT JOIN produit p ON c.produit_id = p.code_produit
         LEFT JOIN contact ct ON c.contact_id = ct.code_contact
         LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
-        WHERE c.reference_liee = ? AND c.statut_id = '012' AND c.etat_commande = 'Valider'
+        WHERE c.reference_liee = ? AND c.statut_id = '012' AND c.etat_commande != 'Annulé'
         ORDER BY c.numero_commande
     ");
     $stmt->execute([$bonId]);
@@ -520,7 +612,7 @@ function getBonsVente($pdo, $search, $client_filter, $boutique_filter, $page, $p
             FROM commande c
             LEFT JOIN contact ct ON c.contact_id = ct.code_contact
             WHERE statut_id = '012' 
-              AND etat_commande = 'Valider'
+              AND etat_commande != 'Annulé'
               AND reference_liee IS NOT NULL
     ";
     $params = [];
@@ -666,6 +758,19 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     echo json_encode(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
     exit;
 }
+
+// ---- RÉCUPÉRATION DES VENTES EN ATTENTE POUR LA MODALE ----
+$ventesEnAttente = $pdo->query("
+    SELECT c.reference_liee, c.contact_id, c.boutique_id, c.date_commande, c.facture_id,
+           ct.nom_prenom_contact, b.nom_boutique,
+           COUNT(*) as nb_lignes, SUM(c.montant_commande) as montant_total
+    FROM commande c
+    LEFT JOIN contact ct ON c.contact_id = ct.code_contact
+    LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
+    WHERE c.statut_id = '012' AND c.etat_commande = 'En attente'
+    GROUP BY c.reference_liee, c.contact_id, c.boutique_id, c.date_commande, c.facture_id, ct.nom_prenom_contact, b.nom_boutique
+    ORDER BY c.date_commande DESC
+")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -933,6 +1038,262 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             border-color: var(--b);
             box-shadow: 0 0 0 3px var(--bl);
         }
+
+        /* ===== STYLE DE LA MODALE (inspiré de inventaire.php) ===== */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.5);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            padding: 16px;
+        }
+
+        .modal-overlay.show {
+            display: flex;
+        }
+
+        .modal-box {
+            background: white;
+            border-radius: 16px;
+            width: 900px;
+            max-width: 100%;
+            max-height: 90vh;
+            box-shadow: 0 20px 25px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .modal-head {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--brd);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .modal-head h3 {
+            font-size: 16px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--dk);
+            margin: 0;
+        }
+
+        .modal-head h3 i {
+            color: var(--b);
+        }
+
+        .modal-close {
+            background: #f1f5f9;
+            font-size: 18px;
+            color: var(--lt);
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            border: none;
+            cursor: pointer;
+        }
+
+        .modal-close:hover {
+            background: var(--dngl);
+            color: var(--dng);
+        }
+
+        .modal-body {
+            padding: 20px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .modal-foot {
+            padding: 14px 20px;
+            border-top: 1px solid var(--brd);
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            flex-shrink: 0;
+            background: #f8fafc;
+        }
+
+        .modal-foot .btn-secondary {
+            background: #f1f5f9;
+            color: var(--dk);
+            padding: 8px 16px;
+            border-radius: var(--Rs);
+            font-weight: 600;
+            font-size: 14px;
+            border: 1px solid var(--brd);
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .modal-foot .btn-secondary:hover {
+            background: #e2e8f0;
+        }
+
+        .modal-foot .btn-success {
+            background: var(--suc);
+            color: white;
+            padding: 8px 16px;
+            border-radius: var(--Rs);
+            font-weight: 600;
+            font-size: 14px;
+            border: none;
+            transition: background 0.2s;
+            cursor: pointer;
+        }
+
+        .modal-foot .btn-success:hover {
+            background: #059669;
+        }
+
+        .modal-body .product-ref {
+            background: var(--bl);
+            border: 1px solid var(--bb);
+            border-radius: var(--Rs);
+            padding: 10px 14px;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .modal-body .product-ref .ref-name {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--bd);
+        }
+
+        .modal-body .product-ref .ref-stock {
+            font-size: 12px;
+            color: var(--mt);
+        }
+
+        .modal-body .badge-lot {
+            background: var(--bl);
+            color: var(--bd);
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            border: 1px solid var(--bb);
+        }
+
+        .modal-body .badge-lot.empty {
+            background: #f1f5f9;
+            color: var(--lt);
+            border-color: var(--brd);
+        }
+
+        .modal-body .btn-sm {
+            padding: 4px 10px;
+            font-size: 12px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+        }
+
+        .modal-body .btn-success {
+            background: var(--suc);
+            color: white;
+        }
+
+        .modal-body .btn-success:hover {
+            background: #059669;
+        }
+
+        .modal-body .btn-outline-danger {
+            background: transparent;
+            color: var(--dng);
+            border: 1px solid var(--dng);
+        }
+
+        .modal-body .btn-outline-danger:hover {
+            background: var(--dngl);
+        }
+
+        .modal-body table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .modal-body thead th {
+            background: var(--b);
+            color: white;
+            padding: 10px 14px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 11px;
+            letter-spacing: 0.03em;
+            white-space: nowrap;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .modal-body tbody td {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--brd);
+            color: var(--dk);
+            vertical-align: middle;
+        }
+
+        .modal-body tbody tr:hover {
+            background: var(--bl);
+        }
+
+        .modal-body .text-center {
+            text-align: center;
+        }
+
+        .modal-body .text-muted {
+            color: var(--mt);
+        }
+
+        .modal-body .py-5 {
+            padding-top: 3rem;
+            padding-bottom: 3rem;
+        }
+
+        .modal-body .toast-notif {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--dk);
+            color: white;
+            padding: 12px 20px;
+            border-radius: var(--Rs);
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 2000;
+            display: none;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            align-items: center;
+            gap: 8px;
+            max-width: 400px;
+        }
+
+        .modal-body .toast-notif.error {
+            background: var(--dng);
+        }
+
+        .modal-body .toast-notif.success {
+            background: var(--b);
+        }
     </style>
 </head>
 <body>
@@ -946,6 +1307,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
         <div class="hdr-r">
             <div class="hdr-badge"><i class="bi bi-receipt"></i> <?= $bonsData['total'] ?? 0 ?> bons</div>
             <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouveau bon</button>
+            <button class="btn-go" id="validationBtn" style="background:#059669;"><i class="bi bi-check2-circle"></i> Valider ventes</button>
         </div>
     </div>
 
@@ -1070,6 +1432,83 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                     </nav>
                 </div>
             <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- ========================================================= -->
+<!-- MODALE VALIDATION DES VENTES (style inventaire) -->
+<!-- ========================================================= -->
+<div class="modal-overlay" id="validationModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <h3><i class="bi bi-check2-circle"></i> Validation des ventes en attente</h3>
+            <button class="modal-close" onclick="closeModal('validationModal')"><i class="bi bi-x"></i></button>
+        </div>
+        <div class="modal-body">
+            <?php if ($validationMessage): ?>
+                <div class="alert alert-<?= $validationMessageType === 'success' ? 'success' : 'danger' ?> alert-dismissible fade show" role="alert">
+                    <?= e($validationMessage) ?>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            <?php endif; ?>
+
+            <div class="product-ref">
+                <span class="ref-name"><i class="bi bi-info-circle"></i> Ventes en attente de validation</span>
+                <span class="ref-stock"><?= count($ventesEnAttente) ?> vente(s) en attente</span>
+            </div>
+
+            <?php if (empty($ventesEnAttente)): ?>
+                <p class="text-center text-muted py-4"><i class="bi bi-check-circle fs-1 d-block mb-2 opacity-50"></i>Aucune vente en attente.</p>
+            <?php else: ?>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Référence</th>
+                                <th>Client</th>
+                                <th>Boutique</th>
+                                <th>Date</th>
+                                <th>Facture</th>
+                                <th>Lignes</th>
+                                <th>Montant</th>
+                                <th class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($ventesEnAttente as $v): ?>
+                                <tr>
+                                    <td><strong><?= e($v['reference_liee']) ?></strong></td>
+                                    <td><?= e($v['nom_prenom_contact']) ?></td>
+                                    <td><?= e($v['nom_boutique']) ?></td>
+                                    <td><?= e($v['date_commande']) ?></td>
+                                    <td><?= e($v['facture_id']) ?></td>
+                                    <td><?= (int)$v['nb_lignes'] ?></td>
+                                    <td><?= fmt($v['montant_total']) ?> F</td>
+                                    <td class="text-end" style="white-space:nowrap;">
+                                        <form method="post" class="d-inline" onsubmit="return confirm('Valider cette vente ? Le stock sera décrémenté.');">
+                                            <input type="hidden" name="csrf_token" value="<?= e($csrf_token) ?>">
+                                            <input type="hidden" name="reference_liee" value="<?= e($v['reference_liee']) ?>">
+                                            <input type="hidden" name="action_validation" value="valider">
+                                            <button class="btn-sm btn-success"><i class="bi-check2"></i> Valider</button>
+                                        </form>
+                                        <form method="post" class="d-inline" onsubmit="return confirm('Annuler cette vente ? La réservation de stock sera libérée.');">
+                                            <input type="hidden" name="csrf_token" value="<?= e($csrf_token) ?>">
+                                            <input type="hidden" name="reference_liee" value="<?= e($v['reference_liee']) ?>">
+                                            <input type="hidden" name="action_validation" value="annuler">
+                                            <button class="btn-sm btn-outline-danger"><i class="bi-x-lg"></i> Annuler</button>
+                                        </form>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+        </div>
+        <div class="modal-foot">
+            <button class="btn-secondary" onclick="closeModal('validationModal')">Fermer</button>
+            <button class="btn-success" onclick="location.reload()"><i class="bi bi-arrow-clockwise"></i> Rafraîchir</button>
         </div>
     </div>
 </div>
@@ -1356,6 +1795,28 @@ $(document).ready(function() {
         document.querySelectorAll('.ligne-produit').forEach(function(ligne) {
             const qteInput = ligne.querySelector('.quantite');
             if (qteInput) mettreAJourPrix(qteInput);
+        });
+    });
+
+    // ---- Modale Validation (style inventaire) ----
+    function openModal(id) {
+        document.getElementById(id).classList.add('show');
+    }
+
+    function closeModal(id) {
+        document.getElementById(id).classList.remove('show');
+    }
+    window.openModal = openModal;
+    window.closeModal = closeModal;
+
+    $('#validationBtn').on('click', function() {
+        openModal('validationModal');
+    });
+
+    // Fermeture de la modale au clic sur l'overlay
+    document.querySelectorAll('.modal-overlay').forEach(m => {
+        m.addEventListener('click', function(e) {
+            if (e.target === this) this.classList.remove('show');
         });
     });
 

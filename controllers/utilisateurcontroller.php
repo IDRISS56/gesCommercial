@@ -16,6 +16,10 @@ class utilisateur
     {
         include "views/utilisateur/profil.php";
     }
+    public function deconnexion()
+    {
+        include "views/utilisateur/logout.php";
+    }
     public function menu()
     {
         //  checkAccessConditions();

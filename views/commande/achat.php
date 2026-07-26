@@ -1,5 +1,7 @@
 <?php
-// views/achats/index.php – Gestion des bons de commande fournisseurs (design dashboard)
+// views/achats/index.php – Gestion des bons de commande fournisseurs (design vente)
+// Intègre la réception des bons via une modale (style inventaire)
+
 session_start();
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
@@ -50,7 +52,7 @@ foreach ($produits as $p) {
     $prixFournisseur[$p['code_produit']] = $p['prix_fournisseur'] ?? $p['prix_produit'] ?? 0;
 }
 
-// ---- TRAITEMENT DU FORMULAIRE ----
+// ---- TRAITEMENT DU FORMULAIRE DE CRÉATION DE BON ----
 $message = '';
 $messageType = '';
 $bonData = null;
@@ -74,6 +76,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
         if (empty($fournisseurId) || empty($boutiqueId) || empty($produitsPost)) {
             $message = "Veuillez sélectionner un fournisseur, une boutique et au moins un produit.";
+            $messageType = 'error';
+        } elseif (empty($dateLivraison) || $dateLivraison < date('Y-m-d')) {
+            $message = "La date de livraison ne peut pas être antérieure à aujourd'hui.";
             $messageType = 'error';
         } else {
             $errors = false;
@@ -125,7 +130,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                              prix_achat, prix_commande, quantite_commande, montant_commande, utilisateur_id, 
                              boutique_id, etat_commande, lot_produit_id, unite_affichage, facteur_conversion,
                              reference_liee, date_livraison_recue)
-                            VALUES (?, ?, ?, 'Achat', ?, CURTIME(), ?, ?, ?, ?, ?, ?, 'Valider', ?, ?, ?, ?, ?)");
+                            VALUES (?, ?, ?, '011', ?, CURTIME(), ?, ?, ?, ?, ?, ?, 'En attente', ?, ?, ?, ?, ?)");
                         $stmt->execute([
                             $numCommandeUnique,
                             $ligne['produit_id'],
@@ -143,29 +148,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                             $numBon,
                             $dateLivraison
                         ]);
-
-                        // Mise à jour du stock en unité de base (par boutique)
-                        $pdo->prepare("UPDATE stock_boutique SET quantite = quantite + ? WHERE produit_id = ? AND boutique_id = ?")
-                            ->execute([$ligne['quantite_base'], $ligne['produit_id'], $boutiqueId]);
-
-                        // Mise à jour du stock global du produit (unité de base)
-                        $pdo->prepare("UPDATE produit SET stock_produit = COALESCE(stock_produit,0) + ? WHERE code_produit = ?")
-                            ->execute([$ligne['quantite_base'], $ligne['produit_id']]);
-
-                        // ---- Mise à jour du stock de lots pour cette boutique ----
-                        if (!empty($ligne['lot_id'])) {
-                            $stmtLotUpdate = $pdo->prepare("
-                                INSERT INTO stock_boutique (produit_id, boutique_id, lot_produit_id, quantite_lot)
-                                VALUES (?, ?, ?, ?)
-                                ON DUPLICATE KEY UPDATE 
-                                    lot_produit_id = VALUES(lot_produit_id),
-                                    quantite_lot = quantite_lot + VALUES(quantite_lot)
-                            ");
-                            $stmtLotUpdate->execute([$ligne['produit_id'], $boutiqueId, $ligne['lot_id'], $ligne['quantite_saisie']]);
-                        }
                     }
                     $pdo->commit();
-                    $message = "Bon de commande $numBon enregistré avec " . count($lignesValides) . " ligne(s).";
+                    $message = "Bon de commande $numBon enregistré en attente de réception avec " . count($lignesValides) . " ligne(s).";
                     $messageType = 'success';
                     $bonData = [
                         'num' => $numBon,
@@ -186,6 +171,256 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
+// ---- TRAITEMENT RÉCEPTION / ANNULATION (MODALE) ----
+$receptionMessage = '';
+$receptionMessageType = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_reception'])) {
+    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $csrf_token) {
+        $receptionMessage = "Token de sécurité invalide.";
+        $receptionMessageType = 'error';
+    } else {
+        $reference = $_POST['reference_liee'] ?? '';
+        $action = $_POST['action_reception'];
+
+        $stmtLignes = $pdo->prepare("SELECT * FROM commande WHERE reference_liee = ? AND statut_id = '011' AND etat_commande = 'En attente'");
+        $stmtLignes->execute([$reference]);
+        $lignes = $stmtLignes->fetchAll(PDO::FETCH_ASSOC);
+
+        if (empty($lignes)) {
+            $receptionMessage = "Ce bon n'a plus de ligne en attente.";
+            $receptionMessageType = 'error';
+        } elseif ($action === 'recevoir') {
+            try {
+                $pdo->beginTransaction();
+                foreach ($lignes as $ligne) {
+                    $qte = (int) $ligne['quantite_commande'];
+                    $produitId = $ligne['produit_id'];
+                    $boutiqueId = $ligne['boutique_id'];
+
+                    $stmtLock = $pdo->prepare("SELECT quantite FROM stock_boutique WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                    $stmtLock->execute([$produitId, $boutiqueId]);
+                    $ligneStock = $stmtLock->fetch(PDO::FETCH_ASSOC);
+                    $stockAvant = $ligneStock ? (int) $ligneStock['quantite'] : 0;
+                    $stockApres = $stockAvant + $qte;
+
+                    if ($ligneStock === false) {
+                        $pdo->prepare("INSERT INTO stock_boutique (produit_id, boutique_id, quantite) VALUES (?, ?, 0)")
+                            ->execute([$produitId, $boutiqueId]);
+                    }
+
+                    $pdo->prepare("UPDATE stock_boutique SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
+                        ->execute([$stockApres, $produitId, $boutiqueId]);
+
+                    $pdo->prepare("UPDATE produit SET stock_produit = COALESCE(stock_produit,0) + ? WHERE code_produit = ?")
+                        ->execute([$qte, $produitId]);
+
+                    if (!empty($ligne['lot_produit_id'])) {
+                        $pdo->prepare("
+                            INSERT INTO stock_boutique (produit_id, boutique_id, lot_produit_id, quantite_lot)
+                            VALUES (?, ?, ?, ?)
+                            ON DUPLICATE KEY UPDATE
+                                lot_produit_id = VALUES(lot_produit_id),
+                                quantite_lot = quantite_lot + VALUES(quantite_lot)
+                        ")->execute([$produitId, $boutiqueId, $ligne['lot_produit_id'], $ligne['quantite_commande'] / max(1, (int)$ligne['facteur_conversion'])]);
+                    }
+
+                    $pdo->prepare("UPDATE commande SET etat_commande = 'Reçu', stock_avant = ?, stock_apres = ?,
+                            date_reception_reelle = CURDATE(), date_validation = NOW(), utilisateur_validation_id = ?
+                        WHERE numero_commande = ?")
+                        ->execute([$stockAvant, $stockApres, $user['id'], $ligne['numero_commande']]);
+                }
+                $pdo->commit();
+                $receptionMessage = "Bon $reference réceptionné : stock mis à jour.";
+                $receptionMessageType = 'success';
+            } catch (Exception $ex) {
+                $pdo->rollBack();
+                $receptionMessage = "Erreur lors de la réception : " . $ex->getMessage();
+                $receptionMessageType = 'error';
+            }
+        } elseif ($action === 'annuler') {
+            $pdo->prepare("UPDATE commande SET etat_commande = 'Annulé', date_validation = NOW(), utilisateur_validation_id = ?
+                    WHERE reference_liee = ? AND statut_id = '011' AND etat_commande = 'En attente'")
+                ->execute([$user['id'], $reference]);
+            $receptionMessage = "Bon $reference annulé (aucun stock n'avait été impacté).";
+            $receptionMessageType = 'success';
+        }
+    }
+}
+
+// ---- RÉCUPÉRATION DE L'HISTORIQUE ----
+function getBons($pdo, $search, $fournisseur_filter, $boutique_filter, $page, $perPage = 10)
+{
+    $sql = "SELECT 
+                reference_liee AS bon_id,
+                MAX(date_commande) AS date_bon,
+                MAX(ct.nom_prenom_contact) AS fournisseur,
+                MAX(ct.telephone_contact) AS fournisseur_tel,
+                MAX(ct.email_contact) AS fournisseur_email,
+                MAX(ct.adresse_contact) AS fournisseur_adresse,
+                MAX(boutique_id) AS boutique_id,
+                MAX(date_livraison_recue) AS date_livraison,
+                COUNT(*) AS nb_lignes,
+                SUM(montant_commande) AS total_bon
+            FROM commande c
+            LEFT JOIN contact ct ON c.contact_id = ct.code_contact
+            WHERE statut_id = '011' 
+              AND etat_commande != 'Annulé'
+              AND reference_liee IS NOT NULL
+    ";
+    $params = [];
+    if (!empty($search)) {
+        $sql .= " AND (c.reference_liee LIKE ? OR ct.nom_prenom_contact LIKE ? OR c.boutique_id LIKE ?)";
+        $like = '%' . $search . '%';
+        $params[] = $like;
+        $params[] = $like;
+        $params[] = $like;
+    }
+    if (!empty($fournisseur_filter)) {
+        $sql .= " AND ct.code_contact = ?";
+        $params[] = $fournisseur_filter;
+    }
+    if (!empty($boutique_filter)) {
+        $sql .= " AND c.boutique_id = ?";
+        $params[] = $boutique_filter;
+    }
+    $sql .= " GROUP BY reference_liee ORDER BY date_bon DESC";
+
+    $countSql = "SELECT COUNT(*) FROM (" . $sql . ") AS sub";
+    $stmt = $pdo->prepare($countSql);
+    $stmt->execute($params);
+    $total = $stmt->fetchColumn();
+    $totalPages = ceil($total / $perPage);
+    if ($page > $totalPages && $totalPages > 0) $page = $totalPages;
+    $offset = ($page - 1) * $perPage;
+    $sql .= " LIMIT $perPage OFFSET $offset";
+
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $bons = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($bons as &$bon) {
+        $stmt = $pdo->prepare("
+            SELECT produit_id, quantite_commande, unite_affichage, 
+                   facteur_conversion, prix_achat, montant_commande
+            FROM commande
+            WHERE reference_liee = ? AND statut_id = '011'
+        ");
+        $stmt->execute([$bon['bon_id']]);
+        $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($lignes as &$ligne) {
+            $stmtProd = $pdo->prepare("SELECT titre_produit FROM produit WHERE code_produit = ?");
+            $stmtProd->execute([$ligne['produit_id']]);
+            $ligne['titre_produit'] = $stmtProd->fetchColumn();
+            $facteur = intval($ligne['facteur_conversion'] ?: 1);
+            $ligne['quantite_lots'] = $ligne['quantite_commande'] / max(1, $facteur);
+        }
+        $bon['lignes'] = $lignes;
+        $stmtBoutique = $pdo->prepare("SELECT nom_boutique, adresse_boutique FROM boutique WHERE code_boutique = ?");
+        $stmtBoutique->execute([$bon['boutique_id']]);
+        $boutiqueInfo = $stmtBoutique->fetch(PDO::FETCH_ASSOC);
+        $bon['nom_boutique'] = $boutiqueInfo['nom_boutique'] ?? '';
+        $bon['adresse_boutique'] = $boutiqueInfo['adresse_boutique'] ?? '';
+    }
+    unset($bon);
+    return ['bons' => $bons, 'total' => $total, 'page' => $page, 'totalPages' => $totalPages];
+}
+
+$search = trim($_POST['search'] ?? '');
+$fournisseur_filter = trim($_POST['fournisseur_filter'] ?? '');
+$boutique_filter = trim($_POST['boutique_filter'] ?? '');
+$page = (int)($_POST['page'] ?? 1);
+if ($page < 1) $page = 1;
+
+$bonsData = getBons($pdo, $search, $fournisseur_filter, $boutique_filter, $page, 10);
+
+// ---- AJAX POUR LA RECHERCHE ----
+if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
+    // Capture toute sortie parasite (warning/notice PHP) qui casserait le JSON,
+    // et transforme toute erreur en réponse JSON exploitable au lieu d'une page
+    // d'erreur HTML que jQuery ne peut pas parser (dataType: 'json').
+    ob_start();
+    try {
+        $search = trim($_POST['search'] ?? '');
+        $fournisseur_filter = trim($_POST['fournisseur_filter'] ?? '');
+        $boutique_filter = trim($_POST['boutique_filter'] ?? '');
+        $page = (int)($_POST['page'] ?? 1);
+        $data = getBons($pdo, $search, $fournisseur_filter, $boutique_filter, $page, 10);
+    ob_start();
+    if (empty($data['bons'])): ?>
+        <tr>
+            <td colspan="8" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucun bon trouvé</td>
+        </tr>
+        <?php else: foreach ($data['bons'] as $bon): ?>
+            <tr>
+                <td class="td-bold"><?= e($bon['bon_id']) ?></td>
+                <td><?= e($bon['date_bon']) ?></td>
+                <td><?= e($bon['fournisseur'] ?? '—') ?></td>
+                <td><?= $bon['nb_lignes'] ?></td>
+                <td><strong><?= fmt($bon['total_bon']) ?> F</strong></td>
+                <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
+                <td><?= e($bon['date_livraison'] ?? '—') ?></td>
+                <td class="text-end">
+                    <form method="POST" style="display:inline-block;">
+                        <input type="hidden" name="action" value="print_bon_pdf">
+                        <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
+                        <button type="submit" class="act-btn" title="PDF" style="color:#dc3545; border:none; background:transparent; padding:0; width:34px; height:34px;">
+                            <i class="bi bi-file-pdf"></i>
+                        </button>
+                    </form>
+                </td>
+            </tr>
+        <?php endforeach;
+    endif;
+    $tableHtml = ob_get_clean();
+
+    ob_start();
+    if ($data['totalPages'] > 1): ?>
+        <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-top bg-light">
+            <span class="text-muted small">Affichage de <?= (($data['page'] - 1) * 10 + 1) ?> à <?= min($data['page'] * 10, $data['total']) ?> sur <?= $data['total'] ?></span>
+            <nav>
+                <ul class="pagination pagination-sm mb-0">
+                    <li class="page-item <?= ($data['page'] <= 1) ? 'disabled' : '' ?>">
+                        <a class="page-link" href="#" data-page="<?= $data['page'] - 1 ?>"><i class="bi bi-chevron-left"></i></a>
+                    </li>
+                    <?php
+                    $start = max(1, $data['page'] - 2);
+                    $end = min($data['totalPages'], $data['page'] + 2);
+                    if ($start > 1) {
+                        echo '<li class="page-item"><a class="page-link" href="#" data-page="1">1</a></li>';
+                        if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+                    }
+                    for ($i = $start; $i <= $end; $i++):
+                    ?>
+                        <li class="page-item <?= ($i == $data['page']) ? 'active' : '' ?>">
+                            <a class="page-link" href="#" data-page="<?= $i ?>"><?= $i ?></a>
+                        </li>
+                    <?php endfor;
+                    if ($end < $data['totalPages']) {
+                        if ($end < $data['totalPages'] - 1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+                        echo '<li class="page-item"><a class="page-link" href="#" data-page="' . $data['totalPages'] . '">' . $data['totalPages'] . '</a></li>';
+                    }
+                    ?>
+                    <li class="page-item <?= ($data['page'] >= $data['totalPages']) ? 'disabled' : '' ?>">
+                        <a class="page-link" href="#" data-page="<?= $data['page'] + 1 ?>"><i class="bi bi-chevron-right"></i></a>
+                    </li>
+                </ul>
+            </nav>
+        </div>
+<?php endif;
+        $paginationHtml = ob_get_clean();
+
+        ob_end_clean(); // jette toute sortie parasite capturée par le ob_start() du début
+        header('Content-Type: application/json');
+        echo json_encode(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
+    } catch (\Throwable $e) {
+        while (ob_get_level() > 0) { ob_end_clean(); } // vide tous les tampons ouverts, y compris ceux d'un ob_start() imbriqué
+        header('Content-Type: application/json');
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+    exit;
+}
+
 // ---- IMPRESSION PDF (POST) ----
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'print_bon_pdf') {
     $bonId = $_POST['bon_id'] ?? '';
@@ -200,7 +435,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         LEFT JOIN produit p ON c.produit_id = p.code_produit
         LEFT JOIN contact ct ON c.contact_id = ct.code_contact
         LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
-        WHERE c.reference_liee = ? AND c.statut_id = 'Achat' AND c.etat_commande = 'Valider'
+        WHERE c.reference_liee = ? AND c.statut_id = '011' AND c.etat_commande != 'Annulé'
         ORDER BY c.numero_commande
     ");
     $stmt->execute([$bonId]);
@@ -429,167 +664,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     exit;
 }
 
-// ---- RÉCUPÉRATION DE L'HISTORIQUE ----
-function getBons($pdo, $search, $fournisseur_filter, $boutique_filter, $page, $perPage = 10)
-{
-    $sql = "SELECT 
-                reference_liee AS bon_id,
-                MAX(date_commande) AS date_bon,
-                MAX(ct.nom_prenom_contact) AS fournisseur,
-                MAX(ct.telephone_contact) AS fournisseur_tel,
-                MAX(ct.email_contact) AS fournisseur_email,
-                MAX(ct.adresse_contact) AS fournisseur_adresse,
-                MAX(boutique_id) AS boutique_id,
-                MAX(date_livraison_recue) AS date_livraison,
-                COUNT(*) AS nb_lignes,
-                SUM(montant_commande) AS total_bon
-            FROM commande c
-            LEFT JOIN contact ct ON c.contact_id = ct.code_contact
-            WHERE statut_id = 'Achat' 
-              AND etat_commande = 'Valider'
-              AND reference_liee IS NOT NULL
-    ";
-    $params = [];
-    if (!empty($search)) {
-        $sql .= " AND (c.reference_liee LIKE ? OR ct.nom_prenom_contact LIKE ? OR c.boutique_id LIKE ?)";
-        $like = '%' . $search . '%';
-        $params[] = $like;
-        $params[] = $like;
-        $params[] = $like;
-    }
-    if (!empty($fournisseur_filter)) {
-        $sql .= " AND ct.code_contact = ?";
-        $params[] = $fournisseur_filter;
-    }
-    if (!empty($boutique_filter)) {
-        $sql .= " AND c.boutique_id = ?";
-        $params[] = $boutique_filter;
-    }
-    $sql .= " GROUP BY reference_liee ORDER BY date_bon DESC";
-
-    $countSql = "SELECT COUNT(*) FROM (" . $sql . ") AS sub";
-    $stmt = $pdo->prepare($countSql);
-    $stmt->execute($params);
-    $total = $stmt->fetchColumn();
-    $totalPages = ceil($total / $perPage);
-    if ($page > $totalPages && $totalPages > 0) $page = $totalPages;
-    $offset = ($page - 1) * $perPage;
-    $sql .= " LIMIT $perPage OFFSET $offset";
-
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute($params);
-    $bons = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    foreach ($bons as &$bon) {
-        $stmt = $pdo->prepare("
-            SELECT produit_id, quantite_commande, unite_affichage, 
-                   facteur_conversion, prix_achat, montant_commande
-            FROM commande
-            WHERE reference_liee = ? AND statut_id = 'Achat'
-        ");
-        $stmt->execute([$bon['bon_id']]);
-        $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($lignes as &$ligne) {
-            $stmtProd = $pdo->prepare("SELECT titre_produit FROM produit WHERE code_produit = ?");
-            $stmtProd->execute([$ligne['produit_id']]);
-            $ligne['titre_produit'] = $stmtProd->fetchColumn();
-            $facteur = intval($ligne['facteur_conversion'] ?: 1);
-            $ligne['quantite_lots'] = $ligne['quantite_commande'] / max(1, $facteur);
-        }
-        $bon['lignes'] = $lignes;
-        $stmtBoutique = $pdo->prepare("SELECT nom_boutique, adresse_boutique FROM boutique WHERE code_boutique = ?");
-        $stmtBoutique->execute([$bon['boutique_id']]);
-        $boutiqueInfo = $stmtBoutique->fetch(PDO::FETCH_ASSOC);
-        $bon['nom_boutique'] = $boutiqueInfo['nom_boutique'] ?? '';
-        $bon['adresse_boutique'] = $boutiqueInfo['adresse_boutique'] ?? '';
-    }
-    unset($bon);
-    return ['bons' => $bons, 'total' => $total, 'page' => $page, 'totalPages' => $totalPages];
-}
-
-$search = trim($_POST['search'] ?? '');
-$fournisseur_filter = trim($_POST['fournisseur_filter'] ?? '');
-$boutique_filter = trim($_POST['boutique_filter'] ?? '');
-$page = (int)($_POST['page'] ?? 1);
-if ($page < 1) $page = 1;
-
-$bonsData = getBons($pdo, $search, $fournisseur_filter, $boutique_filter, $page, 10);
-
-// ---- AJAX ----
-if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
-    $search = trim($_POST['search'] ?? '');
-    $fournisseur_filter = trim($_POST['fournisseur_filter'] ?? '');
-    $boutique_filter = trim($_POST['boutique_filter'] ?? '');
-    $page = (int)($_POST['page'] ?? 1);
-    $data = getBons($pdo, $search, $fournisseur_filter, $boutique_filter, $page, 10);
-    ob_start();
-    if (empty($data['bons'])): ?>
-        <tr>
-            <td colspan="8" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucun bon trouvé</td>
-        </tr>
-        <?php else: foreach ($data['bons'] as $bon): ?>
-            <tr>
-                <td class="td-bold"><?= e($bon['bon_id']) ?></td>
-                <td><?= e($bon['date_bon']) ?></td>
-                <td><?= e($bon['fournisseur'] ?? '—') ?></td>
-                <td><?= $bon['nb_lignes'] ?></td>
-                <td><strong><?= fmt($bon['total_bon']) ?> F</strong></td>
-                <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
-                <td><?= e($bon['date_livraison'] ?? '—') ?></td>
-                <td class="text-end">
-                    <form method="POST" style="display:inline-block;">
-                        <input type="hidden" name="action" value="print_bon_pdf">
-                        <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
-                        <button type="submit" class="act-btn" title="PDF" style="color:#dc3545; border:none; background:transparent; padding:0; width:34px; height:34px;">
-                            <i class="bi bi-file-pdf"></i>
-                        </button>
-                    </form>
-                </td>
-            </tr>
-        <?php endforeach;
-    endif;
-    $tableHtml = ob_get_clean();
-
-    ob_start();
-    if ($data['totalPages'] > 1): ?>
-        <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-top bg-light">
-            <span class="text-muted small">Affichage de <?= (($data['page'] - 1) * 10 + 1) ?> à <?= min($data['page'] * 10, $data['total']) ?> sur <?= $data['total'] ?></span>
-            <nav>
-                <ul class="pagination pagination-sm mb-0">
-                    <li class="page-item <?= ($data['page'] <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $data['page'] - 1 ?>"><i class="bi bi-chevron-left"></i></a>
-                    </li>
-                    <?php
-                    $start = max(1, $data['page'] - 2);
-                    $end = min($data['totalPages'], $data['page'] + 2);
-                    if ($start > 1) {
-                        echo '<li class="page-item"><a class="page-link" href="#" data-page="1">1</a></li>';
-                        if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
-                    }
-                    for ($i = $start; $i <= $end; $i++):
-                    ?>
-                        <li class="page-item <?= ($i == $data['page']) ? 'active' : '' ?>">
-                            <a class="page-link" href="#" data-page="<?= $i ?>"><?= $i ?></a>
-                        </li>
-                    <?php endfor;
-                    if ($end < $data['totalPages']) {
-                        if ($end < $data['totalPages'] - 1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
-                        echo '<li class="page-item"><a class="page-link" href="#" data-page="' . $data['totalPages'] . '">' . $data['totalPages'] . '</a></li>';
-                    }
-                    ?>
-                    <li class="page-item <?= ($data['page'] >= $data['totalPages']) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $data['page'] + 1 ?>"><i class="bi bi-chevron-right"></i></a>
-                    </li>
-                </ul>
-            </nav>
-        </div>
-<?php endif;
-    $paginationHtml = ob_get_clean();
-
-    header('Content-Type: application/json');
-    echo json_encode(['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $data['total'], 'page' => $data['page'], 'totalPages' => $data['totalPages']]);
-    exit;
-}
+// ---- RÉCUPÉRATION DES BONS EN ATTENTE POUR LA MODALE ----
+$bonsEnAttente = $pdo->query("
+    SELECT c.reference_liee, c.contact_id, c.boutique_id, c.date_commande, c.date_livraison_recue,
+           ct.nom_prenom_contact, b.nom_boutique,
+           COUNT(*) as nb_lignes, SUM(c.montant_commande) as montant_total
+    FROM commande c
+    LEFT JOIN contact ct ON c.contact_id = ct.code_contact
+    LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
+    WHERE c.statut_id = '011' AND c.etat_commande = 'En attente'
+    GROUP BY c.reference_liee, c.contact_id, c.boutique_id, c.date_commande, c.date_livraison_recue, ct.nom_prenom_contact, b.nom_boutique
+    ORDER BY c.date_commande DESC
+")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -603,833 +689,995 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css" rel="stylesheet">
     <style>
-        /* ===== STYLE DASHBOARD ===== */
+        /* ===== STYLE DASHBOARD (repris de vente.php) ===== */
         :root {
-            --color-primary: #4f46e5;
-            --color-primary-dark: #3730a3;
-            --color-primary-soft: #eef2ff;
-            --color-success: #10b981;
-            --color-success-soft: #d1fae5;
-            --color-warning: #f59e0b;
-            --color-warning-soft: #fef3c7;
-            --color-danger: #ef4444;
-            --color-danger-soft: #fee2e2;
-            --color-gray-50: #f8fafc;
-            --color-gray-100: #f1f5f9;
-            --color-gray-200: #e2e8f0;
-            --color-gray-300: #cbd5e1;
-            --color-gray-400: #94a3b8;
-            --color-gray-500: #64748b;
-            --color-gray-600: #475569;
-            --color-gray-700: #334155;
-            --color-gray-800: #1e293b;
-            --color-gray-900: #0f172a;
-            --bg-body: #f1f5f9;
-            --bg-surface: #ffffff;
-            --bg-muted: #f8fafc;
-            --border-color: #e2e8f0;
-            --text-primary: #0f172a;
-            --text-secondary: #334155;
-            --text-tertiary: #64748b;
-            --text-quaternary: #94a3b8;
-            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
-            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
-            --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.08);
-            --radius-sm: 10px;
-            --radius-md: 14px;
-            --radius-lg: 20px;
-            --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+            --b: #2563eb;
+            --bd: #1d4ed8;
+            --bl: #eff6ff;
+            --bb: #bfdbfe;
+            --bg: #f1f5f9;
+            --w: #fff;
+            --dk: #0f172a;
+            --mt: #64748b;
+            --lt: #94a3b8;
+            --brd: #e2e8f0;
+            --dng: #ef4444;
+            --dngl: #fef2f2;
+            --dngb: #fecaca;
+            --suc: #10b981;
+            --sucl: #ecfdf5;
+            --sucb: #a7f3d0;
+            --wrn: #f59e0b;
+            --wrnl: #fffbeb;
+            --wrnb: #fde68a;
+            --prp: #8b5cf6;
+            --prpl: #f5f3ff;
+            --prpb: #e9d5ff;
+            --tl: #0891b2;
+            --tll: #ecfeff;
+            --tlb: #cffafe;
+            --R: 16px;
+            --Rs: 10px;
         }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: 'Inter', sans-serif;
-            background: var(--bg-body);
-            color: var(--text-primary);
-            padding: 30px 20px;
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--dk);
+            min-height: 100vh;
+            line-height: 1.5;
+            padding: 28px 20px;
         }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
 
-        h1,
-        h2,
-        h3,
-        h4,
-        h5,
-        h6 {
-            font-family: 'Outfit', sans-serif;
+        .W { max-width: 1400px; margin: 0 auto; }
+        .hdr {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .hdr-l h1 { font-size: 26px; font-weight: 800; color: var(--dk); letter-spacing: -0.02em; }
+        .hdr-l p { font-size: 13px; color: var(--mt); margin-top: 2px; font-weight: 500; }
+        .hdr-r {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .hdr-badge {
+            background: var(--bl);
+            border: 1px solid var(--bb);
+            color: var(--b);
+            padding: 8px 14px;
+            border-radius: var(--Rs);
+            font-size: 12px;
             font-weight: 700;
-            letter-spacing: -0.02em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
-
-        .container-crud {
-            max-width: 1400px;
-            margin: 0 auto;
+        .pbar {
+            background: var(--w);
+            border: 1px solid var(--brd);
+            border-radius: var(--R);
+            padding: 16px 20px;
+            margin-bottom: 22px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.04);
+        }
+        .prow {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .prow label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--mt);
+            letter-spacing: .03em;
+            text-transform: uppercase;
+        }
+        .prow input, .prow select {
+            padding: 7px 10px;
+            border: 1.5px solid var(--brd);
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--dk);
+            background: var(--bg);
+            font-family: 'Inter', sans-serif;
+            transition: all .2s;
+        }
+        .prow input:focus, .prow select:focus {
+            border-color: var(--b);
+            background: #fff;
+            box-shadow: 0 0 0 3px var(--bl);
+            outline: none;
+        }
+        .prow select {
+            appearance: none;
+            padding-right: 32px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2364748b' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+        }
+        .btn-go {
+            background: var(--b);
+            color: #fff;
+            padding: 7px 16px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            box-shadow: 0 2px 4px rgba(37,99,235,.2);
+            transition: background .15s;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-go:hover { background: var(--bd); }
+        .btn-go-outline {
+            background: transparent;
+            color: var(--mt);
+            border: 1.5px solid var(--brd);
+            padding: 7px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all .2s;
+            cursor: pointer;
+        }
+        .btn-go-outline:hover {
+            background: var(--bg);
+            border-color: var(--lt);
         }
 
         .data-table-wrap {
-            background: var(--bg-surface);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius-md);
+            background: var(--w);
+            border: 1px solid var(--brd);
+            border-radius: var(--R);
             overflow: hidden;
-            box-shadow: var(--shadow-sm);
+            box-shadow: 0 1px 3px rgba(0,0,0,.04);
         }
-
-        .table-responsive {
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-        }
-
-        .table {
-            min-width: 900px;
-            margin-bottom: 0;
-        }
-
-        .table> :not(caption)>*>* {
-            padding: 8px 12px;
-        }
-
+        .table>:not(caption)>*>* { padding: 12px 18px; }
         .table thead th {
             font-size: 0.7rem;
             font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: var(--text-quaternary);
-            background: var(--bg-muted);
-            border-bottom: 1px solid var(--border-color);
-            white-space: nowrap;
+            letter-spacing: 0.8px;
+            color: var(--lt);
+            background: var(--bg);
+            border-bottom: 1px solid var(--brd);
         }
-
         .table tbody tr {
-            border-bottom: 1px solid var(--border-color);
-            transition: background var(--transition-base);
+            border-bottom: 1px solid var(--brd);
+            transition: background .2s;
         }
-
-        .table tbody tr:hover {
-            background: var(--color-primary-soft);
-        }
-
+        .table tbody tr:hover { background: var(--bl); }
         .table tbody td {
             vertical-align: middle;
-            color: var(--text-secondary);
-            font-size: 0.8rem;
-            white-space: nowrap;
+            color: var(--dk);
+            font-size: 0.85rem;
         }
-
-        .td-bold {
-            font-weight: 700;
-            color: var(--text-primary) !important;
-        }
-
-        .td-semi {
-            font-weight: 500;
-            color: var(--text-primary) !important;
-        }
+        .td-bold { color: var(--dk) !important; font-weight: 700; }
+        .td-semi { color: var(--dk) !important; font-weight: 500; }
 
         .status-badge {
             display: inline-flex;
             align-items: center;
-            gap: 4px;
-            padding: 2px 12px;
+            gap: 6px;
+            padding: 4px 14px;
             border-radius: 999px;
-            font-size: 0.7rem;
+            font-size: 0.73rem;
             font-weight: 700;
             text-transform: capitalize;
-            white-space: nowrap;
         }
-
-        .status-badge .sdot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: currentColor;
-        }
-
-        .status-badge.on {
-            background: var(--color-success-soft);
-            color: #059669;
-        }
-
-        .status-badge.off {
-            background: var(--color-danger-soft);
-            color: #dc2626;
-        }
+        .status-badge .sdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .status-badge.on { background: var(--sucl); color: #059669; }
+        .status-badge.off { background: var(--dngl); color: #dc2626; }
 
         .act-btn {
-            width: 32px;
-            height: 32px;
+            width: 34px;
+            height: 34px;
             border-radius: 6px;
             border: 1px solid transparent;
             background: transparent;
-            color: var(--text-quaternary);
+            color: var(--lt);
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            transition: all var(--transition-base);
-            font-size: 0.8rem;
+            transition: all .2s;
         }
-
-        .act-btn:hover {
-            transform: scale(1.1);
-        }
-
-        .act-btn.v:hover {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            border-color: rgba(79, 70, 229, 0.15);
-        }
-
-        .act-btn.e:hover {
-            color: var(--color-warning);
-            background: var(--color-warning-soft);
-            border-color: rgba(245, 158, 11, 0.15);
-        }
-
-        .act-btn.d:hover {
-            color: var(--color-danger);
-            background: var(--color-danger-soft);
-            border-color: rgba(239, 68, 68, 0.15);
-        }
-
-        .search-inline {
-            display: flex;
-            align-items: center;
-            background: var(--bg-muted);
-            border: 1.5px solid var(--border-color);
-            border-radius: var(--radius-sm);
-            padding: 0 12px;
-            height: 42px;
-            min-width: 160px;
-            transition: all var(--transition-base);
-        }
-
-        .search-inline:focus-within {
-            border-color: var(--color-primary);
-            background: var(--bg-surface);
-            box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.08);
-        }
-
-        .search-inline i {
-            color: var(--text-quaternary);
-            font-size: 0.8rem;
-        }
-
-        .search-inline input,
-        .search-inline select {
-            background: none;
-            border: none;
-            outline: none;
-            color: var(--text-primary);
-            font-size: 0.85rem;
-            font-family: inherit;
-            width: 100%;
-            margin-left: 8px;
-        }
-
-        .search-inline select {
-            padding-right: 20px;
-            cursor: pointer;
-        }
-
-        .search-inline input::placeholder {
-            color: var(--text-quaternary);
-        }
-
-        .btn-primary {
-            background: var(--color-primary);
-            border-color: var(--color-primary);
-            color: #fff;
-        }
-
-        .btn-primary:hover {
-            background: var(--color-primary-dark);
-            border-color: var(--color-primary-dark);
-            color: #fff;
-        }
-
-        .btn-outline-secondary {
-            color: var(--text-secondary);
-            border-color: var(--border-color);
-        }
-
-        .btn-outline-secondary:hover {
-            background: var(--color-gray-100);
-            border-color: var(--color-gray-300);
-        }
-
-        .modal-content {
-            border-radius: var(--radius-md);
-            border: none;
-            box-shadow: var(--shadow-lg);
-        }
-
-        .modal-header {
-            border-bottom: 1px solid var(--border-color);
-            background: var(--bg-muted);
-        }
-
-        .modal-footer {
-            border-top: 1px solid var(--border-color);
-            background: var(--bg-muted);
-        }
-
-        .page-heading h2 {
-            font-weight: 800;
-        }
-
-        .text-tertiary {
-            color: var(--text-tertiary);
-        }
+        .act-btn:hover { transform: scale(1.1); }
+        .act-btn.v:hover { color: var(--b); background: var(--bl); border-color: rgba(37,99,235,.15); }
+        .act-btn.e:hover { color: var(--wrn); background: var(--wrnl); border-color: rgba(245,158,11,.15); }
+        .act-btn.d:hover { color: var(--dng); background: var(--dngl); border-color: rgba(239,68,68,.15); }
 
         .pagination .page-link {
-            color: var(--color-primary);
-            border: 1px solid var(--border-color);
+            color: var(--b);
+            border: 1px solid var(--brd);
             border-radius: 6px;
             margin: 0 2px;
             padding: 6px 14px;
             font-weight: 500;
         }
+        .pagination .page-link:hover { background: var(--bl); border-color: var(--b); }
+        .pagination .page-item.active .page-link { background: var(--b); border-color: var(--b); color: #fff; }
+        .pagination .page-item.disabled .page-link { color: var(--lt); border-color: var(--brd); }
 
-        .pagination .page-link:hover {
-            background: var(--color-primary-soft);
-            border-color: var(--color-primary);
+        .modal-content {
+            border-radius: var(--R);
+            border: none;
+            box-shadow: 0 12px 40px rgba(15,23,42,.08);
         }
-
-        .pagination .page-item.active .page-link {
-            background: var(--color-primary);
-            border-color: var(--color-primary);
-            color: #fff;
-        }
-
-        .pagination .page-item.disabled .page-link {
-            color: var(--text-quaternary);
-            border-color: var(--border-color);
-        }
-
-        .bootstrap-select .dropdown-toggle .filter-option {
-            color: var(--text-primary);
-        }
-
-        .bootstrap-select .dropdown-menu {
-            border-radius: var(--radius-sm);
-            border-color: var(--border-color);
-        }
-
-        .bootstrap-select .dropdown-menu .bs-searchbox input {
-            border-radius: 6px;
-            border: 1px solid var(--border-color);
-            padding: 8px 12px;
-        }
-
-        .bootstrap-select .dropdown-menu .bs-searchbox input:focus {
-            border-color: var(--color-primary);
-            box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.08);
-        }
-
-        .ligne-produit {
-            background: var(--bg-muted);
-            padding: 15px;
-            border-radius: var(--radius-sm);
-            border: 1px solid var(--border-color);
-            margin-bottom: 10px;
-        }
+        .modal-header { border-bottom: 1px solid var(--brd); background: var(--bg); }
+        .modal-footer { border-top: 1px solid var(--brd); background: var(--bg); }
 
         @keyframes fadeUp {
-            from {
-                opacity: 0;
-                transform: translateY(12px);
-            }
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .data-table-wrap { animation: fadeUp .4s ease both; }
 
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+        @media (max-width:700px) {
+            body { padding: 14px; }
+            .hdr { flex-direction: column; align-items: flex-start; }
+            .prow { flex-direction: column; align-items: stretch; }
+            .prow .btn-go { width: 100%; justify-content: center; }
+        }
+        .bootstrap-select .dropdown-toggle .filter-option { color: var(--dk); }
+        .bootstrap-select .dropdown-menu {
+            border-radius: var(--Rs);
+            border-color: var(--brd);
+        }
+        .bootstrap-select .dropdown-menu .bs-searchbox input {
+            border-radius: 6px;
+            border: 1px solid var(--brd);
+            padding: 8px 12px;
+        }
+        .bootstrap-select .dropdown-menu .bs-searchbox input:focus {
+            border-color: var(--b);
+            box-shadow: 0 0 0 3px var(--bl);
         }
 
-        .data-table-wrap {
-            animation: fadeUp .4s ease both;
+        /* ===== STYLE DE LA MODALE (inspiré de inventaire.php) ===== */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.5);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            padding: 16px;
+        }
+        .modal-overlay.show { display: flex; }
+
+        .modal-box {
+            background: white;
+            border-radius: 16px;
+            width: 900px;
+            max-width: 100%;
+            max-height: 90vh;
+            box-shadow: 0 20px 25px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
         }
 
-        @media (max-width:768px) {
-            body {
-                padding: 10px;
-            }
-
-            .table thead th,
-            .table tbody td {
-                font-size: 0.65rem;
-                padding: 4px 6px;
-            }
-
-            .table .act-btn {
-                width: 26px;
-                height: 26px;
-                font-size: 0.65rem;
-            }
-
-            .status-badge {
-                font-size: 0.6rem;
-                padding: 0 8px;
-            }
-
-            .page-heading h2 {
-                font-size: 1.2rem;
-            }
+        .modal-head {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--brd);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
         }
+
+        .modal-head h3 {
+            font-size: 16px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--dk);
+            margin: 0;
+        }
+        .modal-head h3 i { color: var(--b); }
+
+        .modal-close {
+            background: #f1f5f9;
+            font-size: 18px;
+            color: var(--lt);
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            border: none;
+            cursor: pointer;
+        }
+        .modal-close:hover { background: var(--dngl); color: var(--dng); }
+
+        .modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+
+        .modal-foot {
+            padding: 14px 20px;
+            border-top: 1px solid var(--brd);
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            flex-shrink: 0;
+            background: #f8fafc;
+        }
+
+        .modal-foot .btn-secondary {
+            background: #f1f5f9;
+            color: var(--dk);
+            padding: 8px 16px;
+            border-radius: var(--Rs);
+            font-weight: 600;
+            font-size: 14px;
+            border: 1px solid var(--brd);
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .modal-foot .btn-secondary:hover { background: #e2e8f0; }
+
+        .modal-foot .btn-success {
+            background: var(--suc);
+            color: white;
+            padding: 8px 16px;
+            border-radius: var(--Rs);
+            font-weight: 600;
+            font-size: 14px;
+            border: none;
+            transition: background 0.2s;
+            cursor: pointer;
+        }
+        .modal-foot .btn-success:hover { background: #059669; }
+
+        .modal-body .product-ref {
+            background: var(--bl);
+            border: 1px solid var(--bb);
+            border-radius: var(--Rs);
+            padding: 10px 14px;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .modal-body .product-ref .ref-name { font-size: 15px; font-weight: 700; color: var(--bd); }
+        .modal-body .product-ref .ref-stock { font-size: 12px; color: var(--mt); }
+
+        .modal-body .badge-lot {
+            background: var(--bl);
+            color: var(--bd);
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            border: 1px solid var(--bb);
+        }
+        .modal-body .badge-lot.empty {
+            background: #f1f5f9;
+            color: var(--lt);
+            border-color: var(--brd);
+        }
+
+        .modal-body .btn-sm {
+            padding: 4px 10px;
+            font-size: 12px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+        }
+        .modal-body .btn-success { background: var(--suc); color: white; }
+        .modal-body .btn-success:hover { background: #059669; }
+        .modal-body .btn-outline-danger {
+            background: transparent;
+            color: var(--dng);
+            border: 1px solid var(--dng);
+        }
+        .modal-body .btn-outline-danger:hover { background: var(--dngl); }
+
+        .modal-body table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .modal-body thead th {
+            background: var(--b);
+            color: white;
+            padding: 10px 14px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 11px;
+            letter-spacing: 0.03em;
+            white-space: nowrap;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .modal-body tbody td {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--brd);
+            color: var(--dk);
+            vertical-align: middle;
+        }
+        .modal-body tbody tr:hover { background: var(--bl); }
+
+        .modal-body .text-center { text-align: center; }
+        .modal-body .text-muted { color: var(--mt); }
+        .modal-body .py-5 { padding-top: 3rem; padding-bottom: 3rem; }
+
+        .modal-body .toast-notif {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--dk);
+            color: white;
+            padding: 12px 20px;
+            border-radius: var(--Rs);
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 2000;
+            display: none;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            align-items: center;
+            gap: 8px;
+            max-width: 400px;
+        }
+        .modal-body .toast-notif.error { background: var(--dng); }
+        .modal-body .toast-notif.success { background: var(--b); }
     </style>
 </head>
 
 <body>
-    <div class="container-crud">
-        <!-- En-tête -->
-        <div class="d-flex flex-wrap align-items-end justify-content-between mb-4 gap-3">
-            <div class="page-heading">
-                <h2 class="fw-800 mb-0">Gestion des bons de commande</h2>
-                <p class="text-tertiary mt-1">Suivez vos commandes fournisseurs</p>
-            </div>
-            <div>
-                <button class="btn btn-primary btn-sm" id="addBtn"><i class="bi bi-plus-circle"></i> Nouveau bon</button>
-            </div>
+<div class="W">
+    <!-- En-tête -->
+    <div class="hdr">
+        <div class="hdr-l">
+            <h1>Gestion des bons de commande</h1>
+            <p>Suivez vos commandes fournisseurs</p>
         </div>
-
-        <?php if ($message): ?>
-            <div class="alert alert-<?= $messageType ?> alert-dismissible fade show" role="alert">
-                <?= e($message) ?>
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-            </div>
-        <?php endif; ?>
-
-        <!-- Barre de recherche -->
-        <div class="bg-light p-3 rounded-3 mb-3 border">
-            <form id="searchForm" method="post" onsubmit="return false;">
-                <input type="hidden" name="ajax" value="1">
-                <input type="hidden" name="page" id="pageInput" value="<?= e($page) ?>">
-                <div class="row g-3 align-items-end">
-                    <div class="col-md-3">
-                        <label for="searchInput" class="form-label fw-semibold small">Recherche</label>
-                        <div class="search-inline" style="min-width:100%; height:42px;">
-                            <i class="bi bi-search"></i>
-                            <input type="text" name="search" id="searchInput" placeholder="N° bon, fournisseur..." value="<?= e($search) ?>">
-                        </div>
-                    </div>
-                    <div class="col-md-3">
-                        <label for="fournisseurFilter" class="form-label fw-semibold small">Fournisseur</label>
-                        <select name="fournisseur_filter" id="fournisseurFilter" class="selectpicker form-control" data-live-search="true" data-live-search-placeholder="Rechercher un fournisseur...">
-                            <option value="">Tous</option>
-                            <?php foreach ($fournisseurs as $f): ?>
-                                <option value="<?= e($f['code_contact']) ?>" <?= ($fournisseur_filter == $f['code_contact']) ? 'selected' : '' ?>><?= e($f['nom_prenom_contact']) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-md-3">
-                        <label for="boutiqueFilter" class="form-label fw-semibold small">Boutique</label>
-                        <select name="boutique_filter" id="boutiqueFilter" class="selectpicker form-control" data-live-search="true" data-live-search-placeholder="Rechercher une boutique...">
-                            <option value="">Toutes</option>
-                            <?php foreach ($boutiques as $b): ?>
-                                <option value="<?= e($b['code_boutique']) ?>" <?= ($boutique_filter == $b['code_boutique']) ? 'selected' : '' ?>><?= e($b['nom_boutique']) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-md-2">
-                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
-                    </div>
-                    <div class="col-md-1">
-                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
-                    </div>
-                </div>
-            </form>
+        <div class="hdr-r">
+            <div class="hdr-badge"><i class="bi bi-receipt"></i> <?= $bonsData['total'] ?? 0 ?> bons</div>
+            <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouveau bon</button>
+            <button class="btn-go" id="receptionBtn" style="background:#059669;"><i class="bi bi-box-seam"></i> Valider réception</button>
         </div>
+    </div>
 
-        <!-- Tableau -->
-        <div class="data-table-wrap" id="tableWrapper">
-            <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
-                <h5 class="mb-0 fw-bold">Liste des bons</h5>
-                <span class="text-muted small" id="totalCount"><?= $bonsData['total'] ?? 0 ?> bon(s) - Page <?= $bonsData['page'] ?? 1 ?> / <?= max(1, $bonsData['totalPages'] ?? 1) ?></span>
+    <!-- Messages -->
+    <?php if ($message): ?>
+        <div class="alert alert-<?= $messageType === 'error' ? 'danger' : 'success' ?> alert-dismissible fade show" role="alert">
+            <?= e($message) ?>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    <?php endif; ?>
+
+    <!-- Barre de recherche / filtres -->
+    <div class="pbar">
+        <form id="searchForm" method="post" onsubmit="return false;">
+            <input type="hidden" name="ajax" value="1">
+            <input type="hidden" name="page" id="pageInput" value="<?= e($page) ?>">
+            <div class="prow">
+                <label for="searchInput"><i class="bi bi-search"></i> Recherche</label>
+                <input type="text" name="search" id="searchInput" placeholder="N° bon, fournisseur..." value="<?= e($search) ?>" style="flex:1; min-width:150px;">
+                <label for="fournisseurFilter">Fournisseur</label>
+                <select name="fournisseur_filter" id="fournisseurFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un fournisseur...">
+                    <option value="">Tous</option>
+                    <?php foreach ($fournisseurs as $f): ?>
+                        <option value="<?= e($f['code_contact']) ?>" <?= ($fournisseur_filter == $f['code_contact']) ? 'selected' : '' ?>><?= e($f['nom_prenom_contact']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <label for="boutiqueFilter">Boutique</label>
+                <select name="boutique_filter" id="boutiqueFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher une boutique...">
+                    <option value="">Toutes</option>
+                    <?php foreach ($boutiques as $b): ?>
+                        <option value="<?= e($b['code_boutique']) ?>" <?= ($boutique_filter == $b['code_boutique']) ? 'selected' : '' ?>><?= e($b['nom_boutique']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <button type="button" class="btn-go" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
+                <button type="button" class="btn-go-outline" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
             </div>
-            <div class="table-responsive">
-                <table class="table table-hover align-middle mb-0">
-                    <thead>
+        </form>
+    </div>
+
+    <!-- Tableau -->
+    <div class="data-table-wrap" id="tableWrapper">
+        <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
+            <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;">Liste des bons</h5>
+            <span class="text-muted small" id="totalCount"><?= $bonsData['total'] ?? 0 ?> bon(s) - Page <?= $bonsData['page'] ?? 1 ?> / <?= max(1, $bonsData['totalPages'] ?? 1) ?></span>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>N° bon</th>
+                        <th>Date</th>
+                        <th>Fournisseur</th>
+                        <th>Articles</th>
+                        <th>Total</th>
+                        <th>Lieu de livraison</th>
+                        <th>Date livraison</th>
+                        <th class="text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="tableBody">
+                    <?php if (empty($bonsData['bons'])): ?>
                         <tr>
-                            <th>N° bon</th>
-                            <th>Date</th>
-                            <th>Fournisseur</th>
-                            <th>Articles</th>
-                            <th>Total</th>
-                            <th>Lieu de livraison</th>
-                            <th>Date livraison</th>
-                            <th class="text-end">Actions</th>
+                            <td colspan="8" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucun bon trouvé</td>
                         </tr>
-                    </thead>
-                    <tbody id="tableBody">
-                        <?php if (empty($bonsData['bons'])): ?>
+                        <?php else: foreach ($bonsData['bons'] as $bon): ?>
                             <tr>
-                                <td colspan="8" class="text-center py-5 text-muted"><i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>Aucun bon trouvé</td>
+                                <td class="td-bold"><?= e($bon['bon_id']) ?></td>
+                                <td><?= e($bon['date_bon']) ?></td>
+                                <td><?= e($bon['fournisseur'] ?? '—') ?></td>
+                                <td><?= $bon['nb_lignes'] ?></td>
+                                <td><strong><?= fmt($bon['total_bon']) ?> F</strong></td>
+                                <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
+                                <td><?= e($bon['date_livraison'] ?? '—') ?></td>
+                                <td class="text-end">
+                                    <form method="POST" style="display:inline-block;">
+                                        <input type="hidden" name="action" value="print_bon_pdf">
+                                        <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
+                                        <button type="submit" class="act-btn" title="PDF" style="color:#dc3545; border:none; background:transparent; padding:0; width:34px; height:34px;">
+                                            <i class="bi bi-file-pdf"></i>
+                                        </button>
+                                    </form>
+                                </td>
                             </tr>
-                            <?php else: foreach ($bonsData['bons'] as $bon): ?>
+                    <?php endforeach;
+                    endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <div id="paginationContainer">
+            <?php if ($bonsData['totalPages'] > 1): ?>
+                <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-top bg-light">
+                    <span class="text-muted small">Affichage de <?= (($bonsData['page'] - 1) * 10 + 1) ?> à <?= min($bonsData['page'] * 10, $bonsData['total']) ?> sur <?= $bonsData['total'] ?></span>
+                    <nav>
+                        <ul class="pagination pagination-sm mb-0">
+                            <li class="page-item <?= ($bonsData['page'] <= 1) ? 'disabled' : '' ?>">
+                                <a class="page-link" href="#" data-page="<?= $bonsData['page'] - 1 ?>"><i class="bi bi-chevron-left"></i></a>
+                            </li>
+                            <?php
+                            $start = max(1, $bonsData['page'] - 2);
+                            $end = min($bonsData['totalPages'], $bonsData['page'] + 2);
+                            if ($start > 1) {
+                                echo '<li class="page-item"><a class="page-link" href="#" data-page="1">1</a></li>';
+                                if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+                            }
+                            for ($i = $start; $i <= $end; $i++):
+                            ?>
+                                <li class="page-item <?= ($i == $bonsData['page']) ? 'active' : '' ?>">
+                                    <a class="page-link" href="#" data-page="<?= $i ?>"><?= $i ?></a>
+                                </li>
+                            <?php endfor;
+                            if ($end < $bonsData['totalPages']) {
+                                if ($end < $bonsData['totalPages'] - 1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+                                echo '<li class="page-item"><a class="page-link" href="#" data-page="' . $bonsData['totalPages'] . '">' . $bonsData['totalPages'] . '</a></li>';
+                            }
+                            ?>
+                            <li class="page-item <?= ($bonsData['page'] >= $bonsData['totalPages']) ? 'disabled' : '' ?>">
+                                <a class="page-link" href="#" data-page="<?= $bonsData['page'] + 1 ?>"><i class="bi bi-chevron-right"></i></a>
+                            </li>
+                        </ul>
+                    </nav>
+                </div>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+
+<!-- ========================================================= -->
+<!-- MODALE RÉCEPTION (style inventaire) -->
+<!-- ========================================================= -->
+<div class="modal-overlay" id="receptionModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <h3><i class="bi bi-box-seam"></i> Réception des bons de commande</h3>
+            <button class="modal-close" onclick="closeModal('receptionModal')"><i class="bi bi-x"></i></button>
+        </div>
+        <div class="modal-body">
+            <?php if ($receptionMessage): ?>
+                <div class="alert alert-<?= $receptionMessageType === 'success' ? 'success' : 'danger' ?> alert-dismissible fade show" role="alert">
+                    <?= e($receptionMessage) ?>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                </div>
+            <?php endif; ?>
+
+            <div class="product-ref">
+                <span class="ref-name"><i class="bi bi-info-circle"></i> Bons en attente de réception</span>
+                <span class="ref-stock"><?= count($bonsEnAttente) ?> bon(s) en attente</span>
+            </div>
+
+            <?php if (empty($bonsEnAttente)): ?>
+                <p class="text-center text-muted py-4"><i class="bi bi-check-circle fs-1 d-block mb-2 opacity-50"></i>Aucun bon en attente de réception.</p>
+            <?php else: ?>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Référence</th>
+                                <th>Fournisseur</th>
+                                <th>Boutique</th>
+                                <th>Date commande</th>
+                                <th>Livraison prévue</th>
+                                <th>Lignes</th>
+                                <th>Montant</th>
+                                <th class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($bonsEnAttente as $bon): ?>
                                 <tr>
-                                    <td class="td-bold"><?= e($bon['bon_id']) ?></td>
-                                    <td><?= e($bon['date_bon']) ?></td>
-                                    <td><?= e($bon['fournisseur'] ?? '—') ?></td>
-                                    <td><?= $bon['nb_lignes'] ?></td>
-                                    <td><strong><?= fmt($bon['total_bon']) ?> F</strong></td>
-                                    <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
-                                    <td><?= e($bon['date_livraison'] ?? '—') ?></td>
-                                    <td class="text-end">
-                                        <form method="POST" style="display:inline-block;">
-                                            <input type="hidden" name="action" value="print_bon_pdf">
-                                            <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
-                                            <button type="submit" class="act-btn" title="PDF" style="color:#dc3545; border:none; background:transparent; padding:0; width:34px; height:34px;">
-                                                <i class="bi bi-file-pdf"></i>
-                                            </button>
+                                    <td><strong><?= e($bon['reference_liee']) ?></strong></td>
+                                    <td><?= e($bon['nom_prenom_contact']) ?></td>
+                                    <td><?= e($bon['nom_boutique']) ?></td>
+                                    <td><?= e($bon['date_commande']) ?></td>
+                                    <td><?= e($bon['date_livraison_recue']) ?></td>
+                                    <td><?= (int)$bon['nb_lignes'] ?></td>
+                                    <td><?= fmt($bon['montant_total']) ?> F</td>
+                                    <td class="text-end" style="white-space:nowrap;">
+                                        <form method="post" class="d-inline" onsubmit="return confirm('Confirmer la réception de ce bon ? Le stock sera mis à jour.');">
+                                            <input type="hidden" name="csrf_token" value="<?= e($csrf_token) ?>">
+                                            <input type="hidden" name="reference_liee" value="<?= e($bon['reference_liee']) ?>">
+                                            <input type="hidden" name="action_reception" value="recevoir">
+                                            <button class="btn-sm btn-success"><i class="bi-check2"></i> Reçu</button>
+                                        </form>
+                                        <form method="post" class="d-inline" onsubmit="return confirm('Annuler ce bon ? Aucun stock n\'a été impacté.');">
+                                            <input type="hidden" name="csrf_token" value="<?= e($csrf_token) ?>">
+                                            <input type="hidden" name="reference_liee" value="<?= e($bon['reference_liee']) ?>">
+                                            <input type="hidden" name="action_reception" value="annuler">
+                                            <button class="btn-sm btn-outline-danger"><i class="bi-x-lg"></i> Annuler</button>
                                         </form>
                                     </td>
                                 </tr>
-                        <?php endforeach;
-                        endif; ?>
-                    </tbody>
-                </table>
-            </div>
-            <div id="paginationContainer">
-                <?php if ($bonsData['totalPages'] > 1): ?>
-                    <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-top bg-light">
-                        <span class="text-muted small">Affichage de <?= (($bonsData['page'] - 1) * 10 + 1) ?> à <?= min($bonsData['page'] * 10, $bonsData['total']) ?> sur <?= $bonsData['total'] ?></span>
-                        <nav>
-                            <ul class="pagination pagination-sm mb-0">
-                                <li class="page-item <?= ($bonsData['page'] <= 1) ? 'disabled' : '' ?>">
-                                    <a class="page-link" href="#" data-page="<?= $bonsData['page'] - 1 ?>"><i class="bi bi-chevron-left"></i></a>
-                                </li>
-                                <?php
-                                $start = max(1, $bonsData['page'] - 2);
-                                $end = min($bonsData['totalPages'], $bonsData['page'] + 2);
-                                if ($start > 1) {
-                                    echo '<li class="page-item"><a class="page-link" href="#" data-page="1">1</a></li>';
-                                    if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
-                                }
-                                for ($i = $start; $i <= $end; $i++):
-                                ?>
-                                    <li class="page-item <?= ($i == $bonsData['page']) ? 'active' : '' ?>">
-                                        <a class="page-link" href="#" data-page="<?= $i ?>"><?= $i ?></a>
-                                    </li>
-                                <?php endfor;
-                                if ($end < $bonsData['totalPages']) {
-                                    if ($end < $bonsData['totalPages'] - 1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
-                                    echo '<li class="page-item"><a class="page-link" href="#" data-page="' . $bonsData['totalPages'] . '">' . $bonsData['totalPages'] . '</a></li>';
-                                }
-                                ?>
-                                <li class="page-item <?= ($bonsData['page'] >= $bonsData['totalPages']) ? 'disabled' : '' ?>">
-                                    <a class="page-link" href="#" data-page="<?= $bonsData['page'] + 1 ?>"><i class="bi bi-chevron-right"></i></a>
-                                </li>
-                            </ul>
-                        </nav>
-                    </div>
-                <?php endif; ?>
-            </div>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+        </div>
+        <div class="modal-foot">
+            <button class="btn-secondary" onclick="closeModal('receptionModal')">Fermer</button>
+            <button class="btn-success" onclick="location.reload()"><i class="bi bi-arrow-clockwise"></i> Rafraîchir</button>
         </div>
     </div>
+</div>
 
-    <!-- Modal Nouveau bon -->
-    <div class="modal fade" id="bonModal" tabindex="-1" aria-labelledby="bonModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-xl modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="bonModalLabel"><i class="bi bi-file-earmark-text text-primary me-2"></i> Nouveau bon de commande</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <form method="POST" id="bonForm">
-                    <input type="hidden" name="action" value="valider_bon">
-                    <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
-                    <div class="modal-body">
-                        <div class="row g-3">
-                            <div class="col-md-4">
-                                <label class="form-label fw-semibold">Fournisseur <span class="text-danger">*</span></label>
-                                <select name="fournisseur_id" class="form-select" required>
-                                    <option value="">-- Sélectionner --</option>
-                                    <?php foreach ($fournisseurs as $f): ?>
-                                        <option value="<?= e($f['code_contact']) ?>"><?= e($f['nom_prenom_contact']) ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label fw-semibold">Boutique destinataire <span class="text-danger">*</span></label>
-                                <select name="boutique_id" id="boutiqueSelect" class="form-select" required>
-                                    <option value="">-- Sélectionner --</option>
-                                    <?php foreach ($boutiques as $b): ?>
-                                        <option value="<?= e($b['code_boutique']) ?>" data-adresse="<?= e($b['adresse_boutique']) ?>"><?= e($b['nom_boutique']) ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label fw-semibold">Date du bon</label>
-                                <input type="date" name="date_bon" class="form-control" value="<?= date('Y-m-d') ?>" required>
-                            </div>
-                            <div class="col-md-2">
-                                <label class="form-label fw-semibold">N° (auto)</label>
-                                <input type="text" class="form-control" value="BC-<?= date('Y') ?>-XXXX" disabled>
-                            </div>
+<!-- ===== MODAL NOUVEAU BON (inchangé, mais avec les classes Bootstrap) ===== -->
+<div class="modal fade" id="bonModal" tabindex="-1" aria-labelledby="bonModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title fw-bold" id="bonModalLabel"><i class="bi bi-file-earmark-text text-primary me-2"></i> Nouveau bon de commande</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST" id="bonForm">
+                <input type="hidden" name="action" value="valider_bon">
+                <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label fw-semibold">Fournisseur <span class="text-danger">*</span></label>
+                            <select name="fournisseur_id" class="form-select" required>
+                                <option value="">-- Sélectionner --</option>
+                                <?php foreach ($fournisseurs as $f): ?>
+                                    <option value="<?= e($f['code_contact']) ?>"><?= e($f['nom_prenom_contact']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
                         </div>
-                        <div class="row g-3 mt-2">
-                            <div class="col-md-6">
-                                <label class="form-label fw-semibold">Lieu de livraison (adresse boutique)</label>
-                                <input type="text" name="lieu_livraison" id="lieuLivraison" class="form-control" readonly>
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label fw-semibold">Date de livraison souhaitée</label>
-                                <input type="date" name="date_livraison" class="form-control">
-                            </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-semibold">Boutique destinataire <span class="text-danger">*</span></label>
+                            <select name="boutique_id" id="boutiqueSelect" class="form-select" required>
+                                <option value="">-- Sélectionner --</option>
+                                <?php foreach ($boutiques as $b): ?>
+                                    <option value="<?= e($b['code_boutique']) ?>" data-adresse="<?= e($b['adresse_boutique']) ?>"><?= e($b['nom_boutique']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
                         </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-semibold">Date du bon</label>
+                            <input type="date" name="date_bon" class="form-control" value="<?= date('Y-m-d') ?>" required>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label fw-semibold">N° (auto)</label>
+                            <input type="text" class="form-control" value="BC-<?= date('Y') ?>-XXXX" disabled>
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-2">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">Lieu de livraison (adresse boutique)</label>
+                            <input type="text" name="lieu_livraison" id="lieuLivraison" class="form-control" readonly>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">Date de livraison souhaitée</label>
+                            <input type="date" name="date_livraison" class="form-control" min="<?= date('Y-m-d') ?>" required>
+                        </div>
+                    </div>
 
-                        <hr>
+                    <hr>
 
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-box me-1"></i> Lignes de commande</h6>
-                        <div id="lignesContainer">
-                            <div class="ligne-produit" data-index="0">
-                                <div class="row g-2">
-                                    <div class="col-md-3">
-                                        <label class="form-label fw-semibold">Produit <span class="text-danger">*</span></label>
-                                        <select name="produit_id[]" class="form-select select-produit" required>
-                                            <option value="">-- Choisir --</option>
-                                            <?php foreach ($produits as $p): ?>
-                                                <option value="<?= e($p['code_produit']) ?>" data-prix="<?= $p['prix_fournisseur'] ?>"><?= e($p['titre_produit']) ?></option>
-                                            <?php endforeach; ?>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label fw-semibold">Lot/unité</label>
-                                        <select name="lot_id[]" class="form-select select-lot">
-                                            <option value="">Unité</option>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label fw-semibold">Unité affichée</label>
-                                        <input type="text" name="unite_affichage[]" class="form-control unite-affichage" readonly placeholder="Auto">
-                                    </div>
-                                    <div class="col-md-1">
-                                        <label class="form-label fw-semibold">Qté (lots)</label>
-                                        <input type="number" name="quantite[]" class="form-control quantite" min="1" value="1" required oninput="calculerLigne(this)">
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label fw-semibold">Prix unitaire (base) <span class="text-danger">*</span></label>
-                                        <input type="number" step="0.01" name="prix_unitaire[]" class="form-control prix-unitaire" min="0" required oninput="calculerLigne(this)">
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label fw-semibold">Total ligne</label>
-                                        <input type="text" name="total_ligne[]" class="form-control total-ligne" readonly value="0">
-                                    </div>
-                                    <div class="col-md-auto d-flex align-items-end">
-                                        <button type="button" class="btn btn-danger btn-sm supprimer-ligne" onclick="supprimerLigne(this)" style="display:none;"><i class="bi bi-trash3"></i></button>
-                                    </div>
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-box me-1"></i> Lignes de commande</h6>
+                    <div id="lignesContainer">
+                        <div class="ligne-produit" data-index="0">
+                            <div class="row g-2">
+                                <div class="col-md-3">
+                                    <label class="form-label fw-semibold">Produit <span class="text-danger">*</span></label>
+                                    <select name="produit_id[]" class="form-select select-produit" required>
+                                        <option value="">-- Choisir --</option>
+                                        <?php foreach ($produits as $p): ?>
+                                            <option value="<?= e($p['code_produit']) ?>" data-prix="<?= $p['prix_fournisseur'] ?>"><?= e($p['titre_produit']) ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold">Lot/unité</label>
+                                    <select name="lot_id[]" class="form-select select-lot">
+                                        <option value="">Unité</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold">Unité affichée</label>
+                                    <input type="text" name="unite_affichage[]" class="form-control unite-affichage" readonly placeholder="Auto">
+                                </div>
+                                <div class="col-md-1">
+                                    <label class="form-label fw-semibold">Qté (lots)</label>
+                                    <input type="number" name="quantite[]" class="form-control quantite" min="1" value="1" required oninput="calculerLigne(this)">
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold">Prix unitaire (base) <span class="text-danger">*</span></label>
+                                    <input type="number" step="0.01" name="prix_unitaire[]" class="form-control prix-unitaire" min="0" required oninput="calculerLigne(this)">
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label fw-semibold">Total ligne</label>
+                                    <input type="text" name="total_ligne[]" class="form-control total-ligne" readonly value="0">
+                                </div>
+                                <div class="col-md-auto d-flex align-items-end">
+                                    <button type="button" class="btn btn-danger btn-sm supprimer-ligne" onclick="supprimerLigne(this)" style="display:none;"><i class="bi bi-trash3"></i></button>
                                 </div>
                             </div>
                         </div>
-                        <button type="button" class="btn btn-secondary btn-ajouter" onclick="ajouterLigne()"><i class="bi bi-plus"></i> Ajouter une ligne</button>
                     </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
-                        <button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Valider le bon</button>
-                    </div>
-                </form>
-            </div>
+                    <button type="button" class="btn btn-secondary btn-ajouter" onclick="ajouterLigne()"><i class="bi bi-plus"></i> Ajouter une ligne</button>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Valider le bon</button>
+                </div>
+            </form>
         </div>
     </div>
+</div>
 
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
-    <script>
-        $(document).ready(function() {
-            $('.selectpicker').selectpicker('destroy');
-            $('.selectpicker').selectpicker();
+<!-- Formulaires cachés pour actions -->
+<form method="post" id="actionForm" style="display:none;">
+    <input type="hidden" name="action" id="actionField">
+    <input type="hidden" name="edit_numero" id="editNumeroField">
+    <input type="hidden" name="view_numero" id="viewNumeroField">
+    <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
+</form>
 
-            // ---- Données injectées par PHP ----
-            const lotsParProduit = <?= json_encode($lotsParProduit) ?>;
-            const prixFournisseur = <?= json_encode($prixFournisseur) ?>;
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
 
-            // ---- Mise à jour des lots, prix unitaire, unité affichée ----
-            function mettreAJourLotsEtPrix(selectProduit) {
-                const ligne = selectProduit.closest('.ligne-produit');
-                const lotSelect = ligne.querySelector('.select-lot');
-                const uniteAff = ligne.querySelector('.unite-affichage');
-                const prixInput = ligne.querySelector('.prix-unitaire');
-                const produitId = selectProduit.value;
+<script>
+$(document).ready(function() {
+    $('.selectpicker').selectpicker('destroy');
+    $('.selectpicker').selectpicker();
 
-                // Mise à jour des lots
-                const lots = lotsParProduit[produitId] || [];
-                let options = '<option value="">Unité</option>';
-                lots.forEach(lot => {
-                    options += `<option value="${lot.code_lot_produit}" data-unite="${lot.titre_lot}" data-facteur="${lot.unites_par_lot}">${lot.titre_lot}</option>`;
-                });
-                lotSelect.innerHTML = options;
+    // ---- Données injectées par PHP ----
+    const lotsParProduit = <?= json_encode($lotsParProduit) ?>;
+    const prixFournisseur = <?= json_encode($prixFournisseur) ?>;
 
-                // Mise à jour du prix unitaire (prix fournisseur)
-                if (produitId && prixFournisseur[produitId] !== undefined) {
-                    prixInput.value = prixFournisseur[produitId];
-                } else {
-                    prixInput.value = '';
-                }
+    // ---- Mise à jour des lots, prix unitaire, unité affichée ----
+    function mettreAJourLotsEtPrix(selectProduit) {
+        const ligne = selectProduit.closest('.ligne-produit');
+        const lotSelect = ligne.querySelector('.select-lot');
+        const uniteAff = ligne.querySelector('.unite-affichage');
+        const prixInput = ligne.querySelector('.prix-unitaire');
+        const produitId = selectProduit.value;
 
-                // Mise à jour de l'unité affichée
-                const selectedLot = lotSelect.options[lotSelect.selectedIndex];
-                uniteAff.value = selectedLot ? (selectedLot.text || 'Unité') : 'Unité';
-
-                // Recalculer le total
-                calculerLigne(prixInput);
-            }
-
-            // ---- Calcul du total ligne (quantité * facteur * prix) ----
-            function calculerLigne(element) {
-                const ligne = element.closest('.ligne-produit');
-                const quantite = parseFloat(ligne.querySelector('.quantite').value) || 0;
-                const prix = parseFloat(ligne.querySelector('.prix-unitaire').value) || 0;
-                const lotSelect = ligne.querySelector('.select-lot');
-                const selectedOption = lotSelect.options[lotSelect.selectedIndex];
-                let facteur = 1;
-                if (selectedOption && selectedOption.dataset.facteur) {
-                    facteur = parseFloat(selectedOption.dataset.facteur) || 1;
-                }
-                const quantiteBase = quantite * facteur;
-                const total = quantiteBase * prix;
-                ligne.querySelector('.total-ligne').value = total.toFixed(0);
-            }
-
-            // ---- Événement sur le select produit ----
-            $(document).on('change', '.select-produit', function() {
-                mettreAJourLotsEtPrix(this);
-            });
-
-            // ---- Événement sur le select lot ----
-            $(document).on('change', '.select-lot', function() {
-                const ligne = this.closest('.ligne-produit');
-                const uniteAff = ligne.querySelector('.unite-affichage');
-                const selected = this.options[this.selectedIndex];
-                uniteAff.value = selected ? (selected.text || 'Unité') : 'Unité';
-                const prixInput = ligne.querySelector('.prix-unitaire');
-                calculerLigne(prixInput);
-            });
-
-            // ---- Événement sur quantité ou prix unitaire ----
-            $(document).on('input', '.quantite, .prix-unitaire', function() {
-                calculerLigne(this);
-            });
-
-            // ---- Ajouter une ligne ----
-            function ajouterLigne() {
-                const container = document.getElementById('lignesContainer');
-                const original = container.querySelector('.ligne-produit');
-                const clone = original.cloneNode(true);
-                // Réinitialiser les champs
-                clone.querySelector('.select-produit').value = '';
-                clone.querySelector('.select-lot').innerHTML = '<option value="">Unité</option>';
-                clone.querySelector('.unite-affichage').value = '';
-                clone.querySelector('.quantite').value = 1;
-                clone.querySelector('.prix-unitaire').value = '';
-                clone.querySelector('.total-ligne').value = '0';
-                clone.querySelector('.supprimer-ligne').style.display = 'inline-block';
-                container.appendChild(clone);
-            }
-            window.ajouterLigne = ajouterLigne;
-
-            // ---- Supprimer une ligne ----
-            function supprimerLigne(btn) {
-                const ligne = btn.closest('.ligne-produit');
-                if (document.querySelectorAll('.ligne-produit').length > 1) {
-                    ligne.remove();
-                } else {
-                    alert('Il faut au moins une ligne.');
-                }
-            }
-            window.supprimerLigne = supprimerLigne;
-
-            // ---- Initialisation de la première ligne ----
-            $('.select-produit').each(function() {
-                if ($(this).val()) {
-                    mettreAJourLotsEtPrix(this);
-                }
-            });
-
-            // ---- Modal Nouveau bon ----
-            const bonModal = new bootstrap.Modal(document.getElementById('bonModal'));
-            $('#addBtn').on('click', function() {
-                $('#bonForm')[0].reset();
-                $('#bonForm input[name="date_bon"]').val(new Date().toISOString().split('T')[0]);
-                $('#lignesContainer .ligne-produit:not(:first)').remove();
-                const first = $('#lignesContainer .ligne-produit:first');
-                first.find('.select-produit').val('');
-                first.find('.select-lot').html('<option value="">Unité</option>');
-                first.find('.unite-affichage').val('');
-                first.find('.quantite').val(1);
-                first.find('.prix-unitaire').val('');
-                first.find('.total-ligne').val('0');
-                first.find('.supprimer-ligne').hide();
-                bonModal.show();
-            });
-
-            // Mise à jour du lieu de livraison
-            $('#boutiqueSelect').on('change', function() {
-                const adresse = $(this).find(':selected').data('adresse') || '';
-                $('#lieuLivraison').val(adresse);
-            });
-
-            // ---- Recherche et filtres AJAX ----
-            function rechercher(page) {
-                page = page || 1;
-                var search = $('#searchInput').val();
-                var fournisseur = $('#fournisseurFilter').val();
-                var boutique = $('#boutiqueFilter').val();
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        ajax: 1,
-                        search: search,
-                        fournisseur_filter: fournisseur,
-                        boutique_filter: boutique,
-                        page: page
-                    },
-                    dataType: 'json',
-                    success: function(data) {
-                        $('#tableBody').html(data.table);
-                        $('#paginationContainer').html(data.pagination);
-                        $('#totalCount').text(data.total + ' bon(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
-                        $('.page-link').off('click').on('click', function(e) {
-                            e.preventDefault();
-                            var p = $(this).data('page');
-                            if (p) rechercher(p);
-                        });
-                    },
-                    error: function() {
-                        alert('Erreur lors de la recherche.');
-                    }
-                });
-            }
-
-            var searchTimeout = null;
-            $('#searchInput').on('input', function() {
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(function() {
-                    rechercher(1);
-                }, 300);
-            });
-            $('#fournisseurFilter, #boutiqueFilter').on('changed.bs.select', function() {
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(function() {
-                    rechercher(1);
-                }, 300);
-            });
-            $('#filterBtn').on('click', function() {
-                rechercher(1);
-            });
-            $('#resetBtn').on('click', function() {
-                $('#searchInput').val('');
-                $('#fournisseurFilter').selectpicker('val', '');
-                $('#boutiqueFilter').selectpicker('val', '');
-                rechercher(1);
-            });
+        const lots = lotsParProduit[produitId] || [];
+        let options = '<option value="">Unité</option>';
+        lots.forEach(lot => {
+            options += `<option value="${lot.code_lot_produit}" data-unite="${lot.titre_lot}" data-facteur="${lot.unites_par_lot}">${lot.titre_lot}</option>`;
         });
-    </script>
-</body>
+        lotSelect.innerHTML = options;
 
+        if (produitId && prixFournisseur[produitId] !== undefined) {
+            prixInput.value = prixFournisseur[produitId];
+        } else {
+            prixInput.value = '';
+        }
+
+        const selectedLot = lotSelect.options[lotSelect.selectedIndex];
+        uniteAff.value = selectedLot ? (selectedLot.text || 'Unité') : 'Unité';
+        calculerLigne(prixInput);
+    }
+
+    function calculerLigne(element) {
+        const ligne = element.closest('.ligne-produit');
+        const quantite = parseFloat(ligne.querySelector('.quantite').value) || 0;
+        const prix = parseFloat(ligne.querySelector('.prix-unitaire').value) || 0;
+        const lotSelect = ligne.querySelector('.select-lot');
+        const selectedOption = lotSelect.options[lotSelect.selectedIndex];
+        let facteur = 1;
+        if (selectedOption && selectedOption.dataset.facteur) {
+            facteur = parseFloat(selectedOption.dataset.facteur) || 1;
+        }
+        const quantiteBase = quantite * facteur;
+        const total = quantiteBase * prix;
+        ligne.querySelector('.total-ligne').value = total.toFixed(0);
+    }
+
+    $(document).on('change', '.select-produit', function() {
+        mettreAJourLotsEtPrix(this);
+    });
+
+    $(document).on('change', '.select-lot', function() {
+        const ligne = this.closest('.ligne-produit');
+        const uniteAff = ligne.querySelector('.unite-affichage');
+        const selected = this.options[this.selectedIndex];
+        uniteAff.value = selected ? (selected.text || 'Unité') : 'Unité';
+        const prixInput = ligne.querySelector('.prix-unitaire');
+        calculerLigne(prixInput);
+    });
+
+    $(document).on('input', '.quantite, .prix-unitaire', function() {
+        calculerLigne(this);
+    });
+
+    // ---- Ajouter une ligne ----
+    function ajouterLigne() {
+        const container = document.getElementById('lignesContainer');
+        const original = container.querySelector('.ligne-produit');
+        const clone = original.cloneNode(true);
+        clone.querySelector('.select-produit').value = '';
+        clone.querySelector('.select-lot').innerHTML = '<option value="">Unité</option>';
+        clone.querySelector('.unite-affichage').value = '';
+        clone.querySelector('.quantite').value = 1;
+        clone.querySelector('.prix-unitaire').value = '';
+        clone.querySelector('.total-ligne').value = '0';
+        clone.querySelector('.supprimer-ligne').style.display = 'inline-block';
+        container.appendChild(clone);
+    }
+    window.ajouterLigne = ajouterLigne;
+
+    function supprimerLigne(btn) {
+        const ligne = btn.closest('.ligne-produit');
+        if (document.querySelectorAll('.ligne-produit').length > 1) {
+            ligne.remove();
+        } else {
+            alert('Il faut au moins une ligne.');
+        }
+    }
+    window.supprimerLigne = supprimerLigne;
+
+    // ---- Initialisation première ligne ----
+    $('.select-produit').each(function() {
+        if ($(this).val()) {
+            mettreAJourLotsEtPrix(this);
+        }
+    });
+
+    // ---- Modal Nouveau bon ----
+    const bonModal = new bootstrap.Modal(document.getElementById('bonModal'));
+    $('#addBtn').on('click', function() {
+        $('#bonForm')[0].reset();
+        $('#bonForm input[name="date_bon"]').val(new Date().toISOString().split('T')[0]);
+        $('#lignesContainer .ligne-produit:not(:first)').remove();
+        const first = $('#lignesContainer .ligne-produit:first');
+        first.find('.select-produit').val('');
+        first.find('.select-lot').html('<option value="">Unité</option>');
+        first.find('.unite-affichage').val('');
+        first.find('.quantite').val(1);
+        first.find('.prix-unitaire').val('');
+        first.find('.total-ligne').val('0');
+        first.find('.supprimer-ligne').hide();
+        bonModal.show();
+    });
+
+    $('#boutiqueSelect').on('change', function() {
+        const adresse = $(this).find(':selected').data('adresse') || '';
+        $('#lieuLivraison').val(adresse);
+    });
+
+    // ---- Modale Réception (style inventaire) ----
+    function openModal(id) {
+        document.getElementById(id).classList.add('show');
+    }
+
+    function closeModal(id) {
+        document.getElementById(id).classList.remove('show');
+    }
+    window.openModal = openModal;
+    window.closeModal = closeModal;
+
+    $('#receptionBtn').on('click', function() {
+        openModal('receptionModal');
+    });
+
+    // Fermeture de la modale au clic sur l'overlay
+    document.querySelectorAll('.modal-overlay').forEach(m => {
+        m.addEventListener('click', function(e) {
+            if (e.target === this) this.classList.remove('show');
+        });
+    });
+
+    // ---- Recherche et filtres AJAX ----
+    function rechercher(page) {
+        page = page || 1;
+        var search = $('#searchInput').val();
+        var fournisseur = $('#fournisseurFilter').val();
+        var boutique = $('#boutiqueFilter').val();
+        $.ajax({
+            url: window.location.href,
+            method: 'POST',
+            data: {
+                ajax: 1,
+                search: search,
+                fournisseur_filter: fournisseur,
+                boutique_filter: boutique,
+                page: page
+            },
+            dataType: 'json',
+            success: function(data) {
+                $('#tableBody').html(data.table);
+                $('#paginationContainer').html(data.pagination);
+                $('#totalCount').text(data.total + ' bon(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
+                $('.page-link').off('click').on('click', function(e) {
+                    e.preventDefault();
+                    var p = $(this).data('page');
+                    if (p) rechercher(p);
+                });
+            },
+            error: function(xhr) {
+                console.error('Réponse brute du serveur :', xhr.status, xhr.responseText);
+                alert('Erreur lors de la recherche. Détail dans la console (F12).');
+            }
+        });
+    }
+
+    var searchTimeout = null;
+    $('#searchInput').on('input', function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(function() {
+            rechercher(1);
+        }, 300);
+    });
+    $('#fournisseurFilter, #boutiqueFilter').on('changed.bs.select', function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(function() {
+            rechercher(1);
+        }, 300);
+    });
+    $('#filterBtn').on('click', function() {
+        rechercher(1);
+    });
+    $('#resetBtn').on('click', function() {
+        $('#searchInput').val('');
+        $('#fournisseurFilter').selectpicker('val', '');
+        $('#boutiqueFilter').selectpicker('val', '');
+        rechercher(1);
+    });
+});
+</script>
+</body>
 </html>

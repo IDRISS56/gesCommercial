@@ -1,16 +1,33 @@
 <?php
-// depense.php
+ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
+
+// depense.php – Gestion des dépenses (design vente)
 // CRUD pour la table depense – avec Bootstrap SelectPicker
 
 require_once 'databases/database.php';
-// --- Récupération des listes pour les selects ---
-$boutiques = [];
-$stmt = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique");
-$boutiques = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-$utilisateurs = [];
-$stmt = $pdo->query("SELECT id, nom_prenom FROM utilisateur WHERE etat = 'Actif' ORDER BY nom_prenom");
-$utilisateurs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+session_start();
+
+if (!isset($_SESSION['user_id'])) {
+    header('Location: ../utilisateur/login');
+    exit;
+}
+
+$user_id = $_SESSION['user_id'];
+$stmt = $pdo->prepare("SELECT * FROM utilisateur WHERE id = ?");
+$stmt->execute([$user_id]);
+$user = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$user) {
+    session_destroy();
+    header('Location: ../utilisateur/login');
+    exit;
+}
+
+
+// --- Récupération des listes pour les selects ---
+$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
+$utilisateurs = $pdo->query("SELECT id, nom_prenom FROM utilisateur WHERE etat = 'Actif' ORDER BY nom_prenom")->fetchAll(PDO::FETCH_ASSOC);
 
 // --- Traitement des actions POST ---
 $message = '';
@@ -128,7 +145,7 @@ function getTableContent($pdo, $search, $boutique_filter, $utilisateur_filter, $
     ob_start();
     if (empty($depenses)): ?>
         <tr>
-            <td colspan="8" class="text-center py-5 text-muted">
+            <td colspan="9" class="text-center py-5 text-muted">
                 <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucune dépense trouvée
             </td>
@@ -153,7 +170,6 @@ function getTableContent($pdo, $search, $boutique_filter, $utilisateur_filter, $
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <!-- Bouton Voir supprimé -->
                         <button class="act-btn e editBtn" data-code="<?= htmlspecialchars($d['code_depense']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
                         <button class="act-btn d deleteBtn" data-code="<?= htmlspecialchars($d['code_depense']) ?>" data-nom="<?= htmlspecialchars($d['titre_depense']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                     </div>
@@ -211,6 +227,10 @@ function getTableContent($pdo, $search, $boutique_filter, $utilisateur_filter, $
 
 // --- AJAX ---
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
+    // Nettoyer le buffer avant l'envoi du JSON
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
     $search = trim($_POST['search'] ?? '');
     $boutique_filter = trim($_POST['boutique_filter'] ?? '');
     $utilisateur_filter = trim($_POST['utilisateur_filter'] ?? '');
@@ -232,8 +252,9 @@ $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 $initialData = getTableContent($pdo, $search, $boutique_filter, $utilisateur_filter, $etat_filter, $page);
 
+// Chargement des données pour l'édition (action load_edit)
 $editDepense = null;
-if ($action === 'edit' && isset($_POST['edit_code'])) {
+if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $code = $_POST['edit_code'];
     $stmt = $pdo->prepare("SELECT * FROM depense WHERE code_depense = ?");
     $stmt->execute([$code]);
@@ -258,113 +279,183 @@ $etats_depense = ['VALIDE', 'ANNULE'];
     <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        /* === Styles identiques === */
+        /* ===== STYLE DASHBOARD (repris de vente.php) ===== */
         :root {
-            --color-primary: #4f46e5;
-            --color-primary-dark: #3730a3;
-            --color-primary-soft: #eef2ff;
-            --color-success: #10b981;
-            --color-success-soft: #d1fae5;
-            --color-warning: #f59e0b;
-            --color-warning-soft: #fef3c7;
-            --color-danger: #ef4444;
-            --color-danger-soft: #fee2e2;
-            --color-gray-50: #f8fafc;
-            --color-gray-100: #f1f5f9;
-            --color-gray-200: #e2e8f0;
-            --color-gray-300: #cbd5e1;
-            --color-gray-400: #94a3b8;
-            --color-gray-500: #64748b;
-            --color-gray-600: #475569;
-            --color-gray-700: #334155;
-            --color-gray-800: #1e293b;
-            --color-gray-900: #0f172a;
-            --bg-body: #f1f5f9;
-            --bg-surface: #ffffff;
-            --bg-muted: #f8fafc;
-            --border-color: #e2e8f0;
-            --text-primary: #0f172a;
-            --text-secondary: #334155;
-            --text-tertiary: #64748b;
-            --text-quaternary: #94a3b8;
-            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
-            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
-            --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.08);
-            --radius-sm: 10px;
-            --radius-md: 14px;
-            --radius-lg: 20px;
-            --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+            --b: #2563eb;
+            --bd: #1d4ed8;
+            --bl: #eff6ff;
+            --bb: #bfdbfe;
+            --bg: #f1f5f9;
+            --w: #fff;
+            --dk: #0f172a;
+            --mt: #64748b;
+            --lt: #94a3b8;
+            --brd: #e2e8f0;
+            --dng: #ef4444;
+            --dngl: #fef2f2;
+            --dngb: #fecaca;
+            --suc: #10b981;
+            --sucl: #ecfdf5;
+            --sucb: #a7f3d0;
+            --wrn: #f59e0b;
+            --wrnl: #fffbeb;
+            --wrnb: #fde68a;
+            --prp: #8b5cf6;
+            --prpl: #f5f3ff;
+            --prpb: #e9d5ff;
+            --tl: #0891b2;
+            --tll: #ecfeff;
+            --tlb: #cffafe;
+            --R: 16px;
+            --Rs: 10px;
         }
-
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: 'Inter', sans-serif;
-            background: var(--bg-body);
-            color: var(--text-primary);
-            padding: 30px 20px;
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--dk);
+            min-height: 100vh;
+            line-height: 1.5;
+            padding: 28px 20px;
         }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
 
-        h1,
-        h2,
-        h3,
-        h4,
-        h5,
-        h6 {
-            font-family: 'Outfit', sans-serif;
+        .W { max-width: 1400px; margin: 0 auto; }
+        .hdr {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .hdr-l h1 { font-size: 26px; font-weight: 800; color: var(--dk); letter-spacing: -0.02em; }
+        .hdr-l p { font-size: 13px; color: var(--mt); margin-top: 2px; font-weight: 500; }
+        .hdr-r {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .hdr-badge {
+            background: var(--bl);
+            border: 1px solid var(--bb);
+            color: var(--b);
+            padding: 8px 14px;
+            border-radius: var(--Rs);
+            font-size: 12px;
             font-weight: 700;
-            letter-spacing: -0.02em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
-
-        .container-crud {
-            max-width: 1400px;
-            margin: 0 auto;
+        .pbar {
+            background: var(--w);
+            border: 1px solid var(--brd);
+            border-radius: var(--R);
+            padding: 16px 20px;
+            margin-bottom: 22px;
+            box-shadow: 0 1px 3px rgba(0,0,0,.04);
+        }
+        .prow {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .prow label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--mt);
+            letter-spacing: .03em;
+            text-transform: uppercase;
+        }
+        .prow input, .prow select {
+            padding: 7px 10px;
+            border: 1.5px solid var(--brd);
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--dk);
+            background: var(--bg);
+            font-family: 'Inter', sans-serif;
+            transition: all .2s;
+        }
+        .prow input:focus, .prow select:focus {
+            border-color: var(--b);
+            background: #fff;
+            box-shadow: 0 0 0 3px var(--bl);
+            outline: none;
+        }
+        .prow select {
+            appearance: none;
+            padding-right: 32px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2364748b' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+        }
+        .btn-go {
+            background: var(--b);
+            color: #fff;
+            padding: 7px 16px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            box-shadow: 0 2px 4px rgba(37,99,235,.2);
+            transition: background .15s;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-go:hover { background: var(--bd); }
+        .btn-go-outline {
+            background: transparent;
+            color: var(--mt);
+            border: 1.5px solid var(--brd);
+            padding: 7px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all .2s;
+            cursor: pointer;
+        }
+        .btn-go-outline:hover {
+            background: var(--bg);
+            border-color: var(--lt);
         }
 
         .data-table-wrap {
-            background: var(--bg-surface);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius-md);
+            background: var(--w);
+            border: 1px solid var(--brd);
+            border-radius: var(--R);
             overflow: hidden;
-            box-shadow: var(--shadow-sm);
+            box-shadow: 0 1px 3px rgba(0,0,0,.04);
         }
-
-        .table> :not(caption)>*>* {
-            padding: 12px 18px;
-        }
-
+        .table>:not(caption)>*>* { padding: 12px 18px; }
         .table thead th {
             font-size: 0.7rem;
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.8px;
-            color: var(--text-quaternary);
-            background: var(--bg-muted);
-            border-bottom: 1px solid var(--border-color);
+            color: var(--lt);
+            background: var(--bg);
+            border-bottom: 1px solid var(--brd);
         }
-
         .table tbody tr {
-            border-bottom: 1px solid var(--border-color);
-            transition: background var(--transition-base);
+            border-bottom: 1px solid var(--brd);
+            transition: background .2s;
         }
-
-        .table tbody tr:hover {
-            background: var(--color-primary-soft);
-        }
-
+        .table tbody tr:hover { background: var(--bl); }
         .table tbody td {
             vertical-align: middle;
-            color: var(--text-secondary);
+            color: var(--dk);
             font-size: 0.85rem;
         }
-
-        .td-bold {
-            color: var(--text-primary) !important;
-            font-weight: 700;
-        }
-
-        .td-semi {
-            color: var(--text-primary) !important;
-            font-weight: 500;
-        }
+        .td-bold { color: var(--dk) !important; font-weight: 700; }
+        .td-semi { color: var(--dk) !important; font-weight: 500; }
 
         .status-badge {
             display: inline-flex;
@@ -376,23 +467,9 @@ $etats_depense = ['VALIDE', 'ANNULE'];
             font-weight: 700;
             text-transform: capitalize;
         }
-
-        .status-badge .sdot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: currentColor;
-        }
-
-        .status-badge.on {
-            background: var(--color-success-soft);
-            color: #059669;
-        }
-
-        .status-badge.off {
-            background: var(--color-danger-soft);
-            color: #dc2626;
-        }
+        .status-badge .sdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .status-badge.on { background: var(--sucl); color: #059669; }
+        .status-badge.off { background: var(--dngl); color: #dc2626; }
 
         .act-btn {
             width: 34px;
@@ -400,573 +477,427 @@ $etats_depense = ['VALIDE', 'ANNULE'];
             border-radius: 6px;
             border: 1px solid transparent;
             background: transparent;
-            color: var(--text-quaternary);
+            color: var(--lt);
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            transition: all var(--transition-base);
+            transition: all .2s;
         }
-
-        .act-btn:hover {
-            transform: scale(1.1);
-        }
-
-        .act-btn.e:hover {
-            color: var(--color-warning);
-            background: var(--color-warning-soft);
-            border-color: rgba(245, 158, 11, 0.15);
-        }
-
-        .act-btn.d:hover {
-            color: var(--color-danger);
-            background: var(--color-danger-soft);
-            border-color: rgba(239, 68, 68, 0.15);
-        }
-
-        .search-inline {
-            display: flex;
-            align-items: center;
-            background: var(--bg-muted);
-            border: 1.5px solid var(--border-color);
-            border-radius: var(--radius-sm);
-            padding: 0 16px;
-            height: 42px;
-            min-width: 200px;
-            transition: all var(--transition-base);
-        }
-
-        .search-inline:focus-within {
-            border-color: var(--color-primary);
-            background: var(--bg-surface);
-            box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.08);
-        }
-
-        .search-inline i {
-            color: var(--text-quaternary);
-            font-size: 0.8rem;
-        }
-
-        .search-inline input,
-        .search-inline select {
-            background: none;
-            border: none;
-            outline: none;
-            color: var(--text-primary);
-            font-size: 0.85rem;
-            font-family: inherit;
-            width: 100%;
-            margin-left: 10px;
-        }
-
-        .search-inline select {
-            padding-right: 20px;
-            cursor: pointer;
-        }
-
-        .search-inline input::placeholder {
-            color: var(--text-quaternary);
-        }
-
-        .btn-primary {
-            background: var(--color-primary);
-            border-color: var(--color-primary);
-        }
-
-        .btn-primary:hover {
-            background: var(--color-primary-dark);
-            border-color: var(--color-primary-dark);
-        }
-
-        .btn-outline-secondary {
-            color: var(--text-secondary);
-            border-color: var(--border-color);
-        }
-
-        .btn-outline-secondary:hover {
-            background: var(--color-gray-100);
-            border-color: var(--color-gray-300);
-        }
-
-        .modal-content {
-            border-radius: var(--radius-md);
-            border: none;
-            box-shadow: var(--shadow-lg);
-        }
-
-        .modal-header {
-            border-bottom: 1px solid var(--border-color);
-            background: var(--bg-muted);
-        }
-
-        .modal-footer {
-            border-top: 1px solid var(--border-color);
-            background: var(--bg-muted);
-        }
-
-        .page-heading h2 {
-            font-weight: 800;
-        }
-
-        .text-tertiary {
-            color: var(--text-tertiary);
-        }
+        .act-btn:hover { transform: scale(1.1); }
+        .act-btn.e:hover { color: var(--wrn); background: var(--wrnl); border-color: rgba(245,158,11,.15); }
+        .act-btn.d:hover { color: var(--dng); background: var(--dngl); border-color: rgba(239,68,68,.15); }
 
         .pagination .page-link {
-            color: var(--color-primary);
-            border: 1px solid var(--border-color);
+            color: var(--b);
+            border: 1px solid var(--brd);
             border-radius: 6px;
             margin: 0 2px;
             padding: 6px 14px;
             font-weight: 500;
         }
+        .pagination .page-link:hover { background: var(--bl); border-color: var(--b); }
+        .pagination .page-item.active .page-link { background: var(--b); border-color: var(--b); color: #fff; }
+        .pagination .page-item.disabled .page-link { color: var(--lt); border-color: var(--brd); }
 
-        .pagination .page-link:hover {
-            background: var(--color-primary-soft);
-            border-color: var(--color-primary);
+        .modal-content {
+            border-radius: var(--R);
+            border: none;
+            box-shadow: 0 12px 40px rgba(15,23,42,.08);
         }
+        .modal-header { border-bottom: 1px solid var(--brd); background: var(--bg); }
+        .modal-footer { border-top: 1px solid var(--brd); background: var(--bg); }
 
-        .pagination .page-item.active .page-link {
-            background: var(--color-primary);
-            border-color: var(--color-primary);
-            color: #fff;
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
         }
+        .data-table-wrap { animation: fadeUp .4s ease both; }
 
-        .pagination .page-item.disabled .page-link {
-            color: var(--text-quaternary);
-            border-color: var(--border-color);
+        @media (max-width:700px) {
+            body { padding: 14px; }
+            .hdr { flex-direction: column; align-items: flex-start; }
+            .prow { flex-direction: column; align-items: stretch; }
+            .prow .btn-go { width: 100%; justify-content: center; }
         }
-
-        .bootstrap-select .dropdown-toggle .filter-option {
-            color: var(--text-primary);
-        }
-
+        .bootstrap-select .dropdown-toggle .filter-option { color: var(--dk); }
         .bootstrap-select .dropdown-menu {
-            border-radius: var(--radius-sm);
-            border-color: var(--border-color);
+            border-radius: var(--Rs);
+            border-color: var(--brd);
         }
-
         .bootstrap-select .dropdown-menu .bs-searchbox input {
             border-radius: 6px;
-            border: 1px solid var(--border-color);
+            border: 1px solid var(--brd);
             padding: 8px 12px;
         }
-
         .bootstrap-select .dropdown-menu .bs-searchbox input:focus {
-            border-color: var(--color-primary);
-            box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.08);
+            border-color: var(--b);
+            box-shadow: 0 0 0 3px var(--bl);
         }
     </style>
 </head>
 
 <body>
-    <div class="container-crud">
-
-        <!-- En-tête -->
-        <div class="d-flex flex-wrap align-items-end justify-content-between mb-4 gap-3">
-            <div class="page-heading">
-                <h2 class="fw-800 mb-0">Gestion des dépenses</h2>
-                <p class="text-tertiary mt-1">Suivez toutes vos dépenses par boutique et utilisateur</p>
-            </div>
-            <div>
-                <button class="btn btn-primary btn-sm" id="addBtn"><i class="bi bi-plus-circle"></i> Nouvelle dépense</button>
-            </div>
+<div class="W">
+    <!-- En-tête -->
+    <div class="hdr">
+        <div class="hdr-l">
+            <h1>Gestion des dépenses</h1>
+            <p>Suivez toutes vos dépenses par boutique et utilisateur</p>
         </div>
+        <div class="hdr-r">
+            <div class="hdr-badge"><i class="bi bi-currency-dollar"></i> <?= $initialData['total'] ?? 0 ?> dépenses</div>
+            <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouvelle dépense</button>
+        </div>
+    </div>
 
-        <!-- Messages -->
-        <?php if ($message): ?>
-            <div class="alert alert-<?= $messageType ?> alert-dismissible fade show" role="alert">
-                <?= $message ?>
-                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    <!-- Messages -->
+    <?php if ($message): ?>
+        <div class="alert alert-<?= $messageType === 'error' ? 'danger' : 'success' ?> alert-dismissible fade show" role="alert">
+            <?= $message ?>
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+    <?php endif; ?>
+
+    <!-- Barre de recherche / filtres -->
+    <div class="pbar">
+        <form id="searchForm" method="post" onsubmit="return false;">
+            <input type="hidden" name="ajax" value="1">
+            <input type="hidden" name="page" id="pageInput" value="<?= $page ?>">
+            <div class="prow">
+                <label for="searchInput"><i class="bi bi-search"></i> Recherche</label>
+                <input type="text" name="search" id="searchInput" placeholder="Code, titre, description..." value="<?= htmlspecialchars($search) ?>" style="flex:1; min-width:150px;">
+                <label for="boutiqueFilter">Boutique</label>
+                <select name="boutique_filter" id="boutiqueFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher une boutique...">
+                    <option value="">Toutes</option>
+                    <?php foreach ($boutiques as $b): ?>
+                        <option value="<?= htmlspecialchars($b['code_boutique']) ?>" <?= ($boutique_filter == $b['code_boutique']) ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($b['nom_boutique']) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <label for="utilisateurFilter">Utilisateur</label>
+                <select name="utilisateur_filter" id="utilisateurFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un utilisateur...">
+                    <option value="">Tous</option>
+                    <?php foreach ($utilisateurs as $u): ?>
+                        <option value="<?= htmlspecialchars($u['id']) ?>" <?= ($utilisateur_filter == $u['id']) ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($u['nom_prenom']) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <label for="etatFilter">État</label>
+                <select name="etat_filter" id="etatFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un état...">
+                    <option value="">Tous</option>
+                    <?php foreach ($etats_depense as $e): ?>
+                        <option value="<?= $e ?>" <?= ($etat_filter == $e) ? 'selected' : '' ?>><?= $e ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <button type="button" class="btn-go" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
+                <button type="button" class="btn-go-outline" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
             </div>
-        <?php endif; ?>
+        </form>
+    </div>
 
-        <!-- Barre de recherche avec SelectPicker -->
-        <div class="bg-light p-3 rounded-3 mb-3 border">
-            <form id="searchForm" method="post" onsubmit="return false;">
-                <input type="hidden" name="ajax" value="1">
-                <input type="hidden" name="page" id="pageInput" value="<?= $page ?>">
-                <div class="row g-3 align-items-end">
-                    <div class="col-md-3">
-                        <label for="searchInput" class="form-label fw-semibold small">Recherche</label>
-                        <div class="search-inline" style="min-width:100%; height:42px;">
-                            <i class="bi bi-search"></i>
-                            <input type="text" name="search" id="searchInput" placeholder="Code, titre, description..." value="<?= htmlspecialchars($search) ?>">
+    <!-- Tableau -->
+    <div class="data-table-wrap" id="tableWrapper">
+        <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
+            <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;">Liste des dépenses</h5>
+            <span class="text-muted small" id="totalCount"><?= $initialData['total'] ?> dépense(s) - Page <?= $initialData['page'] ?> / <?= max(1, $initialData['totalPages']) ?></span>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>Code</th>
+                        <th>Titre</th>
+                        <th>Boutique</th>
+                        <th>Utilisateur</th>
+                        <th>Montant</th>
+                        <th>Date</th>
+                        <th>Description</th>
+                        <th>État</th>
+                        <th class="text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="tableBody">
+                    <?= $initialData['table'] ?>
+                </tbody>
+            </table>
+        </div>
+        <div id="paginationContainer">
+            <?= $initialData['pagination'] ?>
+        </div>
+    </div>
+</div>
+
+<!-- ========================================================= -->
+<!-- MODAL FORMULAIRE (ajout/modification) -->
+<!-- ========================================================= -->
+<div class="modal fade" id="depenseModal" tabindex="-1" aria-labelledby="modalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-currency-dollar text-primary me-2"></i> Nouvelle dépense</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+            </div>
+            <form method="post" id="depenseForm">
+                <input type="hidden" name="action" id="formAction" value="add">
+                <input type="hidden" name="old_code" id="oldCode" value="">
+                <div class="modal-body">
+                    <!-- Identification -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <label for="code_depense" class="form-label fw-semibold">Code dépense <span class="text-danger">*</span></label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-hash"></i></span>
+                                <input type="text" class="form-control" id="code_depense" name="code_depense" required placeholder="DEP001" value="<?= htmlspecialchars($editDepense['code_depense'] ?? '') ?>">
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="titre_depense" class="form-label fw-semibold">Titre <span class="text-danger">*</span></label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-pencil"></i></span>
+                                <input type="text" class="form-control" id="titre_depense" name="titre_depense" placeholder="Achat fournitures" value="<?= htmlspecialchars($editDepense['titre_depense'] ?? '') ?>" required>
+                            </div>
                         </div>
                     </div>
-                    <div class="col-md-2">
-                        <label for="boutiqueFilter" class="form-label fw-semibold small">Boutique</label>
-                        <select name="boutique_filter" id="boutiqueFilter" class="selectpicker form-control" data-live-search="true" data-live-search-placeholder="Rechercher une boutique...">
-                            <option value="">Toutes</option>
-                            <?php foreach ($boutiques as $b): ?>
-                                <option value="<?= htmlspecialchars($b['code_boutique']) ?>" <?= ($boutique_filter == $b['code_boutique']) ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($b['nom_boutique']) ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
+
+                    <!-- Association boutique / utilisateur -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-store me-1"></i> Association</h6>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <label for="boutique_id" class="form-label fw-semibold">Boutique</label>
+                            <select class="selectpicker form-control" id="boutique_id" name="boutique_id" data-live-search="true" data-live-search-placeholder="Rechercher une boutique...">
+                                <option value="">Aucune</option>
+                                <?php foreach ($boutiques as $b): ?>
+                                    <option value="<?= htmlspecialchars($b['code_boutique']) ?>" <?= (isset($editDepense) && $editDepense['boutique_id'] == $b['code_boutique']) ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($b['nom_boutique']) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="utilisateur_id" class="form-label fw-semibold">Utilisateur</label>
+                            <select class="selectpicker form-control" id="utilisateur_id" name="utilisateur_id" data-live-search="true" data-live-search-placeholder="Rechercher un utilisateur...">
+                                <option value="">Aucun</option>
+                                <?php foreach ($utilisateurs as $u): ?>
+                                    <option value="<?= htmlspecialchars($u['id']) ?>" <?= (isset($editDepense) && $editDepense['utilisateur_id'] == $u['id']) ? 'selected' : '' ?>>
+                                        <?= htmlspecialchars($u['nom_prenom']) ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
                     </div>
-                    <div class="col-md-2">
-                        <label for="utilisateurFilter" class="form-label fw-semibold small">Utilisateur</label>
-                        <select name="utilisateur_filter" id="utilisateurFilter" class="selectpicker form-control" data-live-search="true" data-live-search-placeholder="Rechercher un utilisateur...">
-                            <option value="">Tous</option>
-                            <?php foreach ($utilisateurs as $u): ?>
-                                <option value="<?= htmlspecialchars($u['id']) ?>" <?= ($utilisateur_filter == $u['id']) ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($u['nom_prenom']) ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
+
+                    <!-- Montant et date -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-coins me-1"></i> Montant & date</h6>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <label for="montant_depense" class="form-label fw-semibold">Montant <span class="text-danger">*</span></label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-currency-dollar"></i></span>
+                                <input type="number" step="0.01" class="form-control" id="montant_depense" name="montant_depense" placeholder="0.00" value="<?= htmlspecialchars($editDepense['montant_depense'] ?? '0') ?>" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="date_depense" class="form-label fw-semibold">Date et heure</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-calendar"></i></span>
+                                <input type="datetime-local" class="form-control" id="date_depense" name="date_depense" value="<?= isset($editDepense) ? date('Y-m-d\TH:i', strtotime($editDepense['date_depense'])) : date('Y-m-d\TH:i') ?>">
+                            </div>
+                        </div>
                     </div>
-                    <div class="col-md-2">
-                        <label for="etatFilter" class="form-label fw-semibold small">État</label>
-                        <select name="etat_filter" id="etatFilter" class="selectpicker form-control">
-                            <option value="">Tous</option>
-                            <?php foreach ($etats_depense as $e): ?>
-                                <option value="<?= $e ?>" <?= ($etat_filter == $e) ? 'selected' : '' ?>><?= $e ?></option>
-                            <?php endforeach; ?>
-                        </select>
+
+                    <!-- Description -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-align-left me-1"></i> Description</h6>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-12">
+                            <label for="description_depense" class="form-label fw-semibold">Description</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-text-left"></i></span>
+                                <textarea class="form-control" id="description_depense" name="description_depense" rows="3" placeholder="Détails de la dépense..."><?= htmlspecialchars($editDepense['description_depense'] ?? '') ?></textarea>
+                            </div>
+                        </div>
                     </div>
-                    <div class="col-md-2">
-                        <button type="button" class="btn btn-primary w-100" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
+
+                    <!-- État -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-toggle-on me-1"></i> Statut</h6>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="etat_depense" class="form-label fw-semibold">État</label>
+                            <select class="form-select" id="etat_depense" name="etat_depense">
+                                <option value="VALIDE" <?= (isset($editDepense) && $editDepense['etat_depense'] === 'VALIDE') ? 'selected' : '' ?>>VALIDE</option>
+                                <option value="ANNULE" <?= (isset($editDepense) && $editDepense['etat_depense'] === 'ANNULE') ? 'selected' : '' ?>>ANNULE</option>
+                            </select>
+                        </div>
                     </div>
-                    <div class="col-md-1">
-                        <button type="button" class="btn btn-outline-secondary w-100" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
-                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
+                    <button type="submit" class="btn btn-primary" id="saveBtn"><i class="bi bi-save"></i> Enregistrer</button>
                 </div>
             </form>
         </div>
-
-        <!-- Table -->
-        <div class="data-table-wrap" id="tableWrapper">
-            <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
-                <h5 class="mb-0 fw-bold">Liste des dépenses</h5>
-                <span class="text-muted small" id="totalCount"><?= $initialData['total'] ?> dépense(s) - Page <?= $initialData['page'] ?> / <?= max(1, $initialData['totalPages']) ?></span>
-            </div>
-            <div class="table-responsive">
-                <table class="table table-hover align-middle mb-0">
-                    <thead>
-                        <tr>
-                            <th>Code</th>
-                            <th>Titre</th>
-                            <th>Boutique</th>
-                            <th>Utilisateur</th>
-                            <th>Montant</th>
-                            <th>Date</th>
-                            <th>Description</th>
-                            <th>État</th>
-                            <th class="text-end">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tableBody">
-                        <?= $initialData['table'] ?>
-                    </tbody>
-                </table>
-            </div>
-            <div id="paginationContainer">
-                <?= $initialData['pagination'] ?>
-            </div>
-        </div>
     </div>
+</div>
 
-    <!-- =========================================================
-MODAL FORMULAIRE (ajout/modification)
-========================================================= -->
-    <div class="modal fade" id="depenseModal" tabindex="-1" aria-labelledby="modalTitle" aria-hidden="true">
-        <div class="modal-dialog modal-lg modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-currency-dollar text-primary me-2"></i> Nouvelle dépense</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-                </div>
-                <form method="post" id="depenseForm">
-                    <input type="hidden" name="action" id="formAction" value="add">
-                    <input type="hidden" name="old_code" id="oldCode" value="">
-                    <div class="modal-body">
-                        <!-- Identification -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
-                        <div class="row g-3 mb-4">
-                            <div class="col-md-6">
-                                <label for="code_depense" class="form-label fw-semibold">Code dépense <span class="text-danger">*</span></label>
-                                <div class="input-group">
-                                    <span class="input-group-text"><i class="bi bi-hash"></i></span>
-                                    <input type="text" class="form-control" id="code_depense" name="code_depense" required placeholder="DEP001" value="<?= htmlspecialchars($editDepense['code_depense'] ?? '') ?>">
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <label for="titre_depense" class="form-label fw-semibold">Titre <span class="text-danger">*</span></label>
-                                <div class="input-group">
-                                    <span class="input-group-text"><i class="bi bi-pencil"></i></span>
-                                    <input type="text" class="form-control" id="titre_depense" name="titre_depense" placeholder="Achat fournitures" value="<?= htmlspecialchars($editDepense['titre_depense'] ?? '') ?>" required>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Association boutique / utilisateur -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-store me-1"></i> Association</h6>
-                        <div class="row g-3 mb-4">
-                            <div class="col-md-6">
-                                <label for="boutique_id" class="form-label fw-semibold">Boutique</label>
-                                <select class="selectpicker form-control" id="boutique_id" name="boutique_id" data-live-search="true" data-live-search-placeholder="Rechercher une boutique...">
-                                    <option value="">Aucune</option>
-                                    <?php foreach ($boutiques as $b): ?>
-                                        <option value="<?= htmlspecialchars($b['code_boutique']) ?>" <?= (isset($editDepense) && $editDepense['boutique_id'] == $b['code_boutique']) ? 'selected' : '' ?>>
-                                            <?= htmlspecialchars($b['nom_boutique']) ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            <div class="col-md-6">
-                                <label for="utilisateur_id" class="form-label fw-semibold">Utilisateur</label>
-                                <select class="selectpicker form-control" id="utilisateur_id" name="utilisateur_id" data-live-search="true" data-live-search-placeholder="Rechercher un utilisateur...">
-                                    <option value="">Aucun</option>
-                                    <?php foreach ($utilisateurs as $u): ?>
-                                        <option value="<?= htmlspecialchars($u['id']) ?>" <?= (isset($editDepense) && $editDepense['utilisateur_id'] == $u['id']) ? 'selected' : '' ?>>
-                                            <?= htmlspecialchars($u['nom_prenom']) ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                        </div>
-
-                        <!-- Montant et date -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-coins me-1"></i> Montant & date</h6>
-                        <div class="row g-3 mb-4">
-                            <div class="col-md-6">
-                                <label for="montant_depense" class="form-label fw-semibold">Montant <span class="text-danger">*</span></label>
-                                <div class="input-group">
-                                    <span class="input-group-text"><i class="bi bi-currency-dollar"></i></span>
-                                    <input type="number" step="0.01" class="form-control" id="montant_depense" name="montant_depense" placeholder="0.00" value="<?= htmlspecialchars($editDepense['montant_depense'] ?? '0') ?>" required>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <label for="date_depense" class="form-label fw-semibold">Date et heure</label>
-                                <div class="input-group">
-                                    <span class="input-group-text"><i class="bi bi-calendar"></i></span>
-                                    <input type="datetime-local" class="form-control" id="date_depense" name="date_depense" value="<?= isset($editDepense) ? date('Y-m-d\TH:i', strtotime($editDepense['date_depense'])) : date('Y-m-d\TH:i') ?>">
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Description -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-align-left me-1"></i> Description</h6>
-                        <div class="row g-3 mb-4">
-                            <div class="col-md-12">
-                                <label for="description_depense" class="form-label fw-semibold">Description</label>
-                                <div class="input-group">
-                                    <span class="input-group-text"><i class="bi bi-text-left"></i></span>
-                                    <textarea class="form-control" id="description_depense" name="description_depense" rows="3" placeholder="Détails de la dépense..."><?= htmlspecialchars($editDepense['description_depense'] ?? '') ?></textarea>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- État -->
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-toggle-on me-1"></i> Statut</h6>
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <label for="etat_depense" class="form-label fw-semibold">État</label>
-                                <select class="form-select" id="etat_depense" name="etat_depense">
-                                    <option value="VALIDE" <?= (isset($editDepense) && $editDepense['etat_depense'] === 'VALIDE') ? 'selected' : '' ?>>VALIDE</option>
-                                    <option value="ANNULE" <?= (isset($editDepense) && $editDepense['etat_depense'] === 'ANNULE') ? 'selected' : '' ?>>ANNULE</option>
-                                </select>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
-                        <button type="submit" class="btn btn-primary" id="saveBtn"><i class="bi bi-save"></i> Enregistrer</button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    </div>
-
-    <!-- =========================================================
-MODAL : CONFIRMATION SUPPRESSION
-========================================================= -->
-    <div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content border-0 shadow" style="border-radius: 16px;">
-                <div class="modal-body text-center p-4">
-                    <div class="mb-3"><i class="bi bi-exclamation-triangle-fill text-warning" style="font-size: 3rem;"></i></div>
-                    <h5 class="modal-title mb-2" style="font-weight: 600; color: var(--dark);">Confirmer la suppression</h5>
-                    <p class="text-danger mb-4">Êtes-vous sûr de vouloir supprimer la dépense <strong id="deleteNomDepense"></strong> ?<br>Cette action est irréversible.</p>
-                    <div class="d-flex gap-2 justify-content-center">
-                        <button type="button" class="btn btn-outline-secondary" style="border-radius: 10px;" data-bs-dismiss="modal">Annuler</button>
-                        <button type="button" class="btn btn-danger" id="confirmDeleteBtn" style="border-radius: 10px; min-width: 120px;"><i class="bi bi-trash3 me-1"></i> Supprimer</button>
-                    </div>
+<!-- ========================================================= -->
+<!-- MODALE : CONFIRMATION SUPPRESSION -->
+<!-- ========================================================= -->
+<div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow" style="border-radius: 16px;">
+            <div class="modal-body text-center p-4">
+                <div class="mb-3"><i class="bi bi-exclamation-triangle-fill text-warning" style="font-size: 3rem;"></i></div>
+                <h5 class="modal-title mb-2" style="font-weight: 600; color: var(--dark);">Confirmer la suppression</h5>
+                <p class="text-danger mb-4">Êtes-vous sûr de vouloir supprimer la dépense <strong id="deleteNomDepense"></strong> ?<br>Cette action est irréversible.</p>
+                <div class="d-flex gap-2 justify-content-center">
+                    <button type="button" class="btn btn-outline-secondary" style="border-radius: 10px;" data-bs-dismiss="modal">Annuler</button>
+                    <button type="button" class="btn btn-danger" id="confirmDeleteBtn" style="border-radius: 10px; min-width: 120px;"><i class="bi bi-trash3 me-1"></i> Supprimer</button>
                 </div>
             </div>
         </div>
     </div>
+</div>
 
-    <!-- Formulaire caché suppression -->
-    <form id="deleteForm" method="POST" style="display:none;">
-        <input type="hidden" name="btn_supprimer" value="1">
-        <input type="hidden" name="sai_supprimer_id" id="deleteFormId" value="">
-    </form>
+<!-- Formulaire caché suppression -->
+<form id="deleteForm" method="POST" style="display:none;">
+    <input type="hidden" name="btn_supprimer" value="1">
+    <input type="hidden" name="sai_supprimer_id" id="deleteFormId" value="">
+</form>
 
-    <!-- Formulaire caché pour action edit -->
-    <form method="post" id="actionForm">
-        <input type="hidden" name="action" id="actionField">
-        <input type="hidden" name="edit_code" id="editCodeField">
-    </form>
+<!-- Formulaire caché pour action edit (chargement) -->
+<form method="post" id="actionForm">
+    <input type="hidden" name="action" id="actionField">
+    <input type="hidden" name="edit_code" id="editCodeField">
+</form>
 
-    <!-- =========================================================
-SCRIPTS
-========================================================= -->
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <!-- Bootstrap SelectPicker JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
+<!-- ========================================================= -->
+<!-- SCRIPTS -->
+<!-- ========================================================= -->
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<!-- Bootstrap SelectPicker JS -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
 
-    <script>
-        $(document).ready(function() {
-            // --- Initialisation de tous les selectpicker ---
-            // destroy avant init : évite le doublon visuel si ce contenu est
-            // rechargé dans le DOM sans rechargement complet de la page.
-            $('.selectpicker').selectpicker('destroy');
-            $('.selectpicker').selectpicker();
+<script>
+$(document).ready(function() {
+    // --- Initialisation de tous les selectpicker ---
+    $('.selectpicker').selectpicker('destroy');
+    $('.selectpicker').selectpicker();
 
-            const depenseModal = new bootstrap.Modal(document.getElementById('depenseModal'));
-            const viewModal = new bootstrap.Modal(document.getElementById('viewModal'));
+    const depenseModal = new bootstrap.Modal(document.getElementById('depenseModal'));
 
-            // --- Ajout ---
-            $('#addBtn').on('click', function() {
-                $('#formAction').val('add');
-                $('#oldCode').val('');
-                $('#modalTitle').text('Nouvelle dépense');
-                $('#depenseForm')[0].reset();
-                $('#code_depense').prop('readonly', false);
+    // --- Ajout ---
+    $('#addBtn').on('click', function() {
+        $('#formAction').val('add');
+        $('#oldCode').val('');
+        $('#modalTitle').text('Nouvelle dépense');
+        $('#depenseForm')[0].reset();
+        $('#code_depense').prop('readonly', false);
 
-                // Vidage manuel : reset() ne suffit pas, car ces champs ont leur
-                // value/selected écrit par PHP côté serveur (pré-remplis lors d'une
-                // édition précédente) et reset() les restaure au lieu de les vider.
-                $('#code_depense').val('');
-                $('#titre_depense').val('');
-                $('#montant_depense').val('0');
-                $('#description_depense').val('');
-                $('#etat_depense').val('VALIDE');
+        $('#code_depense').val('');
+        $('#titre_depense').val('');
+        $('#montant_depense').val('0');
+        $('#description_depense').val('');
+        $('#etat_depense').val('VALIDE');
 
-                // Remettre la date actuelle
-                var now = new Date();
-                var offset = now.getTimezoneOffset() * 60000;
-                var localISOTime = (new Date(Date.now() - offset)).toISOString().slice(0, 16);
-                $('#date_depense').val(localISOTime);
+        var now = new Date();
+        var offset = now.getTimezoneOffset() * 60000;
+        var localISOTime = (new Date(Date.now() - offset)).toISOString().slice(0, 16);
+        $('#date_depense').val(localISOTime);
 
-                // Réinitialiser uniquement les selects du formulaire, pas ceux des
-                // filtres de recherche (qui partagent aussi la classe .selectpicker)
-                $('#boutique_id, #utilisateur_id').selectpicker('val', '');
-                depenseModal.show();
-            });
+        $('#boutique_id, #utilisateur_id').selectpicker('val', '');
+        depenseModal.show();
+    });
 
-            // --- Édition ---
-            $(document).on('click', '.editBtn', function() {
-                const code = $(this).data('code');
-                $('#actionField').val('edit');
-                $('#editCodeField').val(code);
-                $('#actionForm').submit();
-            });
+    // --- Édition (chargement via action load_edit) ---
+    $(document).on('click', '.editBtn', function() {
+        const code = $(this).data('code');
+        $('#actionField').val('load_edit');
+        $('#editCodeField').val(code);
+        $('#actionForm').submit();
+    });
 
-            // --- Fonction de recherche AJAX ---
-            function rechercher(page) {
-                page = page || 1;
-                var search = $('#searchInput').val();
-                var boutique = $('#boutiqueFilter').val();
-                var utilisateur = $('#utilisateurFilter').val();
-                var etat = $('#etatFilter').val();
-                $.ajax({
-                    url: window.location.href,
-                    method: 'POST',
-                    data: {
-                        ajax: 1,
-                        search: search,
-                        boutique_filter: boutique,
-                        utilisateur_filter: utilisateur,
-                        etat_filter: etat,
-                        page: page
-                    },
-                    dataType: 'json',
-                    success: function(data) {
-                        $('#tableBody').html(data.table);
-                        $('#paginationContainer').html(data.pagination);
-                        $('#totalCount').text(data.total + ' dépense(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
-                        $('.page-link').off('click').on('click', function(e) {
-                            e.preventDefault();
-                            var p = $(this).data('page');
-                            if (p) rechercher(p);
-                        });
-                    },
-                    error: function() {
-                        alert('Erreur lors de la recherche.');
-                    }
+    // --- Fonction de recherche AJAX ---
+    function rechercher(page) {
+        page = page || 1;
+        var search = $('#searchInput').val();
+        var boutique = $('#boutiqueFilter').val();
+        var utilisateur = $('#utilisateurFilter').val();
+        var etat = $('#etatFilter').val();
+        $.ajax({
+            url: window.location.href,
+            method: 'POST',
+            data: {
+                ajax: 1,
+                search: search,
+                boutique_filter: boutique,
+                utilisateur_filter: utilisateur,
+                etat_filter: etat,
+                page: page
+            },
+            dataType: 'json',
+            success: function(data) {
+                $('#tableBody').html(data.table);
+                $('#paginationContainer').html(data.pagination);
+                $('#totalCount').text(data.total + ' dépense(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
+                $('.page-link').off('click').on('click', function(e) {
+                    e.preventDefault();
+                    var p = $(this).data('page');
+                    if (p) rechercher(p);
                 });
+            },
+            error: function() {
+                alert('Erreur lors de la recherche.');
             }
-
-            // Auto-submit à la saisie pour le champ texte
-            var searchTimeout = null;
-            $('#searchInput').on('input', function() {
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(function() {
-                    rechercher(1);
-                }, 300);
-            });
-
-            // Pour les selectpicker du filtre
-            $('#boutiqueFilter, #utilisateurFilter, #etatFilter').on('changed.bs.select', function() {
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(function() {
-                    rechercher(1);
-                }, 300);
-            });
-
-            // Bouton Filtrer
-            $('#filterBtn').on('click', function() {
-                rechercher(1);
-            });
-
-            // Réinitialisation
-            $('#resetBtn').on('click', function() {
-                $('#searchInput').val('');
-                $('#boutiqueFilter').selectpicker('val', '');
-                $('#utilisateurFilter').selectpicker('val', '');
-                $('#etatFilter').selectpicker('val', '');
-                rechercher(1);
-            });
-
-            // Pagination initiale
-            $('.page-link').on('click', function(e) {
-                e.preventDefault();
-                var page = $(this).data('page');
-                if (page) rechercher(page);
-            });
-
-            // --- Gestion suppression ---
-            $(document).on('click', '.deleteBtn', function() {
-                const code = $(this).data('code');
-                const nom = $(this).data('nom');
-                $('#deleteNomDepense').text(nom);
-                $('#deleteFormId').val(code);
-            });
-            $('#confirmDeleteBtn').on('click', function() {
-                $('#deleteForm').submit();
-            });
-
-            // Auto-fermeture des alertes
-            setTimeout(function() {
-                $('.alert').alert('close');
-            }, 5000);
-
-            // --- Si édition via POST ---
-            <?php if (isset($editDepense) && $action === 'edit'): ?>
-                $(function() {
-                    $('#formAction').val('edit');
-                    $('#oldCode').val('<?= htmlspecialchars($editDepense['code_depense']) ?>');
-                    $('#modalTitle').text('Modifier la dépense');
-                    $('#code_depense').prop('readonly', true);
-                    depenseModal.show();
-                });
-            <?php endif; ?>
         });
-    </script>
-</body>
+    }
 
+    var searchTimeout = null;
+    $('#searchInput').on('input', function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(function() { rechercher(1); }, 300);
+    });
+
+    $('#boutiqueFilter, #utilisateurFilter, #etatFilter').on('changed.bs.select', function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(function() { rechercher(1); }, 300);
+    });
+
+    $('#filterBtn').on('click', function() { rechercher(1); });
+    $('#resetBtn').on('click', function() {
+        $('#searchInput').val('');
+        $('#boutiqueFilter, #utilisateurFilter, #etatFilter').selectpicker('val', '');
+        rechercher(1);
+    });
+
+    // --- Gestion suppression ---
+    $(document).on('click', '.deleteBtn', function() {
+        const code = $(this).data('code');
+        const nom = $(this).data('nom');
+        $('#deleteNomDepense').text(nom);
+        $('#deleteFormId').val(code);
+    });
+    $('#confirmDeleteBtn').on('click', function() {
+        $('#deleteForm').submit();
+    });
+
+    // Auto-fermeture des alertes
+    setTimeout(function() { $('.alert').alert('close'); }, 5000);
+
+    // --- Si édition via POST (chargement des données) ---
+    <?php if (isset($editDepense) && $action === 'load_edit'): ?>
+        $(function() {
+            $('#formAction').val('edit');
+            $('#oldCode').val('<?= htmlspecialchars($editDepense['code_depense']) ?>');
+            $('#modalTitle').text('Modifier la dépense');
+            $('#code_depense').prop('readonly', true);
+            depenseModal.show();
+        });
+    <?php endif; ?>
+});
+</script>
+</body>
 </html>

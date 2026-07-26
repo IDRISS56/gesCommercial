@@ -1,9 +1,8 @@
 <?php
-// profile.php – Profil utilisateur (design dashboard)
+// profile.php – Profil utilisateur (design vente)
 require_once __DIR__ . '/../../databases/database.php';
 session_start();
 
-// Vérifier la session
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
     exit;
@@ -25,7 +24,6 @@ function e($str)
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
 }
 
-// Récupérer le nom de la boutique
 $boutiqueNom = '—';
 if (!empty($user['boutique_id'])) {
     $stmtB = $pdo->prepare("SELECT nom_boutique FROM boutique WHERE code_boutique = ?");
@@ -33,19 +31,16 @@ if (!empty($user['boutique_id'])) {
     $boutiqueNom = $stmtB->fetchColumn() ?: $user['boutique_id'];
 }
 
-// Gestion de l'édition (modale) – ici on peut ajouter une logique de mise à jour
 $message = '';
 $messageType = '';
 $csrf_token = $_SESSION['csrf_token'] ?? bin2hex(random_bytes(32));
 $_SESSION['csrf_token'] = $csrf_token;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'edit_profile') {
-    // Vérification du token CSRF
     if (empty($_POST['csrf_token']) || $_POST['csrf_token'] !== $csrf_token) {
         $message = 'Token de sécurité invalide.';
         $messageType = 'danger';
     } else {
-        // Récupération des données du formulaire
         $nom = trim($_POST['nom_prenom'] ?? '');
         $telephone = trim($_POST['telephone'] ?? '');
         $email = trim($_POST['email'] ?? '');
@@ -59,12 +54,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         if (empty($nom)) $errors[] = 'Le nom est requis.';
         if (!empty($email) && !filter_var($email, FILTER_VALIDATE_EMAIL)) $errors[] = 'Email invalide.';
 
-        // Vérification du mot de passe actuel si changement demandé
         if (!empty($new_mdp)) {
             if (empty($current_mdp)) {
                 $errors[] = 'Veuillez saisir votre mot de passe actuel.';
             } else {
-                // Vérifier le mot de passe actuel (hashé en base)
                 if (!password_verify($current_mdp, $user['mdp'])) {
                     $errors[] = 'Mot de passe actuel incorrect.';
                 }
@@ -79,11 +72,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
         if (empty($errors)) {
             try {
-                // Mise à jour des infos de base
                 $sql = "UPDATE utilisateur SET nom_prenom = ?, telephone = ?, email = ?, ville = ?, adresse = ?";
                 $params = [$nom, $telephone, $email, $ville, $adresse];
 
-                // Si nouveau mot de passe, on le hash
                 if (!empty($new_mdp)) {
                     $hashed = password_hash($new_mdp, PASSWORD_DEFAULT);
                     $sql .= ", mdp = ?";
@@ -96,7 +87,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute($params);
 
-                // Mettre à jour la variable $user pour l'affichage
                 $user['nom_prenom'] = $nom;
                 $user['telephone'] = $telephone;
                 $user['email'] = $email;
@@ -127,7 +117,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        /* ===== STYLE DASHBOARD (identique aux autres pages) ===== */
+        /* ===== STYLE DASHBOARD (repris de vente.php) ===== */
         :root {
             --b: #2563eb;
             --bd: #1d4ed8;
@@ -384,7 +374,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 opacity: 0;
                 transform: translateY(12px);
             }
-
             to {
                 opacity: 1;
                 transform: translateY(0);
@@ -437,6 +426,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             border-color: var(--b);
             box-shadow: 0 0 0 3px var(--bl);
         }
+
+        .alert {
+            border-radius: var(--Rs);
+        }
     </style>
 </head>
 
@@ -448,7 +441,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 <h1><i class="bi bi-person-circle text-primary"></i> Mon profil</h1>
                 <p>Gérez vos informations personnelles et votre sécurité</p>
             </div>
-            <a href="../dashboard/index.php"><i class="bi bi-arrow-left"></i> Retour au tableau de bord</a>
         </div>
 
         <!-- Messages -->
@@ -469,7 +461,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 </div>
                 <div class="actions">
                     <button class="btn-go" id="editProfileBtn"><i class="bi bi-pencil"></i> Modifier</button>
-                    <a href="logout.php" class="btn-danger"><i class="bi bi-box-arrow-right"></i> Déconnexion</a>
+                    <a href="deconnexion" class="btn-danger"><i class="bi bi-box-arrow-right"></i> Déconnexion</a>
                 </div>
             </div>
 

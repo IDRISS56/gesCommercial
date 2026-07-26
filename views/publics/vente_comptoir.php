@@ -324,7 +324,7 @@ if ($isAjax && $action) {
                         $lot_id = $ligne['lot_id'] ?? null;
 
                         $stmtCmd = $pdo->prepare("INSERT INTO commande (numero_commande, produit_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, montant_commande, utilisateur_id, boutique_id, etat_commande) 
-                                                  VALUES (?, ?, ?, ?, 'Vente', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, NULL, 'Valider')");
+                                                  VALUES (?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, NULL, 'Valider')");
                         $stmtCmd->execute([$numCmd, $code_prod, $client_id, $numFacture, $prix_achat, $prix, $qte, $montant, USER_ID]);
 
                         // Mise à jour du stock global

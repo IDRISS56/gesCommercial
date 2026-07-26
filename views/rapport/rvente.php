@@ -4,26 +4,15 @@
 // "L'Argent qui rentre" — Design Compact Bleu — FCFA
 // ============================================
 
-$host = '127.0.0.1';
-$db   = 'gescommercial';
-$user = 'root';
-$pass = '';
-$charset = 'utf8mb4';
+require_once 'databases/database.php';
+require_once 'librairies/fpdf/fpdf.php';
 
-$dsn = "mysql:host=$host;dbname=$db;charset=$charset";
-$options = [
-    PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-    PDO::ATTR_EMULATE_PREPARES   => false,
-];
-
-try {
-    $pdo = new PDO($dsn, $user, $pass, $options);
-} catch (\PDOException $e) {
-    die("Erreur : " . $e->getMessage());
+// ---- FONCTION D'ENCODAGE ----
+function safeText($str) {
+    return iconv('UTF-8', 'ISO-8859-1//TRANSLIT', $str);
 }
 
-// Bilan ventes
+// ---- RÉCUPÉRATION DES DONNÉES (inchangée) ----
 $bilanVentes = $pdo->query("
     SELECT c.numero_commande, c.date_commande, c.heure_commande, c.prix_achat, c.prix_commande,
         c.quantite_commande, c.montant_commande, c.etat_commande, c.unite_affichage, c.statut_id, c.facture_id,
@@ -37,8 +26,8 @@ $bilanVentes = $pdo->query("
     FROM commande c LEFT JOIN produit p ON c.produit_id=p.code_produit
     LEFT JOIN contact ct ON c.contact_id=ct.code_contact LEFT JOIN boutique b ON c.boutique_id=b.code_boutique
     LEFT JOIN categorie cat ON p.categorie_id=cat.code_categorie
-    WHERE c.statut_id IN ('ST002','Vente','012') ORDER BY c.date_commande DESC, c.heure_commande DESC
-")->fetchAll();
+    WHERE c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé') ORDER BY c.date_commande DESC, c.heure_commande DESC
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $totauxVentes = $pdo->query("
     SELECT COALESCE(SUM(quantite_commande),0) AS total_qte,
@@ -46,8 +35,8 @@ $totauxVentes = $pdo->query("
         COALESCE(SUM(CAST(montant_commande AS DECIMAL(12,2))/1.2),0) AS total_ht,
         COALESCE(SUM(CAST(montant_commande AS DECIMAL(12,2))-CAST(montant_commande AS DECIMAL(12,2))/1.2),0) AS total_tva,
         COALESCE(SUM(CAST(montant_commande AS DECIMAL(12,2))-(CAST(COALESCE(prix_achat,'0') AS DECIMAL(12,2))*quantite_commande)),0) AS total_benefice,
-        COUNT(*) AS nb_ventes FROM commande WHERE statut_id IN ('ST002','Vente','012')
-")->fetch();
+        COUNT(*) AS nb_ventes FROM commande WHERE statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé')
+")->fetch(PDO::FETCH_ASSOC);
 $totalTTC = $totauxVentes['total_ttc'];
 $totalHT = $totauxVentes['total_ht'];
 $totalTVA = $totauxVentes['total_tva'];
@@ -59,70 +48,69 @@ $margeBenefice = $totalTTC > 0 ? ($totalBenefice / $totalTTC) * 100 : 0;
 
 $evolutionCA = $pdo->query("
     SELECT DATE_FORMAT(date_commande,'%Y-%m') AS mois, COALESCE(SUM(CAST(montant_commande AS DECIMAL(12,2))),0) AS ca, COUNT(*) AS nb_ventes
-    FROM commande WHERE statut_id IN ('ST002','Vente','012') AND date_commande IS NOT NULL
+    FROM commande WHERE statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé') AND date_commande IS NOT NULL
     GROUP BY DATE_FORMAT(date_commande,'%Y-%m') ORDER BY mois ASC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $ventesParCategorie = $pdo->query("
     SELECT cat.titre_categorie, COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) AS ca, SUM(c.quantite_commande) AS qte
     FROM commande c LEFT JOIN produit p ON c.produit_id=p.code_produit LEFT JOIN categorie cat ON p.categorie_id=cat.code_categorie
-    WHERE c.statut_id IN ('ST002','Vente','012') GROUP BY cat.code_categorie ORDER BY ca DESC
-")->fetchAll();
+    WHERE c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé') GROUP BY cat.code_categorie ORDER BY ca DESC
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $topProduitsVendus = $pdo->query("
     SELECT p.code_produit, p.titre_produit, cat.titre_categorie, SUM(c.quantite_commande) AS qte_vendue,
         COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) AS ca, COUNT(c.numero_commande) AS nb_ventes
     FROM commande c LEFT JOIN produit p ON c.produit_id=p.code_produit LEFT JOIN categorie cat ON p.categorie_id=cat.code_categorie
-    WHERE c.statut_id IN ('ST002','Vente','012') GROUP BY p.code_produit ORDER BY qte_vendue DESC LIMIT 10
-")->fetchAll();
+    WHERE c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé') GROUP BY p.code_produit ORDER BY qte_vendue DESC LIMIT 10
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $topProduitsRentables = $pdo->query("
     SELECT p.code_produit, p.titre_produit, cat.titre_categorie, SUM(c.quantite_commande) AS qte_vendue,
         COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) AS ca,
         COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))-(CAST(COALESCE(c.prix_achat,'0') AS DECIMAL(12,2))*c.quantite_commande)),0) AS benefice
     FROM commande c LEFT JOIN produit p ON c.produit_id=p.code_produit LEFT JOIN categorie cat ON p.categorie_id=cat.code_categorie
-    WHERE c.statut_id IN ('ST002','Vente','012') GROUP BY p.code_produit ORDER BY benefice DESC LIMIT 10
-")->fetchAll();
+    WHERE c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé') GROUP BY p.code_produit ORDER BY benefice DESC LIMIT 10
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $topProduitsMoinsVendus = $pdo->query("
     SELECT p.code_produit, p.titre_produit, cat.titre_categorie, COALESCE(SUM(c.quantite_commande),0) AS qte_vendue,
         COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) AS ca
-    FROM produit p LEFT JOIN commande c ON p.code_produit=c.produit_id AND c.statut_id IN ('ST002','Vente','012')
+    FROM produit p LEFT JOIN commande c ON p.code_produit=c.produit_id AND c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé')
     LEFT JOIN categorie cat ON p.categorie_id=cat.code_categorie WHERE p.etat_produit='Actif'
     GROUP BY p.code_produit ORDER BY qte_vendue ASC LIMIT 10
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $produitsSansMouvement = $pdo->query("
     SELECT p.code_produit, p.titre_produit, cat.titre_categorie, p.stock_produit, sb.quantite AS stock_actuel
-    FROM produit p LEFT JOIN commande c ON p.code_produit=c.produit_id AND c.statut_id IN ('ST002','Vente','012')
+    FROM produit p LEFT JOIN commande c ON p.code_produit=c.produit_id AND c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé')
     LEFT JOIN categorie cat ON p.categorie_id=cat.code_categorie LEFT JOIN stock_boutique sb ON p.code_produit=sb.produit_id
     WHERE p.etat_produit='Actif' AND c.numero_commande IS NULL GROUP BY p.code_produit
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $topClients = $pdo->query("
     SELECT ct.code_contact, ct.nom_prenom_contact, ct.telephone_contact, ct.email_contact, ct.adresse_contact,
         COUNT(c.numero_commande) AS nb_achats, COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) AS ca_total,
         COALESCE(SUM(c.quantite_commande),0) AS qte_totale, MIN(c.date_commande) AS premier_achat, MAX(c.date_commande) AS dernier_achat
-    FROM contact ct LEFT JOIN commande c ON ct.code_contact=c.contact_id AND c.statut_id IN ('ST002','Vente','012')
+    FROM contact ct LEFT JOIN commande c ON ct.code_contact=c.contact_id AND c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé')
     WHERE ct.type_contact='CLIENT' GROUP BY ct.code_contact ORDER BY ca_total DESC LIMIT 10
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $nouveauxClients = $pdo->query("
     SELECT ct.code_contact, ct.nom_prenom_contact, ct.telephone_contact, ct.email_contact,
         MIN(c.date_commande) AS date_premier_achat, COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) AS ca_initial
-    FROM contact ct INNER JOIN commande c ON ct.code_contact=c.contact_id AND c.statut_id IN ('ST002','Vente','012')
+    FROM contact ct INNER JOIN commande c ON ct.code_contact=c.contact_id AND c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé')
     WHERE ct.type_contact='CLIENT' GROUP BY ct.code_contact HAVING date_premier_achat >= DATE_FORMAT(CURDATE(),'%Y-%m-01') ORDER BY date_premier_achat DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $clientsInactifs = $pdo->query("
     SELECT ct.code_contact, ct.nom_prenom_contact, ct.telephone_contact, ct.email_contact,
         MAX(c.date_commande) AS dernier_achat, COALESCE(SUM(CAST(c.montant_commande AS DECIMAL(12,2))),0) AS ca_total,
         DATEDIFF(CURDATE(),MAX(c.date_commande)) AS jours_inactif
-    FROM contact ct INNER JOIN commande c ON ct.code_contact=c.contact_id AND c.statut_id IN ('ST002','Vente','012')
+    FROM contact ct INNER JOIN commande c ON ct.code_contact=c.contact_id AND c.statut_id = '012' AND etat_commande NOT IN ('En attente','Annulé')
     WHERE ct.type_contact='CLIENT' GROUP BY ct.code_contact HAVING jours_inactif>90 ORDER BY jours_inactif DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
-// Creances
 $facturesImpayees = $pdo->query("
     SELECT f.numero_facture, f.titre_facture, f.date_facture, f.montant_ht, f.taxe, f.remise, f.montant_ttc,
         f.avance, f.reste, f.etat_facture, f.type_facture, ct.nom_prenom_contact AS client, ct.code_contact,
@@ -130,12 +118,12 @@ $facturesImpayees = $pdo->query("
     FROM facture f LEFT JOIN contact ct ON f.contact_id=ct.code_contact
     WHERE CAST(f.reste AS DECIMAL(12,2))>0 AND (ct.type_contact='CLIENT' OR f.categorie_facture='CLIENT' OR f.type_facture='VENTE')
     ORDER BY CAST(f.reste AS DECIMAL(12,2)) DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $totalCreances = $pdo->query("
     SELECT COALESCE(SUM(CAST(f.reste AS DECIMAL(12,2))),0) AS total FROM facture f LEFT JOIN contact ct ON f.contact_id=ct.code_contact
     WHERE CAST(f.reste AS DECIMAL(12,2))>0 AND (ct.type_contact='CLIENT' OR f.categorie_facture='CLIENT' OR f.type_facture='VENTE')
-")->fetch()['total'];
+")->fetch(PDO::FETCH_ASSOC)['total'];
 
 $aging = $pdo->query("
     SELECT SUM(CASE WHEN DATEDIFF(CURDATE(),f.date_facture) BETWEEN 1 AND 30 THEN CAST(f.reste AS DECIMAL(12,2)) ELSE 0 END) AS aging_30,
@@ -144,19 +132,19 @@ $aging = $pdo->query("
         SUM(CASE WHEN DATEDIFF(CURDATE(),f.date_facture)>90 THEN CAST(f.reste AS DECIMAL(12,2)) ELSE 0 END) AS aging_plus
     FROM facture f LEFT JOIN contact ct ON f.contact_id=ct.code_contact
     WHERE CAST(f.reste AS DECIMAL(12,2))>0 AND (ct.type_contact='CLIENT' OR f.categorie_facture='CLIENT' OR f.type_facture='VENTE')
-")->fetch();
+")->fetch(PDO::FETCH_ASSOC);
 
 $paiementsParMode = $pdo->query("
     SELECT COALESCE(mode_reglement,'Non specifie') AS mode, COUNT(*) AS nb_transactions,
         COALESCE(SUM(CAST(montant_transaction AS DECIMAL(12,2))),0) AS montant_total
     FROM transaction WHERE type_transaction IN ('Encaissement','Paiement') AND etat_transaction IN ('Succes','Valide')
     GROUP BY mode_reglement ORDER BY montant_total DESC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $totalPaiements = $pdo->query("
     SELECT COALESCE(SUM(CAST(montant_transaction AS DECIMAL(12,2))),0) AS total_montant, COUNT(*) AS nb_transactions
     FROM transaction WHERE type_transaction IN ('Encaissement','Paiement') AND etat_transaction IN ('Succes','Valide')
-")->fetch();
+")->fetch(PDO::FETCH_ASSOC);
 
 $historiquePaiements = $pdo->query("
     SELECT t.numero_transaction, t.date_transaction, t.heure_transaction, t.montant_transaction, t.montant_total,
@@ -164,11 +152,300 @@ $historiquePaiements = $pdo->query("
         ct.nom_prenom_contact AS client, f.numero_facture
     FROM transaction t LEFT JOIN contact ct ON t.contact_id=ct.code_contact LEFT JOIN facture f ON t.facture_id=f.numero_facture
     WHERE t.type_transaction IN ('Encaissement','Paiement') ORDER BY t.date_transaction DESC, t.heure_transaction DESC LIMIT 100
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
 
-$categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='Actif'")->fetchAll();
-$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique='Actif'")->fetchAll();
-$clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact WHERE type_contact='CLIENT'")->fetchAll();
+$categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='Actif'")->fetchAll(PDO::FETCH_ASSOC);
+$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique='Actif'")->fetchAll(PDO::FETCH_ASSOC);
+$clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact WHERE type_contact='CLIENT'")->fetchAll(PDO::FETCH_ASSOC);
+
+// ---- BOUTIQUE POUR L'EN-TÊTE ----
+$boutique = $pdo->query("SELECT * FROM boutique WHERE etat_boutique = 'Actif' LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+if (!$boutique) {
+    $boutique = [
+        'nom_boutique' => 'ABC DISTRIBUTION SARL',
+        'adresse_boutique' => '01 BP 1234 Bouaké 01',
+        'ville_boutique' => 'Bouaké',
+        'pays_boutique' => 'Côte d\'Ivoire',
+        'telephone_boutique' => '+225 07 08 09 10 11',
+        'email_boutique' => 'contact@abcdistribution.ci'
+    ];
+}
+
+// ============================================
+// TRAITEMENT EXPORT PDF (POST) — PAYSAGE
+// ============================================
+if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && isset($_POST['table'])) {
+    $table = $_POST['table'];
+    $allowedTables = ['ventes', 'top_vendus', 'top_clients', 'paiements'];
+    if (!in_array($table, $allowedTables)) {
+        die('Table non autorisée.');
+    }
+
+    error_reporting(0);
+    while (ob_get_level()) ob_end_clean();
+
+    $pdf = new FPDF('L', 'mm', 'A4');
+    $pdf->AddPage();
+    $pdf->SetFont('Arial', '', 10);
+
+    $blueDark = [0, 51, 102];
+    $toLatin = function($chaine) { return safeText($chaine); };
+
+    $yStart = 10;
+    $pageWidth = 297;
+    $margin = 10;
+    $maxWidth = $pageWidth - 2 * $margin;
+
+    // ---- EN-TÊTE MINIMAL ----
+    $pdf->SetFont('Arial', 'B', 14);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->Text($margin, $yStart + 6, $toLatin(strtoupper($boutique['nom_boutique'])));
+
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetTextColor(80, 80, 80);
+    $pdf->Text($margin, $yStart + 11, $toLatin("Tél. : " . $boutique['telephone_boutique'] . " | Email : " . $boutique['email_boutique']));
+
+    $titreDoc = match($table) {
+        'ventes' => 'DÉTAIL DES VENTES',
+        'top_vendus' => 'TOP 10 PRODUITS VENDUS',
+        'top_clients' => 'TOP 10 CLIENTS',
+        'paiements' => 'HISTORIQUE DES PAIEMENTS'
+    };
+    $pdf->SetFont('Arial', 'B', 22);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->SetXY(0, $yStart + 10);
+    $pdf->Cell($pageWidth, 10, $toLatin($titreDoc), 0, 1, 'C');
+
+    $pdf->SetFont('Arial', '', 9);
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->Text(215, $yStart + 20, $toLatin('Date export : ' . date('d/m/Y H:i')));
+
+    $pdf->SetDrawColor(200, 200, 200);
+    $pdf->Line($margin, 42, $pageWidth - $margin, 42);
+
+    $yTable = 48;
+    $pageBottom = 195;
+    $headerH = 7;
+    $rowH = 6;
+
+    $drawTableHeader = function($pdf, $colWidths, $headers, &$yTable, $headerH, $blueDark, $toLatin, $margin) {
+        $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->SetTextColor(255, 255, 255);
+        $pdf->SetFont('Arial', 'B', 7);
+        $x = $margin;
+        foreach ($headers as $i => $h) {
+            $label = $toLatin($h);
+            $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
+            $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
+            $x += $colWidths[$i];
+        }
+    };
+
+    $drawTableRow = function($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin) {
+        $x = $margin;
+        foreach ($data as $i => $val) {
+            $label = $toLatin((string)$val);
+            $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
+            $pdf->Text($x + 1, $yCurrent + 4.5, $label);
+            $x += $colWidths[$i];
+        }
+    };
+
+    $totalGeneral = 0;
+
+    switch ($table) {
+        case 'ventes':
+            if (empty($bilanVentes)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée à afficher.'));
+                break;
+            }
+            $colWidths = [18, 18, 30, 40, 18, 15, 20, 20, 25, 25, 20, 18];
+            $headers = ['N°', 'Date', 'Client', 'Produit', 'Cat.', 'Qte', 'HT', 'TVA', 'TTC', 'Benef.', 'Bout.', 'État'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            $totalTTC = 0;
+            $totalBenef = 0;
+            foreach ($bilanVentes as $v) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                // Réinitialiser la couleur du texte pour les données
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $data = [
+                    $v['numero_commande'],
+                    $v['date_commande'] . ' ' . substr($v['heure_commande'] ?? '', 0, 5),
+                    $v['client'] ?? 'Comptoir',
+                    $v['titre_produit'] ?? '—',
+                    $v['titre_categorie'] ?? '—',
+                    $v['quantite_commande'] . ' ' . ($v['unite_affichage'] ?? ''),
+                    number_format($v['montant_ht_calc'], 0, ',', ' '),
+                    number_format($v['tva_calc'], 0, ',', ' '),
+                    number_format($v['montant_commande'], 0, ',', ' '),
+                    number_format($v['benefice_calc'], 0, ',', ' '),
+                    $v['nom_boutique'] ?? '—',
+                    $v['etat_commande']
+                ];
+                $totalTTC += floatval($v['montant_commande']);
+                $totalBenef += floatval($v['benefice_calc']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('TOTAL TTC : ' . number_format($totalTTC, 0, ',', ' ') . ' FCFA  |  BÉNÉFICE : ' . number_format($totalBenef, 0, ',', ' ') . ' FCFA'));
+            break;
+
+        case 'top_vendus':
+            if (empty($topProduitsVendus)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée.'));
+                break;
+            }
+            $colWidths = [12, 45, 25, 22, 22, 30];
+            $headers = ['#', 'Produit', 'Cat.', 'Qte', 'Ventes', 'CA'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            $totalCA = 0;
+            foreach ($topProduitsVendus as $idx => $p) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $data = [
+                    $idx + 1,
+                    $p['titre_produit'],
+                    $p['titre_categorie'] ?? '—',
+                    $p['qte_vendue'],
+                    $p['nb_ventes'],
+                    number_format($p['ca'], 0, ',', ' ')
+                ];
+                $totalCA += floatval($p['ca']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('CA TOTAL (TOP 10) : ' . number_format($totalCA, 0, ',', ' ') . ' FCFA'));
+            break;
+
+        case 'top_clients':
+            if (empty($topClients)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée.'));
+                break;
+            }
+            $colWidths = [12, 40, 25, 20, 30, 25];
+            $headers = ['#', 'Client', 'Tel.', 'Achats', 'CA', 'Dernier'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            $totalCA = 0;
+            foreach ($topClients as $idx => $c) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $data = [
+                    $idx + 1,
+                    $c['nom_prenom_contact'],
+                    $c['telephone_contact'],
+                    $c['nb_achats'],
+                    number_format($c['ca_total'], 0, ',', ' '),
+                    $c['dernier_achat'] ?? '—'
+                ];
+                $totalCA += floatval($c['ca_total']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('CA TOTAL (TOP 10 CLIENTS) : ' . number_format($totalCA, 0, ',', ' ') . ' FCFA'));
+            break;
+
+        case 'paiements':
+            if (empty($historiquePaiements)) {
+                $pdf->SetFont('Arial', 'I', 12);
+                $pdf->SetTextColor(0,0,0);
+                $pdf->Text($margin, $yTable + 10, $toLatin('Aucune donnée.'));
+                break;
+            }
+            $colWidths = [22, 22, 22, 20, 20, 30, 22, 18];
+            $headers = ['N°', 'Date', 'Montant', 'Type', 'Mode', 'Client', 'Facture', 'État'];
+            $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+            $yCurrent = $yTable + $headerH;
+            $totalMontant = 0;
+            foreach ($historiquePaiements as $hp) {
+                if ($yCurrent + $rowH > $pageBottom) {
+                    $pdf->AddPage();
+                    $yTable = 15;
+                    $yCurrent = $yTable + $headerH;
+                    $drawTableHeader($pdf, $colWidths, $headers, $yTable, $headerH, $blueDark, $toLatin, $margin);
+                }
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 6.5);
+                $data = [
+                    $hp['numero_transaction'],
+                    $hp['date_transaction'] . ' ' . substr($hp['heure_transaction'] ?? '', 0, 5),
+                    number_format($hp['montant_transaction'], 0, ',', ' '),
+                    $hp['type_transaction'],
+                    $hp['mode_reglement'] ?? '—',
+                    $hp['client'] ?? '—',
+                    $hp['numero_facture'] ?? '—',
+                    $hp['etat_transaction']
+                ];
+                $totalMontant += floatval($hp['montant_transaction']);
+                $drawTableRow($pdf, $data, $colWidths, $yCurrent, $rowH, $toLatin, $margin);
+                $yCurrent += $rowH;
+            }
+            if ($yCurrent + $rowH > $pageBottom) {
+                $pdf->AddPage();
+                $yCurrent = 15;
+            }
+            $pdf->SetTextColor(0, 0, 0);
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($margin, $yCurrent, $maxWidth, $rowH, 'FD');
+            $pdf->Text($margin + 2, $yCurrent + 4.5, $toLatin('MONTANT TOTAL : ' . number_format($totalMontant, 0, ',', ' ') . ' FCFA'));
+            break;
+    }
+
+    while (ob_get_level()) ob_end_clean();
+    $pdf->Output('D', 'Rapport_' . $table . '_' . date('Ymd') . '.pdf');
+    exit;
+}
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -181,6 +458,7 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
+        /* ===== STYLES CSS (inchangés) ===== */
         :root {
             --primary: #1e40af;
             --primary-dark: #1e3a8a;
@@ -388,27 +666,21 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
         .kpi-icon.blue {
             background: linear-gradient(135deg, var(--primary-mid), var(--primary));
         }
-
         .kpi-icon.blue-dark {
             background: linear-gradient(135deg, var(--primary), var(--primary-dark));
         }
-
         .kpi-icon.emerald {
             background: linear-gradient(135deg, var(--success), #047857);
         }
-
         .kpi-icon.amber {
             background: linear-gradient(135deg, var(--accent), #b45309);
         }
-
         .kpi-icon.rose {
             background: linear-gradient(135deg, #e11d48, #be123c);
         }
-
         .kpi-icon.violet {
             background: linear-gradient(135deg, var(--purple), #6d28d9);
         }
-
         .kpi-icon.sky {
             background: linear-gradient(135deg, #0284c7, #0369a1);
         }
@@ -431,19 +703,15 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
         .kpi-value.blue {
             color: var(--primary-mid);
         }
-
         .kpi-value.green {
             color: var(--success);
         }
-
         .kpi-value.red {
             color: var(--danger);
         }
-
         .kpi-value.orange {
             color: var(--warning);
         }
-
         .kpi-value.purple {
             color: var(--purple);
         }
@@ -470,7 +738,6 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
             background: var(--success-light);
             color: var(--success);
         }
-
         .kpi-spark.down {
             background: var(--danger-light);
             color: var(--danger);
@@ -719,7 +986,6 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
                 opacity: 0;
                 transform: translateY(6px);
             }
-
             to {
                 opacity: 1;
                 transform: translateY(0);
@@ -774,6 +1040,7 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
             display: flex;
             align-items: center;
             gap: 5px;
+            border: none;
         }
 
         .btn-action:hover {
@@ -879,37 +1146,30 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
             background: var(--success-light);
             color: #065f46;
         }
-
         .badge-warning {
             background: var(--warning-light);
             color: #9a3412;
         }
-
         .badge-danger {
             background: var(--danger-light);
             color: #991b1b;
         }
-
         .badge-info {
             background: var(--info-light);
             color: #075985;
         }
-
         .badge-purple {
             background: var(--purple-light);
             color: #5b21b6;
         }
-
         .badge-secondary {
             background: #e2e8f0;
             color: #475569;
         }
-
         .badge-blue {
             background: var(--primary-light);
             color: var(--primary);
         }
-
         .badge-amber {
             background: #fef3c7;
             color: #92400e;
@@ -955,15 +1215,12 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
         .aging-30 {
             background: linear-gradient(135deg, #f59e0b, #d97706);
         }
-
         .aging-60 {
             background: linear-gradient(135deg, #f97316, #ea580c);
         }
-
         .aging-90 {
             background: linear-gradient(135deg, #ef4444, #dc2626);
         }
-
         .aging-plus {
             background: linear-gradient(135deg, #991b1b, #7f1d1d);
         }
@@ -983,15 +1240,12 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
         .rank-1 {
             background: linear-gradient(135deg, #fbbf24, #f59e0b);
         }
-
         .rank-2 {
             background: linear-gradient(135deg, #9ca3af, #6b7280);
         }
-
         .rank-3 {
             background: linear-gradient(135deg, #d97706, #b45309);
         }
-
         .rank-other {
             background: var(--primary-mid);
         }
@@ -1049,15 +1303,12 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
         .toast.success {
             border-color: var(--success);
         }
-
         .toast.error {
             border-color: var(--danger);
         }
-
         .toast.warning {
             border-color: var(--warning);
         }
-
         .toast.info {
             border-color: var(--primary-mid);
         }
@@ -1070,11 +1321,9 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
         .toast.success .toast-icon {
             color: var(--success);
         }
-
         .toast.error .toast-icon {
             color: var(--danger);
         }
-
         .toast.info .toast-icon {
             color: var(--primary-mid);
         }
@@ -1106,7 +1355,6 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
                 transform: translateX(120%);
                 opacity: 0;
             }
-
             to {
                 transform: translateX(0);
                 opacity: 1;
@@ -1117,7 +1365,6 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
             from {
                 opacity: 1;
             }
-
             to {
                 transform: translateX(120%);
                 opacity: 0;
@@ -1152,24 +1399,19 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
             .page-wrapper {
                 padding: 12px 10px 40px;
             }
-
             .kpi-row {
                 grid-template-columns: repeat(2, 1fr);
             }
-
             .tab-content {
                 padding: 16px 12px 20px;
             }
-
             .charts-grid,
             .split-row {
                 grid-template-columns: 1fr;
             }
-
             .aging-row {
                 grid-template-columns: repeat(2, 1fr);
             }
-
             .page-header {
                 flex-direction: column;
                 gap: 10px;
@@ -1312,7 +1554,13 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
 
             <h3 class="section-title">
                 <div class="section-title-left"><i class="fas fa-chart-line"></i> Detail Ventes</div>
-                <div class="section-actions"><button class="btn-action" onclick="exporterTableCSV('tableVentes','ventes')"><i class="fas fa-file-csv"></i> CSV</button></div>
+                <div class="section-actions">
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="ventes">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);"><i class="fas fa-file-pdf"></i> PDF</button>
+                    </form>
+                </div>
             </h3>
             <?php if (count($bilanVentes) > 0): ?>
                 <div class="table-wrapper">
@@ -1380,7 +1628,13 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
         <div id="tabB" class="tab-content">
             <h3 class="section-title">
                 <div class="section-title-left"><i class="fas fa-trophy"></i> Top 10 Vendus</div>
-                <div class="section-actions"><button class="btn-action" onclick="exporterTableCSV('tableTopVendus','top_vendus')"><i class="fas fa-file-csv"></i> CSV</button></div>
+                <div class="section-actions">
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="top_vendus">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);"><i class="fas fa-file-pdf"></i> PDF</button>
+                    </form>
+                </div>
             </h3>
             <?php if (count($topProduitsVendus) > 0): ?>
                 <div class="table-wrapper">
@@ -1501,7 +1755,13 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
 
             <h3 class="section-title">
                 <div class="section-title-left"><i class="fas fa-users"></i> Top 10 Clients</div>
-                <div class="section-actions"><button class="btn-action" onclick="exporterTableCSV('tableTopClients','top_clients')"><i class="fas fa-file-csv"></i> CSV</button></div>
+                <div class="section-actions">
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="top_clients">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);"><i class="fas fa-file-pdf"></i> PDF</button>
+                    </form>
+                </div>
             </h3>
             <?php if (count($topClients) > 0): ?>
                 <div class="table-wrapper">
@@ -1694,7 +1954,13 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
 
             <h3 class="section-title">
                 <div class="section-title-left"><i class="fas fa-history"></i> Historique Paiements</div>
-                <div class="section-actions"><button class="btn-action" onclick="exporterTableCSV('tablePaiements','paiements')"><i class="fas fa-file-csv"></i> CSV</button></div>
+                <div class="section-actions">
+                    <form method="post" target="_blank" style="display:inline-block;">
+                        <input type="hidden" name="export_pdf" value="1">
+                        <input type="hidden" name="table" value="paiements">
+                        <button type="submit" class="btn-action" style="background:var(--accent);color:white;border-color:var(--accent);"><i class="fas fa-file-pdf"></i> PDF</button>
+                    </form>
+                </div>
             </h3>
             <?php if (count($historiquePaiements) > 0): ?>
                 <div class="table-wrapper">
@@ -1733,6 +1999,7 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
     </div>
 
     <script>
+        // ===== SCRIPTS (inchangés) =====
         function switchTab(btn, tabId) {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -1801,7 +2068,7 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
                         if (d < ws) show = false;
                     }
                     if (periode === 'mois' && (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear())) show = false;
-                    if (periode === 'trimestre' && QUARTER(rd) !== QUARTER(now.toISOString())) show = false;
+                    if (periode === 'trimestre' && Math.floor(d.getMonth()/3) !== Math.floor(now.getMonth()/3)) show = false;
                     if (periode === 'annee' && d.getFullYear() !== now.getFullYear()) show = false;
                 }
                 if (search && !row.dataset.search.includes(search)) show = false;
@@ -1824,25 +2091,7 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
             showToast('info', 'Filtres', 'Reinitialises.');
         }
 
-        function exporterTableCSV(tableId, filename) {
-            const table = document.getElementById(tableId);
-            if (!table) return;
-            let csv = '';
-            table.querySelectorAll('tr').forEach(row => {
-                const cells = row.querySelectorAll('th,td');
-                csv += Array.from(cells).map(c => '"' + c.textContent.trim().replace(/\n/g, ' ').replace(/"/g, '""') + '"').join(';') + '\n';
-            });
-            const blob = new Blob([csv], {
-                type: 'text/csv;charset=utf-8;'
-            });
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = filename + '_' + new Date().toISOString().slice(0, 10) + '.csv';
-            link.click();
-            showToast('success', 'Export', link.download + ' genere.');
-        }
-
-        // CHARTS
+        // ---- CHARTS ----
         document.addEventListener('DOMContentLoaded', function() {
             const fontCfg = {
                 family: 'Plus Jakarta Sans',
@@ -1879,25 +2128,10 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
                     },
                     options: {
                         responsive: true,
-                        plugins: {
-                            legend: legendCfg
-                        },
+                        plugins: { legend: legendCfg },
                         scales: {
-                            y: {
-                                beginAtZero: true,
-                                ticks: {
-                                    font: fontCfg
-                                },
-                                grid: gridCfg
-                            },
-                            x: {
-                                ticks: {
-                                    font: fontCfg
-                                },
-                                grid: {
-                                    display: false
-                                }
-                            }
+                            y: { beginAtZero: true, ticks: { font: fontCfg }, grid: gridCfg },
+                            x: { ticks: { font: fontCfg }, grid: { display: false } }
                         }
                     }
                 });
@@ -1917,9 +2151,7 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
                     },
                     options: {
                         responsive: true,
-                        plugins: {
-                            legend: legendCfg
-                        },
+                        plugins: { legend: legendCfg },
                         cutout: '55%'
                     }
                 });
@@ -1939,9 +2171,7 @@ $clientsList = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact
                     },
                     options: {
                         responsive: true,
-                        plugins: {
-                            legend: legendCfg
-                        },
+                        plugins: { legend: legendCfg },
                         cutout: '55%'
                     }
                 });

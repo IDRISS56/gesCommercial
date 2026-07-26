@@ -6,7 +6,7 @@ session_start();
 
 // Si l'utilisateur est déjà connecté, rediriger vers le dashboard
 if (isset($_SESSION['user_id'])) {
-    header('Location: utilisateur/menu');
+    header('Location: publics/dashboard');
     exit;
 }
 
@@ -32,7 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['login'] = $user['login'];
             $_SESSION['role'] = $user['role'];
             $_SESSION['boutique_id'] = $user['boutique_id'];
-            header('Location: dashboard.php');
+            header('Location: publics/dashboard');
             exit;
         } else {
             $error = 'Identifiants incorrects ou compte inactif.';
