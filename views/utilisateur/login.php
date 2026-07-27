@@ -1,12 +1,12 @@
 <?php
 // login.php – Page de connexion
-require_once 'databases/database.php';
+require 'databases/database.php';
 
-session_start();
+
 
 // Si l'utilisateur est déjà connecté, rediriger vers le dashboard
 if (isset($_SESSION['user_id'])) {
-    header('Location: publics/dashboard');
+    header('Location: ../publics/dashboard');
     exit;
 }
 
@@ -21,19 +21,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         // Vérifier les identifiants (le mot de passe est en clair dans la base, mais on peut utiliser password_verify si haché)
         // Ici, on suppose que le mot de passe est stocké en clair (à améliorer)
-        $stmt = $pdo->prepare("SELECT id, nom_prenom, login, mdp, role, boutique_id, etat FROM utilisateur WHERE login = ? AND etat = 'Actif'");
-        $stmt->execute([$login]);
+        $stmt = $pdo->prepare("SELECT * FROM utilisateur WHERE login = ? AND mdp= ? AND etat = 'Actif'");
+        $stmt->execute([$login, $password]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($user && $user['mdp'] === $password) {
+         
+        if (!empty($user)) {
             // Connexion réussie
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['nom_prenom'] = $user['nom_prenom'];
             $_SESSION['login'] = $user['login'];
             $_SESSION['role'] = $user['role'];
+            $_SESSION['mdp'] = $user['mdp'];
             $_SESSION['boutique_id'] = $user['boutique_id'];
-            header('Location: publics/dashboard');
-            exit;
+            ?>
+            <script type='text/javascript'>document.location.replace('<?php if(substr(((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"])),-1) =="/"){ echo (substr(((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"])), 0,-1)); }else{ echo ((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"]));} ?>/utilisateur/menu');</script>
+            <?php
         } else {
             $error = 'Identifiants incorrects ou compte inactif.';
         }

@@ -1,168 +1,183 @@
 <?php
 ob_start();
-
-// Fonction utilitaire pour envoyer une réponse JSON propre
-function sendJson($data)
-{
-    while (ob_get_level() > 0) {
-        ob_end_clean();
-    }
-    header('Content-Type: application/json');
-    echo json_encode($data);
-    exit;
-}
-
-// notification.php – Gestion des notifications (design vente)
-require_once 'databases/database.php';
-
-session_start();
+// views/contact/fournisseur/index.php – Gestion des fournisseurs (design vente)
+require 'databases/database.php';
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
     exit;
 }
 
-$user_id = $_SESSION['user_id'];
-$stmt = $pdo->prepare("SELECT * FROM utilisateur WHERE id = ?");
-$stmt->execute([$user_id]);
+$stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
+$stmt->execute([$_SESSION['user_id']]);
 $user = $stmt->fetch(PDO::FETCH_ASSOC);
-
 if (!$user) {
     session_destroy();
     header('Location: ../utilisateur/login');
     exit;
 }
 
+function e($str) {
+    return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
+}
+function fmt($n) {
+    return number_format(floatval($n), 0, ',', ' ');
+}
 
-// --- Récupération des listes pour les selects (utilisateurs) ---
-$utilisateurs = $pdo->query("SELECT id, nom_prenom FROM utilisateur WHERE etat = 'Actif' ORDER BY nom_prenom")->fetchAll(PDO::FETCH_ASSOC);
+function generateContactId($pdo) {
+    $date = date('Ymd');
+    $prefix = 'CT-' . $date . '-';
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM contact WHERE code_contact LIKE ?");
+    $stmt->execute([$prefix . '%']);
+    $count = intval($stmt->fetchColumn()) + 1;
+    return $prefix . str_pad($count, 4, '0', STR_PAD_LEFT);
+}
 
-// --- Traitement des actions POST ---
+$types_contact = ['Fournisseur']; // seulement Fournisseur
+$statuts_contact = ['Particulier', 'Société', 'Association', 'Autre'];
+$etats = ['Actif', 'Inactif'];
+
 $message = '';
 $messageType = '';
 $action = $_POST['action'] ?? '';
+$csrf_token = $_POST['csrf_token'] ?? '';
 
-if ($action === 'add' || $action === 'edit') {
-    $id = (int)($_POST['id'] ?? 0);
-    $objet = trim($_POST['objet'] ?? '');
-    $titre = trim($_POST['titre'] ?? '');
-    $text = trim($_POST['text'] ?? '');
-    $date = trim($_POST['date'] ?? '');
-    $user = trim($_POST['user'] ?? '');
-    $fichier = trim($_POST['fichier'] ?? '');
-
-    $errors = [];
-    if (empty($titre)) $errors[] = 'Le titre est requis.';
-    if (empty($text)) $errors[] = 'Le texte est requis.';
-    if (empty($date)) $errors[] = 'La date est requise.';
-
-    if (empty($errors)) {
-        try {
-            if ($action === 'add') {
-                $sql = "INSERT INTO notification (objet, titre, text, date, user, fichier)
-                        VALUES (?, ?, ?, ?, ?, ?)";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute([$objet, $titre, $text, $date, $user, $fichier]);
-                $message = "Notification « $titre » ajoutée avec succès.";
-                $messageType = 'success';
-            } elseif ($action === 'edit') {
-                $oldId = (int)($_POST['old_id'] ?? $id);
-                $sql = "UPDATE notification SET objet=?, titre=?, text=?, date=?, user=?, fichier=?
-                        WHERE id = ?";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute([$objet, $titre, $text, $date, $user, $fichier, $oldId]);
-                $message = "Notification « $titre » mise à jour.";
-                $messageType = 'success';
-            }
-        } catch (PDOException $e) {
-            $message = "Erreur : " . $e->getMessage();
-            $messageType = 'danger';
-        }
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (empty($csrf_token) || $csrf_token !== ($_SESSION['csrf_token'] ?? '')) {
+        $message = 'Token de sécurité invalide.';
+        $messageType = 'danger';
     } else {
-        $message = implode('<br>', $errors);
-        $messageType = 'warning';
-    }
-}
+        if ($action === 'add' || $action === 'edit') {
+            $code = trim($_POST['code_contact'] ?? '');
+            $nom = trim($_POST['nom_prenom_contact'] ?? '');
+            $telephone = trim($_POST['telephone_contact'] ?? '');
+            $email = trim($_POST['email_contact'] ?? '');
+            // Type forcé à 'Fournisseur'
+            $type = 'Fournisseur';
+            $statut = trim($_POST['statut_contact'] ?? '');
+            $solde = floatval(str_replace(',', '.', $_POST['solde_contact'] ?? 0));
+            $solde_min = floatval(str_replace(',', '.', $_POST['solde_minimum'] ?? 0));
+            $solde_max = floatval(str_replace(',', '.', $_POST['solde_maximum'] ?? 0));
+            $adresse = trim($_POST['adresse_contact'] ?? '');
+            $etat = trim($_POST['etat_contact'] ?? 'Actif');
 
-// Suppression
-if (isset($_POST['btn_supprimer']) && $_POST['btn_supprimer'] == '1') {
-    $id = (int)($_POST['sai_supprimer_id'] ?? 0);
-    if ($id > 0) {
-        try {
-            $stmt = $pdo->prepare("SELECT titre FROM notification WHERE id = ?");
-            $stmt->execute([$id]);
-            $titre = $stmt->fetchColumn();
-            $stmt = $pdo->prepare("DELETE FROM notification WHERE id = ?");
-            $stmt->execute([$id]);
-            $message = "Notification « $titre » supprimée.";
-            $messageType = 'danger';
-        } catch (PDOException $e) {
-            $message = "Erreur : " . $e->getMessage();
-            $messageType = 'danger';
+            $errors = [];
+            if (empty($nom)) $errors[] = 'Le nom est requis.';
+            if (empty($statut)) $errors[] = 'Le statut est requis.';
+
+            if (empty($errors)) {
+                try {
+                    if ($action === 'add') {
+                        $code = generateContactId($pdo);
+                        $stmt = $pdo->prepare("SELECT COUNT(*) FROM contact WHERE code_contact = ?");
+                        $stmt->execute([$code]);
+                        if ($stmt->fetchColumn() > 0) {
+                            $message = "Ce code contact existe déjà.";
+                            $messageType = 'warning';
+                        } else {
+                            $sql = "INSERT INTO contact (code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, solde_contact, solde_minimum, solde_maximum, adresse_contact, etat_contact)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                            $stmt = $pdo->prepare($sql);
+                            $stmt->execute([$code, $nom, $telephone, $email, $type, $statut, $solde, $solde_min, $solde_max, $adresse, $etat]);
+                            $message = "Fournisseur « $nom » ajouté avec succès. ID : $code";
+                            $messageType = 'success';
+                        }
+                    } elseif ($action === 'edit') {
+                        $oldCode = $_POST['old_code'] ?? $code;
+                        $sql = "UPDATE contact SET code_contact=?, nom_prenom_contact=?, telephone_contact=?, email_contact=?, type_contact=?, statut_contact=?, solde_contact=?, solde_minimum=?, solde_maximum=?, adresse_contact=?, etat_contact=?
+                                WHERE code_contact = ?";
+                        $stmt = $pdo->prepare($sql);
+                        $stmt->execute([$code, $nom, $telephone, $email, $type, $statut, $solde, $solde_min, $solde_max, $adresse, $etat, $oldCode]);
+                        $message = "Fournisseur « $nom » mis à jour.";
+                        $messageType = 'success';
+                    }
+                } catch (PDOException $e) {
+                    $message = "Erreur : " . $e->getMessage();
+                    $messageType = 'danger';
+                }
+            } else {
+                $message = implode('<br>', $errors);
+                $messageType = 'warning';
+            }
+        }
+
+        if ($action === 'delete' && isset($_POST['btn_supprimer']) && $_POST['btn_supprimer'] == '1') {
+            $code = $_POST['sai_supprimer_id'] ?? '';
+            if (!empty($code)) {
+                try {
+                    $stmt = $pdo->prepare("SELECT nom_prenom_contact FROM contact WHERE code_contact = ?");
+                    $stmt->execute([$code]);
+                    $nom = $stmt->fetchColumn();
+                    $stmt = $pdo->prepare("DELETE FROM contact WHERE code_contact = ?");
+                    $stmt->execute([$code]);
+                    $message = "Fournisseur « $nom » supprimé.";
+                    $messageType = 'danger';
+                } catch (PDOException $e) {
+                    $message = "Erreur : " . $e->getMessage();
+                    $messageType = 'danger';
+                }
+            }
         }
     }
 }
 
-// --- AJAX pour le tableau ---
-function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
-{
-    $sql = "SELECT n.*, u.nom_prenom AS user_nom
-            FROM notification n
-            LEFT JOIN utilisateur u ON n.user = u.id
-            WHERE 1=1";
+$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+$csrf_token = $_SESSION['csrf_token'];
+
+function getTableContent($pdo, $search, $page, $perPage = 20) {
+    // Filtre fixe sur 'Fournisseur'
+    $sql = "SELECT * FROM contact WHERE type_contact = 'Fournisseur'";
     $params = [];
     if (!empty($search)) {
-        $sql .= " AND (n.objet LIKE ? OR n.titre LIKE ? OR n.text LIKE ? OR u.nom_prenom LIKE ?)";
+        $sql .= " AND (code_contact LIKE ? OR nom_prenom_contact LIKE ? OR telephone_contact LIKE ? OR email_contact LIKE ?)";
         $like = '%' . $search . '%';
-        for ($i = 0; $i < 4; $i++) $params[] = $like;
-    }
-    if (!empty($filtres['user'])) {
-        $sql .= " AND n.user = ?";
-        $params[] = $filtres['user'];
-    }
-    if (!empty($filtres['date_debut'])) {
-        $sql .= " AND n.date >= ?";
-        $params[] = $filtres['date_debut'];
-    }
-    if (!empty($filtres['date_fin'])) {
-        $sql .= " AND n.date <= ?";
-        $params[] = $filtres['date_fin'];
+        $params[] = $like;
+        $params[] = $like;
+        $params[] = $like;
+        $params[] = $like;
     }
 
-    $countSql = str_replace("SELECT n.*, u.nom_prenom AS user_nom", "SELECT COUNT(*)", $sql);
+    $countSql = str_replace("SELECT *", "SELECT COUNT(*)", $sql);
     $stmt = $pdo->prepare($countSql);
     $stmt->execute($params);
     $total = $stmt->fetchColumn();
     $totalPages = ceil($total / $perPage);
     if ($page > $totalPages && $totalPages > 0) $page = $totalPages;
 
-    $sql .= " ORDER BY n.date DESC, n.id DESC LIMIT " . (($page - 1) * $perPage) . ", $perPage";
+    $sql .= " ORDER BY nom_prenom_contact LIMIT " . (($page - 1) * $perPage) . ", $perPage";
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
-    $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $contacts = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     ob_start();
-    if (empty($notifications)): ?>
+    if (empty($contacts)): ?>
         <tr>
-            <td colspan="7" class="text-center py-5 text-muted">
+            <td colspan="11" class="text-center py-5 text-muted">
                 <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
-                Aucune notification trouvée
+                Aucun fournisseur trouvé
             </td>
         </tr>
     <?php else: ?>
-        <?php foreach ($notifications as $notif): ?>
+        <?php foreach ($contacts as $c): ?>
             <tr>
-                <td class="td-bold"><?= htmlspecialchars($notif['id']) ?></td>
-                <td><?= htmlspecialchars($notif['objet'] ?? '') ?></td>
-                <td><?= htmlspecialchars($notif['titre']) ?></td>
-                <td><?= htmlspecialchars(substr($notif['text'], 0, 100)) . (strlen($notif['text']) > 100 ? '...' : '') ?></td>
-                <td><?= date('d/m/Y H:i', strtotime($notif['date'])) ?></td>
-                <td><?= htmlspecialchars($notif['user_nom'] ?? $notif['user']) ?></td>
+                <td class="td-bold"><?= e($c['code_contact']) ?></td>
+                <td><?= e($c['nom_prenom_contact']) ?></td>
+                <td><?= e($c['telephone_contact'] ?? '—') ?></td>
+                <td><?= e($c['email_contact'] ?? '—') ?></td>
+                <td><?= e($c['type_contact']) ?></td>
+                <td><?= e($c['statut_contact']) ?></td>
+                <td><?= number_format((float)$c['solde_contact'], 0, ',', ' ') ?></td>
+                <td><?= number_format((float)$c['solde_minimum'], 0, ',', ' ') ?></td>
+                <td><?= number_format((float)$c['solde_maximum'], 0, ',', ' ') ?></td>
+                <td>
+                    <span class="status-badge <?= $c['etat_contact'] === 'Actif' ? 'on' : 'off' ?>">
+                        <span class="sdot"></span><?= e($c['etat_contact']) ?>
+                    </span>
+                </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-id="<?= $notif['id'] ?>" title="Voir"><i class="bi bi-eye"></i></button>
-                        <button class="act-btn e editBtn" data-id="<?= $notif['id'] ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
-                        <button class="act-btn d deleteBtn" data-id="<?= $notif['id'] ?>" data-nom="<?= htmlspecialchars($notif['titre']) ?>" title="Supprimer"><i class="bi bi-trash"></i></button>
+                        <button class="act-btn e editBtn" data-code="<?= e($c['code_contact']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
+                        <button class="act-btn d deleteBtn" data-code="<?= e($c['code_contact']) ?>" data-nom="<?= e($c['nom_prenom_contact']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                     </div>
                 </td>
             </tr>
@@ -203,91 +218,48 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                 </ul>
             </nav>
         </div>
-<?php endif;
+    <?php endif;
     $paginationHtml = ob_get_clean();
 
     return [
-        'table' => $tableHtml,
+        'table'      => $tableHtml,
         'pagination' => $paginationHtml,
-        'total' => $total,
-        'page' => $page,
+        'total'      => $total,
+        'page'       => $page,
         'totalPages' => $totalPages
     ];
 }
 
-// --- AJAX pour le tableau ---
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $search = trim($_POST['search'] ?? '');
-    $filtres = [
-        'user' => trim($_POST['user'] ?? ''),
-        'date_debut' => trim($_POST['date_debut'] ?? ''),
-        'date_fin' => trim($_POST['date_fin'] ?? '')
-    ];
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
-    $result = getTableContent($pdo, $search, $filtres, $page);
-    sendJson($result);
+    $result = getTableContent($pdo, $search, $page);
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json');
+    echo json_encode($result);
+    exit;
 }
 
-// --- AJAX pour voir une notification ---
-if (isset($_POST['ajax_view']) && $_POST['ajax_view'] == '1') {
-    $id = (int)($_POST['id'] ?? 0);
-    if ($id <= 0) {
-        sendJson(['success' => false, 'message' => 'ID non spécifié']);
-    }
-    try {
-        $stmt = $pdo->prepare("SELECT n.*, u.nom_prenom AS user_nom
-                               FROM notification n
-                               LEFT JOIN utilisateur u ON n.user = u.id
-                               WHERE n.id = ?");
-        $stmt->execute([$id]);
-        $notif = $stmt->fetch(PDO::FETCH_ASSOC);
-        if ($notif) {
-            sendJson([
-                'success' => true,
-                'id' => $notif['id'],
-                'objet' => $notif['objet'] ?? '',
-                'titre' => $notif['titre'],
-                'text' => $notif['text'],
-                'date' => date('d/m/Y H:i', strtotime($notif['date'])),
-                'user_nom' => $notif['user_nom'] ?? $notif['user'],
-                'fichier' => $notif['fichier'] ?? ''
-            ]);
-        } else {
-            sendJson(['success' => false, 'message' => 'Notification non trouvée']);
-        }
-    } catch (PDOException $e) {
-        sendJson(['success' => false, 'message' => $e->getMessage()]);
-    }
-}
-
-// --- Affichage initial ---
 $search = trim($_POST['search'] ?? '');
-$filtres = [
-    'user' => trim($_POST['user'] ?? ''),
-    'date_debut' => trim($_POST['date_debut'] ?? ''),
-    'date_fin' => trim($_POST['date_fin'] ?? '')
-];
 $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
-$initialData = getTableContent($pdo, $search, $filtres, $page);
+$initialData = getTableContent($pdo, $search, $page);
 
-// Chargement des données pour l'édition (action load_edit)
-$editNotification = null;
-if ($action === 'load_edit' && isset($_POST['edit_id'])) {
-    $id = (int)$_POST['edit_id'];
-    $stmt = $pdo->prepare("SELECT * FROM notification WHERE id = ?");
-    $stmt->execute([$id]);
-    $editNotification = $stmt->fetch(PDO::FETCH_ASSOC);
+$editContact = null;
+if ($action === 'load_edit' && isset($_POST['edit_code'])) {
+    $code = $_POST['edit_code'];
+    $stmt = $pdo->prepare("SELECT * FROM contact WHERE code_contact = ?");
+    $stmt->execute([$code]);
+    $editContact = $stmt->fetch(PDO::FETCH_ASSOC);
 }
 ?>
 <!DOCTYPE html>
 <html lang="fr">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gestion des notifications</title>
+    <title>Gestion des fournisseurs</title>
     <!-- Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Bootstrap Icons -->
@@ -502,7 +474,6 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
             transition: all .2s;
         }
         .act-btn:hover { transform: scale(1.1); }
-        .act-btn.v:hover { color: var(--b); background: var(--bl); border-color: rgba(37,99,235,.15); }
         .act-btn.e:hover { color: var(--wrn); background: var(--wrnl); border-color: rgba(245,158,11,.15); }
         .act-btn.d:hover { color: var(--dng); background: var(--dngl); border-color: rgba(239,68,68,.15); }
 
@@ -554,18 +525,17 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
         }
     </style>
 </head>
-
 <body>
 <div class="W">
     <!-- En-tête -->
     <div class="hdr">
         <div class="hdr-l">
-            <h1>Gestion des notifications</h1>
-            <p>Consultez et gérez vos notifications</p>
+            <h1>Gestion des fournisseurs</h1>
+            <p>Gérez vos fournisseurs</p>
         </div>
         <div class="hdr-r">
-            <div class="hdr-badge"><i class="bi bi-bell"></i> <?= $initialData['total'] ?? 0 ?> notification(s)</div>
-            <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouvelle notification</button>
+            <div class="hdr-badge"><i class="bi bi-people"></i> <?= $initialData['total'] ?? 0 ?> fournisseurs</div>
+            <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouveau fournisseur</button>
         </div>
     </div>
 
@@ -577,25 +547,14 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
         </div>
     <?php endif; ?>
 
-    <!-- Barre de recherche / filtres -->
+    <!-- Barre de recherche -->
     <div class="pbar">
         <form id="searchForm" method="post" onsubmit="return false;">
             <input type="hidden" name="ajax" value="1">
             <input type="hidden" name="page" id="pageInput" value="<?= $page ?>">
             <div class="prow">
                 <label for="searchInput"><i class="bi bi-search"></i> Recherche</label>
-                <input type="text" name="search" id="searchInput" placeholder="Objet, titre, texte..." value="<?= htmlspecialchars($search) ?>" style="flex:1; min-width:150px;">
-                <label for="userFilter">Utilisateur</label>
-                <select name="user" id="userFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un utilisateur...">
-                    <option value="">Tous</option>
-                    <?php foreach ($utilisateurs as $u): ?>
-                        <option value="<?= $u['id'] ?>" <?= ($filtres['user'] == $u['id']) ? 'selected' : '' ?>><?= htmlspecialchars($u['nom_prenom']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-                <label for="date_debut">Début</label>
-                <input type="date" name="date_debut" id="date_debut" value="<?= htmlspecialchars($filtres['date_debut']) ?>" style="width:auto;">
-                <label for="date_fin">Fin</label>
-                <input type="date" name="date_fin" id="date_fin" value="<?= htmlspecialchars($filtres['date_fin']) ?>" style="width:auto;">
+                <input type="text" name="search" id="searchInput" placeholder="Code, nom, téléphone, email..." value="<?= e($search) ?>" style="flex:1; min-width:150px;">
                 <button type="button" class="btn-go" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
                 <button type="button" class="btn-go-outline" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
             </div>
@@ -605,19 +564,23 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
     <!-- Tableau -->
     <div class="data-table-wrap" id="tableWrapper">
         <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
-            <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;">Liste des notifications</h5>
-            <span class="text-muted small" id="totalCount"><?= $initialData['total'] ?> notification(s) - Page <?= $initialData['page'] ?> / <?= max(1, $initialData['totalPages']) ?></span>
+            <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;">Liste des fournisseurs</h5>
+            <span class="text-muted small" id="totalCount"><?= $initialData['total'] ?> fournisseur(s) - Page <?= $initialData['page'] ?> / <?= max(1, $initialData['totalPages']) ?></span>
         </div>
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
                 <thead>
                     <tr>
-                        <th>ID</th>
-                        <th>Objet</th>
-                        <th>Titre</th>
-                        <th>Texte</th>
-                        <th>Date</th>
-                        <th>Utilisateur</th>
+                        <th>Code</th>
+                        <th>Nom</th>
+                        <th>Téléphone</th>
+                        <th>Email</th>
+                        <th>Type</th>
+                        <th>Statut</th>
+                        <th>Solde</th>
+                        <th>Solde min</th>
+                        <th>Solde max</th>
+                        <th>État</th>
                         <th class="text-end">Actions</th>
                     </tr>
                 </thead>
@@ -635,86 +598,122 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
 <!-- ========================================================= -->
 <!-- MODAL FORMULAIRE (ajout/modification) -->
 <!-- ========================================================= -->
-<div class="modal fade" id="notificationModal" tabindex="-1" aria-labelledby="modalTitle" aria-hidden="true">
+<div class="modal fade" id="contactModal" tabindex="-1" aria-labelledby="modalTitle" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-bell text-primary me-2"></i> Nouvelle notification</h5>
+                <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-people-fill text-primary me-2"></i> Nouveau fournisseur</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
             </div>
-            <form method="post" id="notificationForm">
+            <form method="post" id="contactForm">
                 <input type="hidden" name="action" id="formAction" value="add">
-                <input type="hidden" name="old_id" id="oldId" value="">
+                <input type="hidden" name="old_code" id="oldCode" value="">
+                <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
                 <div class="modal-body">
                     <!-- Identification -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-hash me-1"></i> Identification</h6>
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
                     <div class="row g-3 mb-4">
                         <div class="col-md-6">
-                            <label for="id" class="form-label fw-semibold">ID</label>
+                            <label for="code_contact" class="form-label fw-semibold">Code fournisseur</label>
                             <div class="input-group">
                                 <span class="input-group-text"><i class="bi bi-hash"></i></span>
-                                <input type="text" class="form-control" id="id" name="id" readonly value="<?= htmlspecialchars($editNotification['id'] ?? '') ?>">
+                                <input type="text" class="form-control" id="code_contact" name="code_contact" readonly value="<?= e($editContact['code_contact'] ?? generateContactId($pdo)) ?>">
                             </div>
-                            <div class="form-text">L'ID est généré automatiquement</div>
+                            <div class="form-text">ID généré automatiquement</div>
                         </div>
                         <div class="col-md-6">
-                            <label for="titre" class="form-label fw-semibold">Titre <span class="text-danger">*</span></label>
+                            <label for="nom_prenom_contact" class="form-label fw-semibold">Nom et prénom <span class="text-danger">*</span></label>
                             <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-heading"></i></span>
-                                <input type="text" class="form-control" id="titre" name="titre" placeholder="Titre de la notification" value="<?= htmlspecialchars($editNotification['titre'] ?? '') ?>" required>
+                                <span class="input-group-text"><i class="bi bi-person"></i></span>
+                                <input type="text" class="form-control" id="nom_prenom_contact" name="nom_prenom_contact" required placeholder="Jean Dupont" value="<?= e($editContact['nom_prenom_contact'] ?? '') ?>">
                             </div>
                         </div>
                     </div>
 
-                    <!-- Objet et date -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Détails</h6>
+                    <!-- Coordonnées -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-phone me-1"></i> Coordonnées</h6>
                     <div class="row g-3 mb-4">
                         <div class="col-md-6">
-                            <label for="objet" class="form-label fw-semibold">Objet</label>
+                            <label for="telephone_contact" class="form-label fw-semibold">Téléphone</label>
                             <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-tag"></i></span>
-                                <input type="text" class="form-control" id="objet" name="objet" placeholder="Objet (optionnel)" value="<?= htmlspecialchars($editNotification['objet'] ?? '') ?>">
+                                <span class="input-group-text"><i class="bi bi-telephone"></i></span>
+                                <input type="text" class="form-control" id="telephone_contact" name="telephone_contact" placeholder="+225 05..." value="<?= e($editContact['telephone_contact'] ?? '') ?>">
                             </div>
                         </div>
                         <div class="col-md-6">
-                            <label for="date" class="form-label fw-semibold">Date <span class="text-danger">*</span></label>
+                            <label for="email_contact" class="form-label fw-semibold">Email</label>
                             <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-calendar"></i></span>
-                                <input type="datetime-local" class="form-control" id="date" name="date" value="<?= isset($editNotification) ? date('Y-m-d\TH:i', strtotime($editNotification['date'])) : date('Y-m-d\TH:i') ?>" required>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Texte -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-align-left me-1"></i> Texte</h6>
-                    <div class="row g-3 mb-4">
-                        <div class="col-md-12">
-                            <label for="text" class="form-label fw-semibold">Contenu <span class="text-danger">*</span></label>
-                            <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-pencil"></i></span>
-                                <textarea class="form-control" id="text" name="text" rows="5" placeholder="Contenu de la notification..." required><?= htmlspecialchars($editNotification['text'] ?? '') ?></textarea>
+                                <span class="input-group-text"><i class="bi bi-envelope"></i></span>
+                                <input type="email" class="form-control" id="email_contact" name="email_contact" placeholder="contact@example.com" value="<?= e($editContact['email_contact'] ?? '') ?>">
                             </div>
                         </div>
                     </div>
 
-                    <!-- Utilisateur et fichier -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-person me-1"></i> Association</h6>
+                    <!-- Type (masqué car fixe) -->
+                    <input type="hidden" name="type_contact" value="Fournisseur">
+
+                    <!-- Statut -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tags me-1"></i> Statut</h6>
                     <div class="row g-3 mb-4">
                         <div class="col-md-6">
-                            <label for="user" class="form-label fw-semibold">Utilisateur</label>
-                            <select class="selectpicker form-control" id="user" name="user" data-live-search="true" data-live-search-placeholder="Rechercher un utilisateur...">
-                                <option value="">=== Aucun ===</option>
-                                <?php foreach ($utilisateurs as $u): ?>
-                                    <option value="<?= $u['id'] ?>" <?= (isset($editNotification) && $editNotification['user'] == $u['id']) ? 'selected' : '' ?>><?= htmlspecialchars($u['nom_prenom']) ?></option>
+                            <label for="statut_contact" class="form-label fw-semibold">Statut <span class="text-danger">*</span></label>
+                            <select class="form-select" id="statut_contact" name="statut_contact" required>
+                                <option value="">=== Faites votre choix ===</option>
+                                <?php foreach ($statuts_contact as $s): ?>
+                                    <option value="<?= e($s) ?>" <?= (isset($editContact) && $editContact['statut_contact'] == $s) ? 'selected' : '' ?>><?= e($s) ?></option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
-                        <div class="col-md-6">
-                            <label for="fichier" class="form-label fw-semibold">Fichier (nom)</label>
+                    </div>
+
+                    <!-- Soldes -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-coins me-1"></i> Gestion des soldes</h6>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-4">
+                            <label for="solde_contact" class="form-label fw-semibold">Solde</label>
                             <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-file"></i></span>
-                                <input type="text" class="form-control" id="fichier" name="fichier" placeholder="Nom du fichier joint" value="<?= htmlspecialchars($editNotification['fichier'] ?? '') ?>">
+                                <span class="input-group-text"><i class="bi bi-wallet2"></i></span>
+                                <input type="number" step="0.01" class="form-control" id="solde_contact" name="solde_contact" placeholder="0.00" value="<?= e($editContact['solde_contact'] ?? 0) ?>">
                             </div>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="solde_minimum" class="form-label fw-semibold">Solde minimum</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-arrow-down"></i></span>
+                                <input type="number" step="0.01" class="form-control" id="solde_minimum" name="solde_minimum" placeholder="0.00" value="<?= e($editContact['solde_minimum'] ?? 0) ?>">
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="solde_maximum" class="form-label fw-semibold">Solde maximum</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-arrow-up"></i></span>
+                                <input type="number" step="0.01" class="form-control" id="solde_maximum" name="solde_maximum" placeholder="0.00" value="<?= e($editContact['solde_maximum'] ?? 0) ?>">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Adresse -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-geo-alt me-1"></i> Adresse</h6>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-12">
+                            <label for="adresse_contact" class="form-label fw-semibold">Adresse</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-house"></i></span>
+                                <input type="text" class="form-control" id="adresse_contact" name="adresse_contact" placeholder="Adresse complète" value="<?= e($editContact['adresse_contact'] ?? '') ?>">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- État -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-toggle-on me-1"></i> Statut</h6>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="etat_contact" class="form-label fw-semibold">État</label>
+                            <select class="form-select" id="etat_contact" name="etat_contact">
+                                <?php foreach ($etats as $e): ?>
+                                    <option value="<?= e($e) ?>" <?= (isset($editContact) && $editContact['etat_contact'] == $e) ? 'selected' : '' ?>><?= e($e) ?></option>
+                                <?php endforeach; ?>
+                            </select>
                         </div>
                     </div>
                 </div>
@@ -728,26 +727,6 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
 </div>
 
 <!-- ========================================================= -->
-<!-- MODALE : VUE DÉTAIL -->
-<!-- ========================================================= -->
-<div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title fw-bold" id="viewModalLabel">Détails de la notification</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-            </div>
-            <div class="modal-body">
-                <div class="row g-3" id="viewGrid"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ========================================================= -->
 <!-- MODALE : CONFIRMATION SUPPRESSION -->
 <!-- ========================================================= -->
 <div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
@@ -756,7 +735,7 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
             <div class="modal-body text-center p-4">
                 <div class="mb-3"><i class="bi bi-exclamation-triangle-fill text-warning" style="font-size: 3rem;"></i></div>
                 <h5 class="modal-title mb-2" style="font-weight: 600; color: var(--dark);">Confirmer la suppression</h5>
-                <p class="text-danger mb-4">Êtes-vous sûr de vouloir supprimer la notification <strong id="deleteNomNotification"></strong> ?<br>Cette action est irréversible.</p>
+                <p class="text-danger mb-4">Êtes-vous sûr de vouloir supprimer le fournisseur <strong id="deleteNomContact"></strong> ?<br>Cette action est irréversible.</p>
                 <div class="d-flex gap-2 justify-content-center">
                     <button type="button" class="btn btn-outline-secondary" style="border-radius: 10px;" data-bs-dismiss="modal">Annuler</button>
                     <button type="button" class="btn btn-danger" id="confirmDeleteBtn" style="border-radius: 10px; min-width: 120px;"><i class="bi bi-trash3 me-1"></i> Supprimer</button>
@@ -766,15 +745,19 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
     </div>
 </div>
 
-<!-- Formulaires cachés -->
+<!-- Formulaire caché suppression -->
 <form id="deleteForm" method="POST" style="display:none;">
+    <input type="hidden" name="action" value="delete">
     <input type="hidden" name="btn_supprimer" value="1">
     <input type="hidden" name="sai_supprimer_id" id="deleteFormId" value="">
+    <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
 </form>
 
+<!-- Formulaire caché pour action edit -->
 <form method="post" id="actionForm">
     <input type="hidden" name="action" id="actionField">
-    <input type="hidden" name="edit_id" id="editIdField">
+    <input type="hidden" name="edit_code" id="editCodeField">
+    <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
 </form>
 
 <!-- ========================================================= -->
@@ -791,82 +774,36 @@ $(document).ready(function() {
     $('.selectpicker').selectpicker('destroy');
     $('.selectpicker').selectpicker();
 
-    const notificationModal = new bootstrap.Modal(document.getElementById('notificationModal'));
-    const viewModal = new bootstrap.Modal(document.getElementById('viewModal'));
+    const contactModal = new bootstrap.Modal(document.getElementById('contactModal'));
 
     // --- Ajout ---
     $('#addBtn').on('click', function(e) {
         e.preventDefault();
         $('#formAction').val('add');
-        $('#oldId').val('');
-        $('#modalTitle').html('<i class="bi bi-bell text-primary me-2"></i> Nouvelle notification');
-        $('#notificationForm')[0].reset();
-        $('#id').val('');
-
-        $('#titre').val('');
-        $('#objet').val('');
-        $('#text').val('');
-        $('#fichier').val('');
-
-        var now = new Date();
-        var offset = now.getTimezoneOffset() * 60000;
-        var localISOTime = (new Date(Date.now() - offset)).toISOString().slice(0, 16);
-        $('#date').val(localISOTime);
-
-        $('#user').selectpicker('val', '');
-        notificationModal.show();
+        $('#oldCode').val('');
+        $('#modalTitle').html('<i class="bi bi-people-fill text-primary me-2"></i> Nouveau fournisseur');
+        $('#contactForm')[0].reset();
+        $('#code_contact').prop('readonly', true);
+        $('#code_contact').val('<?= generateContactId($pdo) ?>');
+        $('#nom_prenom_contact').val('');
+        $('#telephone_contact').val('');
+        $('#email_contact').val('');
+        $('#statut_contact').val('');
+        $('#solde_contact').val('0');
+        $('#solde_minimum').val('0');
+        $('#solde_maximum').val('0');
+        $('#adresse_contact').val('');
+        $('#etat_contact').val('Actif');
+        contactModal.show();
     });
 
     // --- Édition ---
     $(document).on('click', '.editBtn', function(e) {
         e.preventDefault();
-        const id = $(this).data('id');
+        const code = $(this).data('code');
         $('#actionField').val('load_edit');
-        $('#editIdField').val(id);
+        $('#editCodeField').val(code);
         $('#actionForm').submit();
-    });
-
-    // --- Vue en AJAX ---
-    $(document).on('click', '.viewBtn', function(e) {
-        e.preventDefault();
-        const id = $(this).data('id');
-        $.ajax({
-            url: window.location.href,
-            method: 'POST',
-            data: {
-                ajax_view: '1',
-                id: id
-            },
-            dataType: 'json',
-            success: function(response) {
-                if (response.success) {
-                    $('#viewModalLabel').text('Notification #' + response.id);
-                    const fields = [
-                        ['ID', response.id],
-                        ['Objet', response.objet],
-                        ['Titre', response.titre],
-                        ['Texte', response.text],
-                        ['Date', response.date],
-                        ['Utilisateur', response.user_nom],
-                        ['Fichier', response.fichier]
-                    ];
-                    let html = '';
-                    fields.forEach(([label, value]) => {
-                        let val = value || '—';
-                        html += '<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">' + label + '</div><div class="fw-semibold">' + val + '</div></div></div>';
-                    });
-                    $('#viewGrid').html(html);
-                    viewModal.show();
-                } else {
-                    alert('Erreur : ' + (response.message || 'Notification non trouvée'));
-                }
-            },
-            error: function(xhr, status, error) {
-                console.error('Statut :', status);
-                console.error('Réponse brute :', xhr.responseText);
-                alert('Erreur lors de la récupération des données (code ' + xhr.status + '). Voir console pour détails.');
-            }
-        });
     });
 
     // --- Fonction de recherche AJAX ---
@@ -882,7 +819,7 @@ $(document).ready(function() {
             success: function(data) {
                 $('#tableBody').html(data.table);
                 $('#paginationContainer').html(data.pagination);
-                $('#totalCount').text(data.total + ' notification(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
+                $('#totalCount').text(data.total + ' fournisseur(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
                 $('.page-link').off('click').on('click', function(e) {
                     e.preventDefault();
                     var p = $(this).data('page');
@@ -890,10 +827,8 @@ $(document).ready(function() {
                 });
                 $('.selectpicker').selectpicker('refresh');
             },
-            error: function(xhr, status, error) {
-                console.error('Statut :', status);
-                console.error('Réponse brute :', xhr.responseText);
-                alert('Erreur lors de la recherche (code ' + xhr.status + '). Voir console pour détails.');
+            error: function() {
+                alert('Erreur lors de la recherche.');
             }
         });
     }
@@ -904,41 +839,22 @@ $(document).ready(function() {
         searchTimeout = setTimeout(function() { rechercher(1); }, 300);
     });
 
-    $('#userFilter').on('changed.bs.select', function() {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(function() { rechercher(1); }, 300);
-    });
-
-    $('#date_debut, #date_fin').on('change', function() {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(function() { rechercher(1); }, 300);
-    });
-
     $('#filterBtn').on('click', function() { rechercher(1); });
     $('#resetBtn').on('click', function() {
         $('#searchInput').val('');
-        $('#userFilter').selectpicker('val', '');
-        $('#date_debut').val('');
-        $('#date_fin').val('');
         rechercher(1);
-    });
-
-    // Pagination initiale
-    $('.page-link').on('click', function(e) {
-        e.preventDefault();
-        var page = $(this).data('page');
-        if (page) rechercher(page);
     });
 
     // --- Gestion suppression ---
     $(document).on('click', '.deleteBtn', function(e) {
         e.preventDefault();
-        const id = $(this).data('id');
+        const code = $(this).data('code');
         const nom = $(this).data('nom');
-        $('#deleteNomNotification').text(nom);
-        $('#deleteFormId').val(id);
+        $('#deleteNomContact').text(nom);
+        $('#deleteFormId').val(code);
         $('#deleteConfirmModal').modal('show');
     });
+
     $('#confirmDeleteBtn').on('click', function() {
         $('#deleteForm').submit();
     });
@@ -947,14 +863,14 @@ $(document).ready(function() {
     setTimeout(function() { $('.alert').alert('close'); }, 5000);
 
     // --- Si édition via POST ---
-    <?php if (isset($editNotification) && $action === 'load_edit'): ?>
+    <?php if (isset($editContact) && $action === 'load_edit'): ?>
         $(function() {
             $('#formAction').val('edit');
-            $('#oldId').val('<?= $editNotification['id'] ?>');
-            $('#modalTitle').html('<i class="bi bi-bell text-primary me-2"></i> Modifier la notification');
-            $('#id').val('<?= $editNotification['id'] ?>');
+            $('#oldCode').val('<?= e($editContact['code_contact']) ?>');
+            $('#modalTitle').html('<i class="bi bi-people-fill text-primary me-2"></i> Modifier le fournisseur');
+            $('#code_contact').prop('readonly', true);
             $('.selectpicker').selectpicker('refresh');
-            notificationModal.show();
+            contactModal.show();
         });
     <?php endif; ?>
 });

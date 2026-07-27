@@ -1,23 +1,13 @@
 <?php
 // profile.php – Profil utilisateur (design vente)
-require_once __DIR__ . '/../../databases/database.php';
-session_start();
+require 'databases/database.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: ../utilisateur/login');
-    exit;
-}
 
 $user_id = $_SESSION['user_id'];
 $stmt = $pdo->prepare("SELECT * FROM utilisateur WHERE id = ?");
 $stmt->execute([$user_id]);
 $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-if (!$user) {
-    session_destroy();
-    header('Location: ../utilisateur/login');
-    exit;
-}
 
 function e($str)
 {
@@ -164,7 +154,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         }
 
         .W {
-            max-width: 900px;
             margin: 0 auto;
         }
 
@@ -461,7 +450,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 </div>
                 <div class="actions">
                     <button class="btn-go" id="editProfileBtn"><i class="bi bi-pencil"></i> Modifier</button>
-                    <a href="deconnexion" class="btn-danger"><i class="bi bi-box-arrow-right"></i> Déconnexion</a>
+                    <a hidden href="<?php if(substr(((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"])),-1) =="/"){ echo (substr(((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"])), 0,-1)); }else{ echo ((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"]));} ?>/utilisateur/deconnexion" class="btn-danger"><i class="bi bi-box-arrow-right"></i> Déconnexion</a>
                 </div>
             </div>
 

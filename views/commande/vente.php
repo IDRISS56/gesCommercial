@@ -3,14 +3,13 @@
 // Design dashboard identique à la gestion des prix
 // Intègre la validation des ventes via une modale (style inventaire)
 
-session_start();
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
     exit;
 }
 
-require_once 'databases/database.php';
-require_once 'librairies/fpdf/fpdf.php';
+require 'databases/database.php';
+require 'librairies/fpdf/fpdf.php';
 
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
@@ -379,9 +378,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     exit;
 }
 
-// ---- IMPRESSION PDF (BON DE LIVRAISON) ----
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'print_bon_pdf') {
+// ---- IMPRESSION PDF (BON DE COMMANDE OU BON DE LIVRAISON) ----
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && in_array($_POST['action'], ['print_bon_commande', 'print_bon_livraison'])) {
     $bonId = $_POST['bon_id'] ?? '';
+    $type = $_POST['action'] === 'print_bon_commande' ? 'commande' : 'livraison';
     if (empty($bonId)) die("Numéro de bon manquant.");
 
     $stmt = $pdo->prepare("
@@ -400,6 +400,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
     if (empty($lignes)) die("Aucune ligne trouvée.");
     $bonInfo = $lignes[0];
+    $totalBon = array_sum(array_column($lignes, 'montant_commande'));
 
     $pdf = new FPDF('L', 'mm', 'A4');
     $pdf->AddPage();
@@ -411,6 +412,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         return mb_convert_encoding($chaine, 'ISO-8859-1', 'UTF-8');
     };
 
+    // --- En-tête commun ---
     $yStart = 10;
     $pdf->SetFont('Arial', 'B', 14);
     $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
@@ -425,7 +427,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $pdf->SetFont('Arial', 'B', 22);
     $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
     $pdf->SetXY(0, $yStart + 8);
-    $pdf->Cell(297, 10, $toLatin('BON DE LIVRAISON'), 0, 1, 'C');
+    $titre = $type === 'commande' ? 'BON DE COMMANDE' : 'BON DE LIVRAISON';
+    $pdf->Cell(297, 10, $toLatin($titre), 0, 1, 'C');
 
     $pdf->SetFont('Arial', 'B', 11);
     $pdf->SetTextColor(255, 255, 255);
@@ -439,11 +442,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     if (!empty($bonInfo['facture_id'])) {
         $pdf->Text(200, $yStart + 26, $toLatin('Facture liée : ' . $bonInfo['facture_id']));
     }
+    $pdf->Text(200, $yStart + 32, $toLatin('Statut : ' . $bonInfo['etat_commande']));
+
     $pdf->SetDrawColor(200, 200, 200);
     $pdf->Line(10, 42, 287, 42);
     $yBlocks = 48;
     $drawAddressBlock = function ($pdf, $x, $y, $w, $title, $name, $address, $phone, $email) use ($toLatin, $blueDark, $grayBg) {
-        $h = 30;
+        $h = 38;
         $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
         $pdf->Rect($x, $y, 40, 6, 'F');
         $pdf->SetTextColor(255, 255, 255);
@@ -485,35 +490,216 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $bonInfo['client_email'] ?? ''
     );
 
-    // Tableau sans colonnes prix/montant
-    $colWidths = [18, 100, 30, 20, 20, 24, 24, 24, 16];
-    $headers = ['RÉF.', 'DÉSIGNATION', 'LOT/UNITÉ', 'QTÉ (lots)', 'QTÉ (base)', 'LIVREUR', 'CONTRÔLEUR', 'RESPONSABLE', 'VISA'];
-    $headerH = 8;
-    $rowH = 8;
-    $yTable = 90;
+    // --- Partie tableau selon le type ---
+    if ($type === 'commande') {
+        // --- BON DE COMMANDE : tableau avec prix et total (comme dans achat) ---
+        $colWidths = [22, 122, 28, 18, 22, 28, 37];
+        $headers = ['RÉF.', 'DÉSIGNATION', 'LOT/UNITÉ', 'QTÉ (lots)', 'QTÉ (base)', 'P.U. (FCFA)', 'MONTANT (FCFA)'];
+        $headerH = 8;
+        $rowH = 8;
+        $yTable = 100;
 
-    $drawTableHeader = function () use ($pdf, $colWidths, $headers, $headerH, $toLatin, $blueDark, &$yTable) {
-        $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
-        $pdf->SetTextColor(255, 255, 255);
-        $pdf->SetFont('Arial', 'B', 6.5);
-        $x = 10;
-        foreach ($headers as $i => $h) {
-            $label = $toLatin($h);
-            $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
-            $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
-            $x += $colWidths[$i];
+        $drawTableHeader = function () use ($pdf, $colWidths, $headers, $headerH, $toLatin, $blueDark, &$yTable) {
+            $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
+            $pdf->SetTextColor(255, 255, 255);
+            $pdf->SetFont('Arial', 'B', 7);
+            $x = 10;
+            foreach ($headers as $i => $h) {
+                $label = $toLatin($h);
+                $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
+                $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
+                $x += $colWidths[$i];
+            }
+            $yTable += $headerH;
+        };
+        $drawTableHeader();
+
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->SetFont('Arial', '', 8);
+        $yCurrent = $yTable;
+
+        foreach ($lignes as $ligne) {
+            if ($yCurrent + $rowH > 200) {
+                $pdf->AddPage();
+                $yTable = 20;
+                $yCurrent = $yTable;
+                $drawTableHeader();
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 8);
+            }
+
+            $ref = $ligne['produit_id'];
+            $des = substr($ligne['titre_produit'] ?? $ligne['produit_id'], 0, 60);
+            $unite = $ligne['unite_affichage'] ?? 'Unité';
+            $facteur = intval($ligne['facteur_conversion'] ?: 1);
+            $qtLots = $ligne['quantite_commande'] / max(1, $facteur);
+            $qtBase = $ligne['quantite_commande'];
+            $pu = (float)$ligne['prix_commande'];
+            $totalLigne = (float)$ligne['montant_commande'];
+
+            $data = [$ref, $des, $unite, number_format($qtLots, 0), $qtBase, number_format($pu, 0, ',', ' '), number_format($totalLigne, 0, ',', ' ')];
+            $x = 10;
+            foreach ($data as $i => $val) {
+                $align = ($i >= 3 && $i != 4) ? 'C' : (($i >= 5) ? 'R' : 'L');
+                $label = $toLatin((string)$val);
+                $txtX = ($align == 'R') ? $x + $colWidths[$i] - 2 - $pdf->GetStringWidth($label) : (($align == 'C') ? $x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2) : $x + 1);
+                $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
+                $pdf->Text($txtX, $yCurrent + 5.5, $label);
+                $x += $colWidths[$i];
+            }
+            $yCurrent += $rowH;
         }
-        $yTable += $headerH;
-    };
-    $drawTableHeader();
 
-    $pdf->SetTextColor(0, 0, 0);
-    $pdf->SetFont('Arial', '', 7);
-    $yCurrent = $yTable;
-    $totalLots = 0;
-    $totalBase = 0;
+        // ---- Totaux, observations, signatures (comme dans achat) ----
+        $yAfterLines = $yCurrent + 5;
+        $pageHeight = 210;
+        $marginBottom = 15;
+        if ($yAfterLines + 50 > $pageHeight - $marginBottom) {
+            $pdf->AddPage();
+            $yAfterLines = 20;
+        }
 
-    foreach ($lignes as $ligne) {
+        $yObs = $yAfterLines;
+        $wObs = 170;
+        $hObs = 28;
+        $pdf->SetDrawColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->SetLineWidth(0.3);
+        $pdf->Rect(10, $yObs, $wObs, $hObs, 'D');
+        $pdf->SetFont('Arial', 'B', 9);
+        $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->Text(12, $yObs + 6, $toLatin('Observations :'));
+        $pdf->SetFont('Arial', '', 8);
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->SetXY(12, $yObs + 9);
+        $pdf->MultiCell($wObs - 4, 5, $toLatin("Merci de votre confiance.\nVeuillez respecter les délais de livraison."), 0, 'L');
+
+        $xTot = 10 + $wObs + 10;
+        $wTot = 287 - $xTot;
+        $hTot = 7;
+        $pdf->SetFont('Arial', '', 9);
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->Rect($xTot, $yObs, $wTot, $hTot, 'D');
+        $pdf->Text($xTot + 2, $yObs + 5, $toLatin('TOTAL HT'));
+        $pdf->SetXY($xTot, $yObs + 5);
+        $pdf->Cell($wTot - 2, 0, number_format($totalBon, 0, ',', ' '), 0, 0, 'R');
+
+        $pdf->SetFillColor($blueLight[0], $blueLight[1], $blueLight[2]);
+        $pdf->Rect($xTot, $yObs + $hTot, $wTot, $hTot + 2, 'FD');
+        $pdf->SetFont('Arial', 'B', 10);
+        $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->Text($xTot + 2, $yObs + $hTot + 5.5, $toLatin('NET À PAYER'));
+        $pdf->SetXY($xTot, $yObs + $hTot + 5.5);
+        $pdf->Cell($wTot - 2, 0, number_format($totalBon, 0, ',', ' '), 0, 0, 'R');
+
+        $ySig = $yObs + $hObs + 8;
+        if ($ySig + 26 > $pageHeight - $marginBottom) {
+            $pdf->AddPage();
+            $ySig = 20;
+        }
+        $hSig = 26;
+        $wSig = 133;
+        $pdf->SetDrawColor(200, 200, 200);
+        $pdf->Rect(10, $ySig, $wSig, $hSig, 'D');
+        $pdf->SetFont('Arial', 'B', 9);
+        $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->Text(12, $ySig + 5, $toLatin('Le Destinataire'));
+        $pdf->SetFont('Arial', '', 8);
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->Text(12, $ySig + 10, $toLatin('Nom et Signature'));
+
+        $pdf->SetDrawColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->Rect(60, $ySig + 5, 70, $hSig - 6, 'D');
+        $pdf->SetFont('Arial', 'B', 7);
+        $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->Text(63, $ySig + 9, $toLatin($bonInfo['nom_boutique'] ?? ''));
+        $pdf->SetFont('Arial', '', 6);
+        $pdf->Text(63, $ySig + 13, $toLatin($bonInfo['adresse_boutique'] ?? ''));
+        $pdf->Text(63, $ySig + 17, $toLatin('Tél. : ' . ($bonInfo['telephone_boutique'] ?? '')));
+
+        $xClient = 10 + $wSig + 21;
+        $pdf->SetDrawColor(200, 200, 200);
+        $pdf->Rect($xClient, $ySig, $wSig, $hSig, 'D');
+        $pdf->SetFont('Arial', 'B', 9);
+        $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+        $pdf->Text($xClient + 2, $ySig + 5, $toLatin('Le Fournisseur'));
+        $pdf->SetFont('Arial', '', 8);
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->Text($xClient + 2, $ySig + 10, $toLatin('Nom et Signature'));
+
+    } else {
+        // --- BON DE LIVRAISON : tableau simplifié (pas de prix) ---
+        $colWidths = [18, 100, 30, 20, 20, 24, 24, 24, 16];
+        $headers = ['RÉF.', 'DÉSIGNATION', 'LOT/UNITÉ', 'QTÉ (lots)', 'QTÉ (base)', 'LIVREUR', 'CONTRÔLEUR', 'RESPONSABLE', 'VISA'];
+        $headerH = 8;
+        $rowH = 8;
+        $yTable = 90;
+
+        $drawTableHeader = function () use ($pdf, $colWidths, $headers, $headerH, $toLatin, $blueDark, &$yTable) {
+            $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
+            $pdf->SetTextColor(255, 255, 255);
+            $pdf->SetFont('Arial', 'B', 6.5);
+            $x = 10;
+            foreach ($headers as $i => $h) {
+                $label = $toLatin($h);
+                $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
+                $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
+                $x += $colWidths[$i];
+            }
+            $yTable += $headerH;
+        };
+        $drawTableHeader();
+
+        $pdf->SetTextColor(0, 0, 0);
+        $pdf->SetFont('Arial', '', 7);
+        $yCurrent = $yTable;
+        $totalLots = 0;
+        $totalBase = 0;
+
+        foreach ($lignes as $ligne) {
+            if ($yCurrent + $rowH > 200) {
+                $pdf->AddPage();
+                $yTable = 20;
+                $drawTableHeader();
+                $pdf->SetTextColor(0, 0, 0);
+                $pdf->SetFont('Arial', '', 7);
+                $yCurrent = $yTable;
+            }
+
+            $ref = $ligne['produit_id'];
+            $des = substr($ligne['titre_produit'] ?? $ligne['produit_id'], 0, 60);
+            $unite = $ligne['unite_affichage'] ?? 'Unité';
+            $facteur = intval($ligne['facteur_conversion'] ?: 1);
+            $qtLots = $ligne['quantite_commande'] / max(1, $facteur);
+            $qtBase = $ligne['quantite_commande'];
+
+            $totalLots += $qtLots;
+            $totalBase += $qtBase;
+
+            $data = [
+                $ref,
+                $des,
+                $unite,
+                number_format($qtLots, 0),
+                $qtBase,
+                '', // Livreur
+                '', // Contrôleur
+                '', // Responsable
+                ''  // Visa
+            ];
+
+            $x = 10;
+            foreach ($data as $i => $val) {
+                $align = ($i >= 3 && $i < 5) ? 'C' : (($i >= 5) ? 'C' : 'L');
+                $label = $toLatin((string)$val);
+                $txtX = ($align == 'R') ? $x + $colWidths[$i] - 2 - $pdf->GetStringWidth($label) : (($align == 'C') ? $x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2) : $x + 1);
+                $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
+                $pdf->Text($txtX, $yCurrent + 5.5, $label);
+                $x += $colWidths[$i];
+            }
+            $yCurrent += $rowH;
+        }
+
+        // Ligne des totaux
         if ($yCurrent + $rowH > 200) {
             $pdf->AddPage();
             $yTable = 20;
@@ -522,76 +708,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $pdf->SetFont('Arial', '', 7);
             $yCurrent = $yTable;
         }
-
-        $ref = $ligne['produit_id'];
-        $des = substr($ligne['titre_produit'] ?? $ligne['produit_id'], 0, 60);
-        $unite = $ligne['unite_affichage'] ?? 'Unité';
-        $facteur = intval($ligne['facteur_conversion'] ?: 1);
-        $qtLots = $ligne['quantite_commande'] / max(1, $facteur);
-        $qtBase = $ligne['quantite_commande'];
-
-        $totalLots += $qtLots;
-        $totalBase += $qtBase;
-
-        $data = [
-            $ref,
-            $des,
-            $unite,
-            number_format($qtLots, 0),
-            $qtBase,
-            '', // Livreur
-            '', // Contrôleur
-            '', // Responsable
-            ''  // Visa
+        $dataTot = [
+            'TOTAUX',
+            '',
+            '',
+            number_format($totalLots, 0),
+            $totalBase,
+            '',
+            '',
+            '',
+            ''
         ];
-
         $x = 10;
-        foreach ($data as $i => $val) {
+        foreach ($dataTot as $i => $val) {
             $align = ($i >= 3 && $i < 5) ? 'C' : (($i >= 5) ? 'C' : 'L');
             $label = $toLatin((string)$val);
             $txtX = ($align == 'R') ? $x + $colWidths[$i] - 2 - $pdf->GetStringWidth($label) : (($align == 'C') ? $x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2) : $x + 1);
-            $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
+            $pdf->SetFillColor(240, 240, 240);
+            $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'FD');
+            $pdf->SetTextColor(0, 0, 0);
             $pdf->Text($txtX, $yCurrent + 5.5, $label);
             $x += $colWidths[$i];
         }
         $yCurrent += $rowH;
     }
 
-    // Ligne des totaux
-    if ($yCurrent + $rowH > 200) {
-        $pdf->AddPage();
-        $yTable = 20;
-        $drawTableHeader();
-        $pdf->SetTextColor(0, 0, 0);
-        $pdf->SetFont('Arial', '', 7);
-        $yCurrent = $yTable;
-    }
-    $dataTot = [
-        'TOTAUX',
-        '',
-        '',
-        number_format($totalLots, 0),
-        $totalBase,
-        '',
-        '',
-        '',
-        ''
-    ];
-    $x = 10;
-    foreach ($dataTot as $i => $val) {
-        $align = ($i >= 3 && $i < 5) ? 'C' : (($i >= 5) ? 'C' : 'L');
-        $label = $toLatin((string)$val);
-        $txtX = ($align == 'R') ? $x + $colWidths[$i] - 2 - $pdf->GetStringWidth($label) : (($align == 'C') ? $x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2) : $x + 1);
-        $pdf->SetFillColor(240, 240, 240);
-        $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'FD');
-        $pdf->SetTextColor(0, 0, 0);
-        $pdf->Text($txtX, $yCurrent + 5.5, $label);
-        $x += $colWidths[$i];
-    }
-    $yCurrent += $rowH;
-
     while (ob_get_level()) ob_end_clean();
-    $pdf->Output('I', 'Bon_' . $bonId . '.pdf');
+    $pdf->Output('I', $type . '_' . $bonId . '.pdf');
     exit;
 }
 
@@ -707,10 +850,17 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
             <td><?= e($bon['facture_id'] ?? '—') ?></td>
             <td class="text-end">
                 <form method="POST" style="display:inline-block;">
-                    <input type="hidden" name="action" value="print_bon_pdf">
+                    <input type="hidden" name="action" value="print_bon_commande">
                     <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
-                    <button type="submit" class="act-btn" title="PDF" style="color:#dc3545; border:none; background:transparent; padding:0; width:34px; height:34px;">
-                        <i class="bi bi-file-pdf"></i>
+                    <button type="submit" class="act-btn" title="Bon de commande" style="color:#2563eb; border:none; background:transparent; padding:0; width:34px; height:34px;">
+                        <i class="bi bi-file-earmark-text"></i>
+                    </button>
+                </form>
+                <form method="POST" style="display:inline-block;">
+                    <input type="hidden" name="action" value="print_bon_livraison">
+                    <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
+                    <button type="submit" class="act-btn" title="Bon de livraison" style="color:#dc3545; border:none; background:transparent; padding:0; width:34px; height:34px;">
+                        <i class="bi bi-truck"></i>
                     </button>
                 </form>
             </td>
@@ -1384,12 +1534,19 @@ $ventesEnAttente = $pdo->query("
                             <td><strong><?= fmt($bon['total_bon']) ?> F</strong></td>
                             <td><?= e($bon['adresse_boutique'] ?? '—') ?></td>
                             <td><?= e($bon['facture_id'] ?? '—') ?></td>
-                            <td class="text-end">
+                            <td class="text-end" style="white-space:nowrap;">
                                 <form method="POST" style="display:inline-block;">
-                                    <input type="hidden" name="action" value="print_bon_pdf">
+                                    <input type="hidden" name="action" value="print_bon_commande">
                                     <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
-                                    <button type="submit" class="act-btn" title="PDF" style="color:#dc3545; border:none; background:transparent; padding:0; width:34px; height:34px;">
-                                        <i class="bi bi-file-pdf"></i>
+                                    <button type="submit" class="act-btn" title="Bon de commande" style="color:#2563eb; border:none; background:transparent; padding:0; width:34px; height:34px;">
+                                        <i class="bi bi-file-earmark-text"></i>
+                                    </button>
+                                </form>
+                                <form method="POST" style="display:inline-block;">
+                                    <input type="hidden" name="action" value="print_bon_livraison">
+                                    <input type="hidden" name="bon_id" value="<?= e($bon['bon_id']) ?>">
+                                    <button type="submit" class="act-btn" title="Bon de livraison" style="color:#dc3545; border:none; background:transparent; padding:0; width:34px; height:34px;">
+                                        <i class="bi bi-truck"></i>
                                     </button>
                                 </form>
                             </td>

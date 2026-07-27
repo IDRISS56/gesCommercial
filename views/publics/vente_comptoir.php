@@ -1,26 +1,41 @@
 <?php
-// vc.php – Caisse - Vente Comptoir (refonte complète avec ticket PDF)
+// vente_comptoir.php – Caisse - Vente Comptoir (refonte complète avec ticket PDF)
+// CORRIGÉ : gestion d'erreur AJAX améliorée, URL absolue robuste, redirections évitées pour AJAX
 
-// Nettoyage du buffer
 while (ob_get_level()) ob_end_clean();
 ob_start();
 
-session_start();
-if (!isset($_SESSION['user_id'])) {
-    header('Location: ../utilisateur/login');
+// ---- DÉTECTION PRÉCOCE DES REQUÊTES AJAX ----
+$isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
+$isAjax = $isAjax || (isset($_REQUEST['ajax']) && $_REQUEST['ajax'] == '1');
+
+// Si requête AJAX et session expirée, on répond en JSON sans rediriger
+if ($isAjax && !isset($_SESSION['user_id'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['success' => false, 'message' => 'Session expirée. Veuillez vous reconnecter.']);
+    exit;
+}
+// Sinon, redirection classique si session expirée
+if (!$isAjax && !isset($_SESSION['user_id'])) {
+    header('Location: utilisateur/login');
     exit;
 }
 
-require_once 'databases/database.php';
-require_once 'librairies/fpdf/fpdf.php';
+require 'databases/database.php';
+require 'librairies/fpdf/fpdf.php';
 
-// Vérification de l'utilisateur
+// Vérification de l'utilisateur (pour toutes les requêtes)
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
 $user = $stmt->fetch(PDO::FETCH_ASSOC);
 if (!$user) {
     session_destroy();
-    header('Location: ../utilisateur/login');
+    if ($isAjax) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'message' => 'Utilisateur inactif']);
+        exit;
+    }
+    header('Location: utilisateur/login');
     exit;
 }
 
@@ -75,6 +90,7 @@ $contact_has_statut = columnExists($pdo, 'contact', 'statut_contact');
 try {
     $pdo->exec("ALTER TABLE lot_produit ADD COLUMN quantite INT NOT NULL DEFAULT 0");
 } catch (PDOException $e) {
+    // déjà présente ou autre
 }
 
 // ---- TRAITEMENT DES ACTIONS AJAX ----
@@ -409,11 +425,11 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $stmt->execute([$numero]);
     $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // --- SI FORMAT TICKET (design de la photo) ---
+    // --- SI FORMAT TICKET ---
     if ($format === 'ticket') {
         $pdf = new FPDF('P', 'mm', array(80, 200)); // format ticket 80mm large
         $pdf->AddPage();
-        $pdf->SetFont('Courier', '', 10); // police monospace
+        $pdf->SetFont('Courier', '', 10);
         $pdf->SetMargins(5, 5, 5);
         $pdf->SetAutoPageBreak(true, 5);
 
@@ -432,12 +448,10 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
         $pdf->Cell(70, 5, 'Facture: ' . $facture['numero_facture'], 0, 1, 'L');
         $pdf->Ln(2);
 
-        // Séparateur
         $pdf->SetDrawColor(0);
         $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
         $pdf->Ln(2);
 
-        // En-têtes tableau
         $pdf->SetFont('Courier', 'B', 9);
         $pdf->Cell(30, 5, 'Produit', 0, 0, 'L');
         $pdf->Cell(12, 5, 'Qte', 0, 0, 'C');
@@ -445,7 +459,6 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
         $pdf->Cell(13, 5, 'Montant', 0, 1, 'R');
         $pdf->SetFont('Courier', '', 9);
 
-        // Lignes produits
         foreach ($lignes as $l) {
             $nom = substr($l['titre_produit'] ?? $l['produit_id'], 0, 20);
             $qte = (int)$l['quantite_commande'];
@@ -457,12 +470,10 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
             $pdf->Cell(13, 5, number_format($total, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
         }
 
-        // Séparateur
         $pdf->Ln(2);
         $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
         $pdf->Ln(2);
 
-        // Totaux
         $ht = (float)$facture['montant_ht'];
         $ttc = (float)$facture['montant_ttc'];
         $avance = (float)$facture['avance'];
@@ -474,23 +485,18 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
         $pdf->Cell(50, 6, 'Avance', 0, 0, 'L');
         $pdf->Cell(20, 6, number_format($avance, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
 
-        // Séparateur final
         $pdf->Ln(2);
         $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
         $pdf->Ln(3);
-
-        // Message de remerciement
         $pdf->SetFont('Courier', 'B', 12);
         $pdf->Cell(70, 8, 'Merci !', 0, 1, 'C');
 
-        // Sortie
         while (ob_get_level()) ob_end_clean();
         $pdf->Output('I', 'Ticket_' . $facture['numero_facture'] . '.pdf');
         exit;
     }
 
     // --- SINON : FACTURE COMPLÈTE (paysage) ---
-    // (Repris de l'original, avec le design de l'exemple)
     $boutique = $pdo->query("SELECT * FROM boutique WHERE etat_boutique = 'Actif' LIMIT 1")->fetch(PDO::FETCH_ASSOC);
     if (!$boutique) {
         $boutique = [
@@ -515,7 +521,6 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
         return safeText($chaine);
     };
 
-    // En-tête
     $yStart = 10;
     $pdf->SetFont('Arial', 'B', 14);
     $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
@@ -529,19 +534,16 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $pdf->Text(10, $yStart + 23, $toLatin("Email : " . $boutique['email_boutique']));
     $pdf->Text(10, $yStart + 27, $toLatin("N° CC : CI-BOUA-2020-B-12345   N° Contribuable : 1949444F"));
 
-    // Titre
     $pdf->SetFont('Arial', 'B', 24);
     $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
     $pdf->Text(125, $yStart + 10, $toLatin('FACTURE'));
 
-    // Numéro
     $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
     $pdf->Rect(115, $yStart + 13, 50, 10, 'F');
     $pdf->SetTextColor(255, 255, 255);
     $pdf->SetFont('Arial', 'B', 12);
     $pdf->Text(122, $yStart + 20, $toLatin('N° ' . $facture['numero_facture']));
 
-    // Infos droite
     $pdf->SetFont('Arial', '', 9);
     $pdf->SetTextColor(0, 0, 0);
     $xRight = 200;
@@ -554,11 +556,9 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $pdf->Text($xRight, $yInfo + 15, $toLatin("Mode de paiement"));
     $pdf->Text($xRight + 40, $yInfo + 15, ': ' . ($facture['mode_reglement'] ?? 'Virement bancaire'));
 
-    // Séparateur
     $pdf->SetDrawColor(200, 200, 200);
     $pdf->Line(10, 42, 287, 42);
 
-    // Blocs VENDEUR / CLIENT
     $yBlocks = 48;
     $wBlock = (277 - 10) / 2;
     $drawAddressBlock = function ($pdf, $x, $y, $w, $title, $name, $address, $phone, $email) use ($toLatin, $blueDark, $grayBg) {
@@ -605,7 +605,6 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
         $facture['email_contact'] ?? ''
     );
 
-    // Tableau des lignes
     $yTable = 80;
     $pageBottom = 195;
     $colWidths = [25, 100, 28, 22, 27, 35, 40];
@@ -676,7 +675,6 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
         $yCurrent += $rowH;
     }
 
-    // Totaux
     $yTotals = $yCurrent + 6;
     $wObs = 170;
     $hObs = 28;
@@ -691,7 +689,6 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $pdf->SetXY(12, $yTotals + 9);
     $pdf->MultiCell($wObs - 4, 5, $toLatin($facture['titre_facture'] ?? "Merci de votre confiance.\nVeuillez effectuer le paiement avant la date d'échéance."), 0, 'L');
 
-    // Bloc totaux
     $xTot = 10 + $wObs + 10;
     $wTot = 287 - $xTot;
     $hTot = 7;
@@ -726,7 +723,6 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $pdf->SetXY($xTot, $yTotals + ($hTot * 3) + 5.5);
     $pdf->Cell($wTot - 2, 0, number_format($totalTTC, 0, ',', ' '), 0, 0, 'R');
 
-    // Signatures
     $hSig = 26;
     $ySig = $yTotals + $hObs + 8;
     if ($ySig + $hSig > $pageBottom + 15) {
@@ -2204,12 +2200,9 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
 
     <script>
         // ===== CONFIG =====
-        function getBaseUrl() {
-            const path = window.location.pathname;
-            const base = path.split('?')[0];
-            return window.location.origin + base;
-        }
-        const BASE_URL = getBaseUrl();
+        // Utilisation de l'URL absolue de la page avec ajout de ajax=1 pour forcer la détection AJAX
+        const BASE_URL = window.location.href.split('?')[0] + (window.location.href.includes('?') ? '&' : '?') + 'ajax=1';
+        // On ajoute aussi l'en-tête X-Requested-With pour être sûr
         const CSRF_TOKEN = document.getElementById('csrfToken').value;
 
         function api(action, data = {}) {
@@ -2221,15 +2214,22 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                 payload.csrf_token = CSRF_TOKEN;
             }
             return fetch(BASE_URL, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(payload)
-            }).then(r => {
-                if (!r.ok) throw new Error('HTTP ' + r.status);
-                return r.json();
-            });
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest' // pour forcer la détection AJAX
+                    },
+                    body: JSON.stringify(payload)
+                })
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status + ' - ' + r.statusText);
+                    return r.json();
+                })
+                .catch(err => {
+                    // Affichage d'une erreur plus détaillée
+                    console.error('API Error:', err);
+                    throw new Error('Erreur de connexion au serveur. Vérifiez que le fichier est accessible.');
+                });
         }
 
         // ===== VARIABLES =====
@@ -2297,7 +2297,10 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                 } else {
                     $('categoryBar').classList.add('hidden');
                 }
-            }).catch(() => $('categoryBar').classList.add('hidden'));
+            }).catch(() => {
+                $('categoryBar').classList.add('hidden');
+                toast('Erreur chargement catégories', 'error');
+            });
         }
 
         function filterCategory(cat, btnEl) {
@@ -2326,13 +2329,15 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                         $('resultCount').style.display = 'inline-block';
                     } else {
                         toast(res.message || 'Erreur chargement', 'error');
-                        $('productGrid').innerHTML = `<div class="empty-state"><i class="bi bi-emoji-frown"></i><h3>Erreur</h3><p>${esc(res.message||'')}</p></div>`;
+                        $('productGrid').innerHTML =
+                            `<div class="empty-state"><i class="bi bi-emoji-frown"></i><h3>Erreur</h3><p>${esc(res.message||'')}</p></div>`;
                     }
                 })
-                .catch(() => {
+                .catch(err => {
                     showSearchSpinner(false);
-                    toast('Erreur connexion', 'error');
-                    $('productGrid').innerHTML = `<div class="empty-state"><i class="bi bi-wifi-off"></i><h3>Erreur de connexion</h3><p>Vérifiez le serveur.</p></div>`;
+                    toast(err.message || 'Erreur connexion', 'error');
+                    $('productGrid').innerHTML =
+                        `<div class="empty-state"><i class="bi bi-wifi-off"></i><h3>Erreur de connexion</h3><p>Vérifiez le serveur.</p></div>`;
                 });
         }
 
@@ -2373,21 +2378,22 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                 const inCart = cart.some(item => item.code === p.code_produit);
                 const cardClass = inCart ? 'product-card in-cart' : 'product-card';
                 const catLabel = (p.categorie && p.categorie !== 'Autre') ? `<span class="pc-cat">${esc(p.categorie)}</span>` : '';
-                const lotBadge = (p.lots && p.lots.length > 0) ? `<span class="badge bg-info" style="font-size:9px;margin-left:4px;">${p.lots.length} cond.</span>` : '';
+                const lotBadge = (p.lots && p.lots.length > 0) ? `<span class="badge bg-info" style="font-size:9px;margin-left:4px;">${p.lots.length} cond.</span>` :
+                '';
                 const titleHTML = q ? highlightText(p.titre_produit, q) : esc(p.titre_produit);
                 const codeHTML = q ? highlightText(p.code_produit, q) : esc(p.code_produit);
                 return `
-                    <div class="${cardClass}" onclick="openLotSelection(${i})">
-                        <div class="pc-top">
-                            <div style="flex:1;">${catLabel}${lotBadge}<div class="pc-title">${titleHTML}</div></div>
-                            <span class="pc-stock ${stockClass}">${stockText}</span>
+                        <div class="${cardClass}" onclick="openLotSelection(${i})">
+                            <div class="pc-top">
+                                <div style="flex:1;">${catLabel}${lotBadge}<div class="pc-title">${titleHTML}</div></div>
+                                <span class="pc-stock ${stockClass}">${stockText}</span>
+                            </div>
+                            <div class="pc-bottom">
+                                <div class="pc-price">${fmt(p.prix)}</div>
+                                <div class="pc-code">${codeHTML}</div>
+                            </div>
                         </div>
-                        <div class="pc-bottom">
-                            <div class="pc-price">${fmt(p.prix)}</div>
-                            <div class="pc-code">${codeHTML}</div>
-                        </div>
-                    </div>
-                `;
+                    `;
             }).join('');
         }
 
@@ -2433,12 +2439,13 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                         $('resultCount').style.display = 'inline-block';
                     } else {
                         toast(res.message || 'Erreur recherche', 'error');
-                        $('productGrid').innerHTML = `<div class="empty-state"><i class="bi bi-emoji-frown"></i><h3>Erreur</h3><p>${esc(res.message||'')}</p></div>`;
+                        $('productGrid').innerHTML =
+                            `<div class="empty-state"><i class="bi bi-emoji-frown"></i><h3>Erreur</h3><p>${esc(res.message||'')}</p></div>`;
                     }
                 })
-                .catch(() => {
+                .catch(err => {
                     showSearchSpinner(false);
-                    toast('Erreur connexion', 'error');
+                    toast(err.message || 'Erreur connexion', 'error');
                 });
         }
 
@@ -2479,10 +2486,10 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             }
             $('recentClientsZone').classList.remove('hidden');
             $('recentClientsGrid').innerHTML = recentClients.map(c => `
-                <div class="rc-chip" onclick="quickSelectClient('${esc(c.code_contact)}','${esc(c.nom_prenom_contact)}','${esc(c.telephone_contact||'')}')">
-                    <i class="bi bi-person"></i> ${esc(c.nom_prenom_contact)}
-                </div>
-            `).join('');
+                        <div class="rc-chip" onclick="quickSelectClient('${esc(c.code_contact)}','${esc(c.nom_prenom_contact)}','${esc(c.telephone_contact||'')}')">
+                            <i class="bi bi-person"></i> ${esc(c.nom_prenom_contact)}
+                        </div>
+                    `).join('');
         }
 
         function quickSelectClient(code, name, phone) {
@@ -2507,7 +2514,7 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                         if (res.success) renderClientDropdown(res.data || [], q);
                         else toast(res.message || 'Erreur client', 'error');
                     })
-                    .catch(() => toast('Erreur connexion', 'error'));
+                    .catch(err => toast(err.message || 'Erreur connexion', 'error'));
             }, 250);
         });
 
@@ -2526,29 +2533,30 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
         function renderClientDropdown(data, q) {
             const dd = $('clientDropdown');
             if (data.length === 0) {
-                dd.innerHTML = `<div class="dd-header"><span>Aucun résultat</span></div><div class="dd-empty"><i class="bi bi-emoji-frown"></i>Aucun client pour "${esc(q)}"<br><button style="margin-top:8px;background:var(--color-primary);color:#fff;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;" data-bs-toggle="modal" data-bs-target="#clientModal"><i class="bi bi-person-plus"></i> Créer</button></div>`;
+                dd.innerHTML =
+                    `<div class="dd-header"><span>Aucun résultat</span></div><div class="dd-empty"><i class="bi bi-emoji-frown"></i>Aucun client pour "${esc(q)}"<br><button style="margin-top:8px;background:var(--color-primary);color:#fff;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;" data-bs-toggle="modal" data-bs-target="#clientModal"><i class="bi bi-person-plus"></i> Créer</button></div>`;
                 dd.style.display = 'block';
                 return;
             }
             dd.innerHTML = `
-                <div class="dd-header"><span>${data.length} client(s)</span><span style="color:var(--text-tertiary);">Entrée = sélectionner</span></div>
-                ${data.map(c => {
-                    const initials = (c.nom_prenom_contact||'').split(' ').map(w=>(w[0]||'')).join('').substring(0,2).toUpperCase();
-                    const typeLabel = c.statut_contact || c.type_contact || 'Client';
-                    const tagClass = (c.type_contact === 'Entreprise') ? 'tag-client' : 'tag-particulier';
-                    return `
-                        <div class="customer-item" data-code="${esc(c.code_contact)}" onclick="selectClient('${esc(c.code_contact)}','${esc(c.nom_prenom_contact)}','${esc(c.telephone_contact||'')}')">
-                            <div class="ci-avatar">${initials}</div>
-                            <div class="ci-body">
-                                <strong>${highlightText(c.nom_prenom_contact, q)}</strong>
-                                <small>${highlightText(c.code_contact, q)}${c.telephone_contact ? ' — ' + highlightText(c.telephone_contact, q) : ''}</small>
-                                <div class="ci-tags"><span class="ci-tag ${tagClass}">${esc(typeLabel)}</span></div>
-                            </div>
-                            <i class="bi bi-chevron-right ci-arrow"></i>
-                        </div>
+                        <div class="dd-header"><span>${data.length} client(s)</span><span style="color:var(--text-tertiary);">Entrée = sélectionner</span></div>
+                        ${data.map(c => {
+                            const initials = (c.nom_prenom_contact||'').split(' ').map(w=>(w[0]||'')).join('').substring(0,2).toUpperCase();
+                            const typeLabel = c.statut_contact || c.type_contact || 'Client';
+                            const tagClass = (c.type_contact === 'Entreprise') ? 'tag-client' : 'tag-particulier';
+                            return `
+                                <div class="customer-item" data-code="${esc(c.code_contact)}" onclick="selectClient('${esc(c.code_contact)}','${esc(c.nom_prenom_contact)}','${esc(c.telephone_contact||'')}')">
+                                    <div class="ci-avatar">${initials}</div>
+                                    <div class="ci-body">
+                                        <strong>${highlightText(c.nom_prenom_contact, q)}</strong>
+                                        <small>${highlightText(c.code_contact, q)}${c.telephone_contact ? ' — ' + highlightText(c.telephone_contact, q) : ''}</small>
+                                        <div class="ci-tags"><span class="ci-tag ${tagClass}">${esc(typeLabel)}</span></div>
+                                    </div>
+                                    <i class="bi bi-chevron-right ci-arrow"></i>
+                                </div>
+                            `;
+                        }).join('')}
                     `;
-                }).join('')}
-            `;
             dd.style.display = 'block';
         }
 
@@ -2596,7 +2604,8 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             fetch(BASE_URL, {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest'
                     },
                     body: JSON.stringify(payload)
                 })
@@ -2637,11 +2646,11 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             selectedLotId = null;
             const list = $('lotSelectionList');
             list.innerHTML = lots.map(l => `
-                <div class="lot-option" data-lot="${esc(l.code_lot_produit)}" onclick="selectLotOption('${esc(l.code_lot_produit)}')">
-                    <div class="lot-info"><strong>${esc(l.titre_lot)}</strong><small>${l.unites_par_lot} unité(s) par lot — disponible : ${l.quantite}</small></div>
-                    <div class="lot-stock">${l.quantite} restant(s)</div>
-                </div>
-            `).join('');
+                        <div class="lot-option" data-lot="${esc(l.code_lot_produit)}" onclick="selectLotOption('${esc(l.code_lot_produit)}')">
+                            <div class="lot-info"><strong>${esc(l.titre_lot)}</strong><small>${l.unites_par_lot} unité(s) par lot — disponible : ${l.quantite}</small></div>
+                            <div class="lot-stock">${l.quantite} restant(s)</div>
+                        </div>
+                    `).join('');
             if (lots.length > 0) {
                 const first = lots[0].code_lot_produit;
                 selectLotOption(first);
@@ -2725,7 +2734,8 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                 const res = await fetch(BASE_URL, {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest'
                     },
                     body: JSON.stringify({
                         action: 'get_product_price',
@@ -2781,25 +2791,25 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                 let html = '';
                 cart.forEach(p => {
                     html += `
-                        <div class="cart-line" data-code="${esc(p.code)}" data-lotid="${esc(p.lot_id||'')}">
-                            <div class="cl-header">
-                                <div class="cl-name">${esc(p.nom)}</div>
-                                ${p.lot_id ? `<span class="cl-lot">${esc(p.lot_id)}</span>` : ''}
-                                <button class="cl-remove" onclick="window.removeProduct('${p.code}','${p.lot_id||''}')"><i class="bi bi-trash"></i></button>
-                            </div>
-                            <div class="cl-footer">
-                                <div class="qty-selector">
-                                    <button onclick="window.updateQty('${p.code}','${p.lot_id||''}',-1)">-</button>
-                                    <span>${p.qte}</span>
-                                    <button onclick="window.updateQty('${p.code}','${p.lot_id||''}',1)">+</button>
+                            <div class="cart-line" data-code="${esc(p.code)}" data-lotid="${esc(p.lot_id||'')}">
+                                <div class="cl-header">
+                                    <div class="cl-name">${esc(p.nom)}</div>
+                                    ${p.lot_id ? `<span class="cl-lot">${esc(p.lot_id)}</span>` : ''}
+                                    <button class="cl-remove" onclick="window.removeProduct('${p.code}','${p.lot_id||''}')"><i class="bi bi-trash"></i></button>
                                 </div>
-                                <div style="text-align:right;">
-                                    <div class="cl-total">${fmt(p.montant)}</div>
-                                    <div class="cl-unit">${fmt(p.prix)} / unité</div>
+                                <div class="cl-footer">
+                                    <div class="qty-selector">
+                                        <button onclick="window.updateQty('${p.code}','${p.lot_id||''}',-1)">-</button>
+                                        <span>${p.qte}</span>
+                                        <button onclick="window.updateQty('${p.code}','${p.lot_id||''}',1)">+</button>
+                                    </div>
+                                    <div style="text-align:right;">
+                                        <div class="cl-total">${fmt(p.montant)}</div>
+                                        <div class="cl-unit">${fmt(p.prix)} / unité</div>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    `;
+                        `;
                 });
                 $('cartItems').innerHTML = html;
                 $('cartCount').textContent = cart.reduce((s, p) => s + p.qte, 0);
@@ -2933,7 +2943,7 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                 .catch(err => {
                     this.disabled = false;
                     this.innerHTML = '<i class="bi bi-check-lg"></i> Valider';
-                    toast('Erreur connexion', 'error');
+                    toast(err.message || 'Erreur connexion', 'error');
                 });
         });
 
@@ -2943,30 +2953,30 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             const dateStr = now.toLocaleDateString('fr-FR');
             const timeStr = now.toLocaleTimeString('fr-FR');
             const linesHTML = cart.map(p => `
-                <tr><td style="text-align:left;padding:4px 0;font-size:12px;">${esc(p.nom)}${p.lot_id ? ' <span style="color:#64748b;font-size:10px;">('+esc(p.lot_id)+')</span>' : ''}</td><td style="text-align:center;padding:4px 0;font-size:12px;">${p.qte}</td><td style="text-align:right;padding:4px 0;font-size:12px;">${fmt(p.prix)}</td><td style="text-align:right;padding:4px 0;font-size:12px;font-weight:600;">${fmt(p.montant)}</td></tr>
-            `).join('');
+                        <tr><td style="text-align:left;padding:4px 0;font-size:12px;">${esc(p.nom)}${p.lot_id ? ' <span style="color:#64748b;font-size:10px;">('+esc(p.lot_id)+')</span>' : ''}</td><td style="text-align:center;padding:4px 0;font-size:12px;">${p.qte}</td><td style="text-align:right;padding:4px 0;font-size:12px;">${fmt(p.prix)}</td><td style="text-align:right;padding:4px 0;font-size:12px;font-weight:600;">${fmt(p.montant)}</td></tr>
+                    `).join('');
             const t = res.totaux;
             $('printZone').innerHTML = `
-                <div style="font-family:monospace;max-width:300px;margin:0 auto;">
-                    <div style="text-align:center;font-weight:700;font-size:16px;margin-bottom:4px;">CAISSE COMPTOIR</div>
-                    <div style="text-align:center;font-size:11px;color:#64748b;margin-bottom:12px;">${dateStr} ${timeStr}</div>
-                    <div style="font-size:11px;margin-bottom:8px;">Client: ${esc(selectedClient.name)} (${selectedClient.code})</div>
-                    <div style="font-size:11px;margin-bottom:12px;">Facture: ${res.facture}</div>
-                    <hr style="border:1px dashed #ccc;">
-                    <table style="width:100%;border-collapse:collapse;"><thead><tr style="font-size:11px;font-weight:600;color:#64748b;"><th style="text-align:left;">Produit</th><th style="text-align:center;">Qté</th><th style="text-align:right;">Prix</th><th style="text-align:right;">Montant</th></tr></thead><tbody>${linesHTML}</tbody></table>
-                    <hr style="border:1px dashed #ccc;">
-                    <div style="font-size:12px;margin-top:8px;">
-                        <div style="display:flex;justify-content:space-between;"><span>HT</span><span>${fmt(t.ht)}</span></div>
-                        ${t.taxe>0?`<div style="display:flex;justify-content:space-between;"><span>TVA</span><span>${fmt(t.taxe)}</span></div>`:''}
-                        ${t.remise>0?`<div style="display:flex;justify-content:space-between;"><span>Remise</span><span>${fmt(t.remise)}</span></div>`:''}
-                        <div style="display:flex;justify-content:space-between;font-weight:700;font-size:14px;margin-top:4px;"><span>TTC</span><span>${fmt(t.ttc)}</span></div>
-                        <div style="display:flex;justify-content:space-between;color:#2563eb;"><span>Avance</span><span>${fmt(parseFloat($('receivedAmount').value)||t.ttc)}</span></div>
-                        ${t.reste>0?`<div style="display:flex;justify-content:space-between;color:#ef4444;"><span>Reste</span><span>${fmt(t.reste)}</span></div>`:''}
-                    </div>
-                    <hr style="border:1px dashed #ccc;margin-top:8px;">
-                    <div style="text-align:center;font-size:10px;color:#94a3b8;margin-top:8px;">Merci !</div>
-                </div>
-            `;
+                        <div style="font-family:monospace;max-width:300px;margin:0 auto;">
+                            <div style="text-align:center;font-weight:700;font-size:16px;margin-bottom:4px;">CAISSE COMPTOIR</div>
+                            <div style="text-align:center;font-size:11px;color:#64748b;margin-bottom:12px;">${dateStr} ${timeStr}</div>
+                            <div style="font-size:11px;margin-bottom:8px;">Client: ${esc(selectedClient.name)} (${selectedClient.code})</div>
+                            <div style="font-size:11px;margin-bottom:12px;">Facture: ${res.facture}</div>
+                            <hr style="border:1px dashed #ccc;">
+                            <table style="width:100%;border-collapse:collapse;"><thead><tr style="font-size:11px;font-weight:600;color:#64748b;"><th style="text-align:left;">Produit</th><th style="text-align:center;">Qté</th><th style="text-align:right;">Prix</th><th style="text-align:right;">Montant</th></tr></thead><tbody>${linesHTML}</tbody></table>
+                            <hr style="border:1px dashed #ccc;">
+                            <div style="font-size:12px;margin-top:8px;">
+                                <div style="display:flex;justify-content:space-between;"><span>HT</span><span>${fmt(t.ht)}</span></div>
+                                ${t.taxe>0?`<div style="display:flex;justify-content:space-between;"><span>TVA</span><span>${fmt(t.taxe)}</span></div>`:''}
+                                ${t.remise>0?`<div style="display:flex;justify-content:space-between;"><span>Remise</span><span>${fmt(t.remise)}</span></div>`:''}
+                                <div style="display:flex;justify-content:space-between;font-weight:700;font-size:14px;margin-top:4px;"><span>TTC</span><span>${fmt(t.ttc)}</span></div>
+                                <div style="display:flex;justify-content:space-between;color:#2563eb;"><span>Avance</span><span>${fmt(parseFloat($('receivedAmount').value)||t.ttc)}</span></div>
+                                ${t.reste>0?`<div style="display:flex;justify-content:space-between;color:#ef4444;"><span>Reste</span><span>${fmt(t.reste)}</span></div>`:''}
+                            </div>
+                            <hr style="border:1px dashed #ccc;margin-top:8px;">
+                            <div style="text-align:center;font-size:10px;color:#94a3b8;margin-top:8px;">Merci !</div>
+                        </div>
+                    `;
         }
 
         function resetSale() {
@@ -2993,6 +3003,13 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
         // Fermer modale lot en cliquant sur l'overlay
         document.querySelector('#lotModal').addEventListener('click', function(e) {
             if (e.target === this) closeModal('lotModal');
+        });
+
+        // Gestionnaire d'erreur global pour les promesses non capturées
+        window.addEventListener('unhandledrejection', function(event) {
+            console.error('Unhandled rejection:', event.reason);
+            toast(event.reason.message || 'Erreur inattendue', 'error');
+            event.preventDefault();
         });
     </script>
 </body>

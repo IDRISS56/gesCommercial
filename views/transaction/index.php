@@ -2,7 +2,7 @@
 ob_start(); // capture tout octet parasite (BOM, espaces) émis par ce fichier ou les fichiers inclus
 // views/transaction/index.php – Gestion des transactions (design vente)
 require __DIR__ . '/../../databases/database.php';
-session_start();
+
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');

@@ -2,8 +2,8 @@
 // prix.php – CRUD pour la table prix avec gestion des conditionnements (lot_produit)
 // Design dashboard identique aux autres pages
 ob_start(); // capture tout octet parasite (BOM, espaces) émis par ce fichier ou les fichiers inclus
-require_once 'databases/database.php';
-session_start();
+require 'databases/database.php';
+
 // Vérification session + utilisateur actif
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');

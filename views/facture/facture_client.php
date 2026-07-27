@@ -1,19 +1,17 @@
 <?php
-// index.php – Gestion des factures (CRUD) avec lignes de produits pour Avoir/Devis
+// facture_client.php – Gestion des factures clients (type = Client)
 // Design aligné sur vente.php
 
-// Nettoyage initial du buffer
 while (ob_get_level()) ob_end_clean();
 ob_start();
 
-session_start();
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
     exit;
 }
 
-require_once 'databases/database.php';
-require_once 'librairies/fpdf/fpdf.php';
+require 'databases/database.php';
+require 'librairies/fpdf/fpdf.php';
 
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
@@ -39,13 +37,13 @@ function safeText($str) {
 $taxes = $pdo->query("SELECT code_taxe, titre_taxe, taux_taxe FROM taxe WHERE type_taxe = 'TVA' AND etat_taxe = 'Actif' ORDER BY titre_taxe")->fetchAll(PDO::FETCH_ASSOC);
 $remises = $pdo->query("SELECT code_taxe, titre_taxe, taux_taxe FROM taxe WHERE type_taxe = 'Remise' AND etat_taxe = 'Actif' ORDER BY titre_taxe")->fetchAll(PDO::FETCH_ASSOC);
 
-// ---- LISTES POUR LES SELECTS ----
-$contacts = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact WHERE etat_contact = 'Actif' ORDER BY nom_prenom_contact")->fetchAll(PDO::FETCH_ASSOC);
+// ---- LISTES POUR LES SELECTS (filtrés par type Client) ----
+$contacts = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact WHERE type_contact = 'Client' AND etat_contact = 'Actif' ORDER BY nom_prenom_contact")->fetchAll(PDO::FETCH_ASSOC);
 $utilisateurs = $pdo->query("SELECT id, nom_prenom FROM utilisateur WHERE etat = 'Actif' ORDER BY nom_prenom")->fetchAll(PDO::FETCH_ASSOC);
 $produits = $pdo->query("SELECT code_produit, titre_produit, prix_produit FROM produit WHERE etat_produit = 'Actif' ORDER BY titre_produit")->fetchAll(PDO::FETCH_ASSOC);
 $lots = $pdo->query("SELECT code_lot_produit, produit_id, titre_lot, unites_par_lot FROM lot_produit WHERE etat_lot = 'Actif' ORDER BY titre_lot")->fetchAll(PDO::FETCH_ASSOC);
 
-$types_facture = ['Client', 'Fournisseur', 'Interne'];
+$types_facture = ['Client']; // fixé à Client
 $categories_facture = ['Facture', 'Avoir', 'Devis'];
 $etats_facture = ['Payée', 'Impayée', 'Payer cash', 'Partielle', 'En attente'];
 
@@ -61,13 +59,12 @@ $messageType = '';
 $action = $_POST['action'] ?? '';
 $editFacture = null;
 $editLignes = [];
-$viewFacture = null;
 
 // --- AJOUT OU MODIFICATION ---
 if (($action === 'add' || $action === 'edit') && isset($_POST['titre_facture'])) {
     $numero = trim($_POST['numero_facture'] ?? '');
     $titre = trim($_POST['titre_facture'] ?? '');
-    $type = trim($_POST['type_facture'] ?? '');
+    $type = 'Client'; // forcé
     $categorie = trim($_POST['categorie_facture'] ?? '');
     $date = trim($_POST['date_facture'] ?? '');
     $montant_ht = trim(str_replace(',', '.', $_POST['montant_ht'] ?? '0'));
@@ -152,7 +149,6 @@ if (($action === 'add' || $action === 'edit') && isset($_POST['titre_facture']))
     $errors = [];
     if (empty($numero)) $errors[] = 'Le numéro de facture est requis.';
     if (empty($titre)) $errors[] = 'Le titre est requis.';
-    if (empty($type)) $errors[] = 'Le type est requis.';
     if (empty($categorie)) $errors[] = 'La catégorie est requise.';
     if (empty($date)) $errors[] = 'La date est requise.';
     if ($montant_ht < 0) $errors[] = 'Le montant HT doit être un nombre positif.';
@@ -207,7 +203,7 @@ if (($action === 'add' || $action === 'edit') && isset($_POST['titre_facture']))
                         }
                     }
                     $pdo->commit();
-                    $message = "Facture « $titre » ajoutée avec succès." . (in_array($categorie, ['Avoir', 'Devis']) ? ' (' . count($lignesPost) . ' ligne(s))' : '');
+                    $message = "Facture client « $titre » ajoutée avec succès." . (in_array($categorie, ['Avoir', 'Devis']) ? ' (' . count($lignesPost) . ' ligne(s))' : '');
                     $messageType = 'success';
                 }
             } elseif ($action === 'edit') {
@@ -244,7 +240,7 @@ if (($action === 'add' || $action === 'edit') && isset($_POST['titre_facture']))
                     }
                 }
                 $pdo->commit();
-                $message = "Facture « $titre » mise à jour." . (in_array($categorie, ['Avoir', 'Devis']) ? ' (' . count($lignesPost) . ' ligne(s))' : '');
+                $message = "Facture client « $titre » mise à jour." . (in_array($categorie, ['Avoir', 'Devis']) ? ' (' . count($lignesPost) . ' ligne(s))' : '');
                 $messageType = 'success';
             }
         } catch (Exception $e) {
@@ -269,7 +265,7 @@ if (isset($_POST['btn_supprimer']) && $_POST['btn_supprimer'] == '1') {
             $titre = $stmt->fetchColumn();
             $stmt = $pdo->prepare("DELETE FROM facture WHERE numero_facture = ?");
             $stmt->execute([$numero]);
-            $message = "Facture « $titre » supprimée.";
+            $message = "Facture client « $titre » supprimée.";
             $messageType = 'danger';
         } catch (PDOException $e) {
             $message = "Erreur : " . $e->getMessage();
@@ -281,7 +277,7 @@ if (isset($_POST['btn_supprimer']) && $_POST['btn_supprimer'] == '1') {
 // --- RÉCUPÉRATION DE LA FACTURE POUR ÉDITION ---
 if ($action === 'edit' && isset($_POST['edit_numero']) && !isset($_POST['titre_facture'])) {
     $numero = $_POST['edit_numero'];
-    $stmt = $pdo->prepare("SELECT * FROM facture WHERE numero_facture = ?");
+    $stmt = $pdo->prepare("SELECT * FROM facture WHERE numero_facture = ? AND type_facture = 'Client'");
     $stmt->execute([$numero]);
     $editFacture = $stmt->fetch(PDO::FETCH_ASSOC);
     if ($editFacture && in_array($editFacture['categorie_facture'], ['Avoir', 'Devis'])) {
@@ -293,35 +289,19 @@ if ($action === 'edit' && isset($_POST['edit_numero']) && !isset($_POST['titre_f
     }
 }
 
-// --- VUE DÉTAIL ---
-if ($action === 'view' && isset($_POST['view_numero'])) {
-    $numero = $_POST['view_numero'];
-    $stmt = $pdo->prepare("SELECT f.*, c.nom_prenom_contact, u.nom_prenom 
-                           FROM facture f
-                           LEFT JOIN contact c ON f.contact_id = c.code_contact
-                           LEFT JOIN utilisateur u ON f.utilisateur_id = u.id
-                           WHERE f.numero_facture = ?");
-    $stmt->execute([$numero]);
-    $viewFacture = $stmt->fetch(PDO::FETCH_ASSOC);
-}
-
 // ---- FONCTION POUR LE TABLEAU (AJAX) ----
-function getTableContent($pdo, $search, $type_filter, $categorie_filter, $contact_filter, $utilisateur_filter, $etat_filter, $page, $perPage = 20)
+function getTableContent($pdo, $search, $categorie_filter, $contact_filter, $utilisateur_filter, $etat_filter, $page, $perPage = 20)
 {
     $sql = "SELECT f.*, c.nom_prenom_contact, u.nom_prenom 
             FROM facture f
             LEFT JOIN contact c ON f.contact_id = c.code_contact
             LEFT JOIN utilisateur u ON f.utilisateur_id = u.id
-            WHERE 1=1";
+            WHERE f.type_facture = 'Client'";
     $params = [];
     if (!empty($search)) {
         $sql .= " AND (f.numero_facture LIKE ? OR f.titre_facture LIKE ? OR c.nom_prenom_contact LIKE ? OR u.nom_prenom LIKE ?)";
         $like = '%' . $search . '%';
         for ($i = 0; $i < 4; $i++) $params[] = $like;
-    }
-    if (!empty($type_filter)) {
-        $sql .= " AND f.type_facture = ?";
-        $params[] = $type_filter;
     }
     if (!empty($categorie_filter)) {
         $sql .= " AND f.categorie_facture = ?";
@@ -357,7 +337,7 @@ function getTableContent($pdo, $search, $type_filter, $categorie_filter, $contac
         <tr>
             <td colspan="12" class="text-center py-5 text-muted">
                 <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
-                Aucune facture trouvée
+                Aucune facture client trouvée
             </td>
         </tr>
     <?php else: ?>
@@ -380,7 +360,6 @@ function getTableContent($pdo, $search, $type_filter, $categorie_filter, $contac
                 </td>
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
-                        <button class="act-btn v viewBtn" data-numero="<?= e($f['numero_facture']) ?>" title="Voir"><i class="bi bi-eye"></i></button>
                         <button class="act-btn e editBtn" data-numero="<?= e($f['numero_facture']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
                         <button class="act-btn d deleteBtn" data-numero="<?= e($f['numero_facture']) ?>" data-nom="<?= e($f['titre_facture']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
                         <form method="post" style="display:inline-block;">
@@ -445,14 +424,13 @@ function getTableContent($pdo, $search, $type_filter, $categorie_filter, $contac
 // ---- AJAX ----
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $search = trim($_POST['search'] ?? '');
-    $type_filter = trim($_POST['type_filter'] ?? '');
     $categorie_filter = trim($_POST['categorie_filter'] ?? '');
     $contact_filter = trim($_POST['contact_filter'] ?? '');
     $utilisateur_filter = trim($_POST['utilisateur_filter'] ?? '');
     $etat_filter = trim($_POST['etat_filter'] ?? '');
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
-    $result = getTableContent($pdo, $search, $type_filter, $categorie_filter, $contact_filter, $utilisateur_filter, $etat_filter, $page);
+    $result = getTableContent($pdo, $search, $categorie_filter, $contact_filter, $utilisateur_filter, $etat_filter, $page);
     header('Content-Type: application/json');
     echo json_encode($result);
     exit;
@@ -519,7 +497,7 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $titreDoc = match($facture['categorie_facture']) {
         'Avoir' => 'AVOIR',
         'Devis' => 'DEVIS',
-        default => 'FACTURE'
+        default => 'FACTURE CLIENT'
     };
     $pdf->Text(125, $yStart + 10, $toLatin($titreDoc));
 
@@ -740,14 +718,13 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
 
 // ---- AFFICHAGE INITIAL ----
 $search = trim($_POST['search'] ?? '');
-$type_filter = trim($_POST['type_filter'] ?? '');
 $categorie_filter = trim($_POST['categorie_filter'] ?? '');
 $contact_filter = trim($_POST['contact_filter'] ?? '');
 $utilisateur_filter = trim($_POST['utilisateur_filter'] ?? '');
 $etat_filter = trim($_POST['etat_filter'] ?? '');
 $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
-$initialData = getTableContent($pdo, $search, $type_filter, $categorie_filter, $contact_filter, $utilisateur_filter, $etat_filter, $page);
+$initialData = getTableContent($pdo, $search, $categorie_filter, $contact_filter, $utilisateur_filter, $etat_filter, $page);
 
 $formAction = ($action === 'edit' && isset($editFacture)) ? 'edit' : 'add';
 $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numero_facture']) : '';
@@ -758,7 +735,7 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gestion des factures</title>
+    <title>Gestion des factures clients</title>
     <!-- Bootstrap 5 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Bootstrap Icons -->
@@ -973,7 +950,6 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
             transition: all .2s;
         }
         .act-btn:hover { transform: scale(1.1); }
-        .act-btn.v:hover { color: var(--b); background: var(--bl); border-color: rgba(37,99,235,.15); }
         .act-btn.e:hover { color: var(--wrn); background: var(--wrnl); border-color: rgba(245,158,11,.15); }
         .act-btn.d:hover { color: var(--dng); background: var(--dngl); border-color: rgba(239,68,68,.15); }
 
@@ -1031,8 +1007,8 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
     <!-- En-tête -->
     <div class="hdr">
         <div class="hdr-l">
-            <h1>Gestion des factures</h1>
-            <p>Suivez vos factures clients et fournisseurs</p>
+            <h1>Gestion des factures clients</h1>
+            <p>Factures, avoirs et devis destinés aux clients</p>
         </div>
         <div class="hdr-r">
             <div class="hdr-badge"><i class="bi bi-receipt"></i> <?= $initialData['total'] ?? 0 ?> factures</div>
@@ -1056,13 +1032,6 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
             <div class="prow">
                 <label for="searchInput"><i class="bi bi-search"></i> Recherche</label>
                 <input type="text" name="search" id="searchInput" placeholder="Numéro, titre, contact..." value="<?= e($search) ?>" style="flex:1; min-width:150px;">
-                <label for="typeFilter">Type</label>
-                <select name="type_filter" id="typeFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un type...">
-                    <option value="">Tous</option>
-                    <?php foreach ($types_facture as $t): ?>
-                        <option value="<?= e($t) ?>" <?= ($type_filter == $t) ? 'selected' : '' ?>><?= e($t) ?></option>
-                    <?php endforeach; ?>
-                </select>
                 <label for="categorieFilter">Catégorie</label>
                 <select name="categorie_filter" id="categorieFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher une catégorie...">
                     <option value="">Toutes</option>
@@ -1095,7 +1064,7 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
     <!-- Tableau -->
     <div class="data-table-wrap" id="tableWrapper">
         <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
-            <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;">Liste des factures</h5>
+            <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;">Liste des factures clients</h5>
             <span class="text-muted small" id="totalCount"><?= $initialData['total'] ?? 0 ?> facture(s) - Page <?= $initialData['page'] ?? 1 ?> / <?= max(1, $initialData['totalPages'] ?? 1) ?></span>
         </div>
         <div class="table-responsive">
@@ -1134,12 +1103,13 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-file-earmark-text text-primary me-2"></i> Nouvelle facture</h5>
+                <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-file-earmark-text text-primary me-2"></i> Nouvelle facture client</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
             </div>
             <form method="post" id="factureForm">
                 <input type="hidden" name="action" id="formAction" value="<?= $formAction ?>">
                 <input type="hidden" name="old_numero" id="oldNumero" value="<?= $oldNumero ?>">
+                <input type="hidden" name="type_facture" value="Client">
                 <div class="modal-body">
                     <!-- Identification -->
                     <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
@@ -1169,18 +1139,9 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
                         </div>
                     </div>
 
-                    <!-- Type et catégorie -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tags me-1"></i> Type et catégorie</h6>
+                    <!-- Catégorie (le type est fixe) -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tags me-1"></i> Catégorie</h6>
                     <div class="row g-3 mb-4">
-                        <div class="col-md-6">
-                            <label for="type_facture" class="form-label fw-semibold">Type <span class="text-danger">*</span></label>
-                            <select class="form-select" id="type_facture" name="type_facture" required>
-                                <option value="">=== Faites votre choix ===</option>
-                                <?php foreach ($types_facture as $t): ?>
-                                    <option value="<?= e($t) ?>" <?= (isset($editFacture) && $editFacture['type_facture'] == $t) ? 'selected' : '' ?>><?= e($t) ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
                         <div class="col-md-6">
                             <label for="categorie_facture" class="form-label fw-semibold">Catégorie <span class="text-danger">*</span></label>
                             <select class="form-select" id="categorie_facture" name="categorie_facture" required>
@@ -1349,26 +1310,6 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
 </div>
 
 <!-- ========================================================= -->
-<!-- MODALE VUE -->
-<!-- ========================================================= -->
-<div class="modal fade" id="viewModal" tabindex="-1" aria-labelledby="viewModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered" style="max-width:600px;">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title fw-bold" id="viewModalLabel"><i class="bi bi-eye text-primary me-2"></i> Détails de la facture</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-            </div>
-            <div class="modal-body">
-                <div class="row g-3" id="viewGrid"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- ========================================================= -->
 <!-- MODALE CONFIRMATION SUPPRESSION -->
 <!-- ========================================================= -->
 <div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
@@ -1395,7 +1336,6 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
 <form method="post" id="actionForm">
     <input type="hidden" name="action" id="actionField">
     <input type="hidden" name="edit_numero" id="editNumeroField">
-    <input type="hidden" name="view_numero" id="viewNumeroField">
 </form>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
@@ -1651,19 +1591,17 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
         <?php endif; ?>
 
         const factureModal = new bootstrap.Modal(document.getElementById('factureModal'));
-        const viewModal = new bootstrap.Modal(document.getElementById('viewModal'));
 
         $('#addBtn').on('click', function() {
             $('#formAction').val('add');
             $('#oldNumero').val('');
-            $('#modalTitle').text('Nouvelle facture');
+            $('#modalTitle').text('Nouvelle facture client');
             $('#factureForm')[0].reset();
             $('#numero_facture').prop('readonly', false);
             $('#numero_facture').val('');
             $('#titre_facture').val('');
             $('#montant_ht, #montant_ttc, #avance, #reste').val('0');
             $('#taxe, #remise').val('');
-            $('#type_facture').val('');
             $('#categorie_facture').val('');
             $('#etat_facture').prop('selectedIndex', 0);
             $('#contact_id, #utilisateur_id').selectpicker('val', '');
@@ -1721,17 +1659,9 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
             $('#actionForm').submit();
         });
 
-        $(document).on('click', '.viewBtn', function() {
-            const numero = $(this).data('numero');
-            $('#actionField').val('view');
-            $('#viewNumeroField').val(numero);
-            $('#actionForm').submit();
-        });
-
         function rechercher(page) {
             page = page || 1;
             var search = $('#searchInput').val();
-            var type = $('#typeFilter').val();
             var categorie = $('#categorieFilter').val();
             var contact = $('#contactFilter').val();
             var etat = $('#etatFilter').val();
@@ -1741,7 +1671,6 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
                 data: {
                     ajax: 1,
                     search: search,
-                    type_filter: type,
                     categorie_filter: categorie,
                     contact_filter: contact,
                     etat_filter: etat,
@@ -1770,14 +1699,14 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
             clearTimeout(searchTimeout);
             searchTimeout = setTimeout(function() { rechercher(1); }, 300);
         });
-        $('#typeFilter, #categorieFilter, #contactFilter, #etatFilter').on('changed.bs.select', function() {
+        $('#categorieFilter, #contactFilter, #etatFilter').on('changed.bs.select', function() {
             clearTimeout(searchTimeout);
             searchTimeout = setTimeout(function() { rechercher(1); }, 300);
         });
         $('#filterBtn').on('click', function() { rechercher(1); });
         $('#resetBtn').on('click', function() {
             $('#searchInput').val('');
-            $('#typeFilter, #categorieFilter, #contactFilter, #etatFilter').selectpicker('val', '');
+            $('#categorieFilter, #contactFilter, #etatFilter').selectpicker('val', '');
             rechercher(1);
         });
 
@@ -1797,36 +1726,6 @@ $oldNumero = ($action === 'edit' && isset($editFacture)) ? e($editFacture['numer
             $(function() {
                 calculerTotauxFacture();
                 factureModal.show();
-            });
-        <?php endif; ?>
-
-        <?php if (isset($viewFacture) && $action === 'view'): ?>
-            $(function() {
-                $('#viewModalLabel').text('Détails de la facture - <?= e($viewFacture['titre_facture'] ?? $viewFacture['numero_facture']) ?>');
-                const fields = [
-                    ['Numéro', '<?= e($viewFacture['numero_facture']) ?>'],
-                    ['Titre', '<?= e($viewFacture['titre_facture']) ?>'],
-                    ['Type', '<?= e($viewFacture['type_facture']) ?>'],
-                    ['Catégorie', '<?= e($viewFacture['categorie_facture']) ?>'],
-                    ['Date', '<?= isset($viewFacture['date_facture']) ? date('d/m/Y', strtotime($viewFacture['date_facture'])) : '—' ?>'],
-                    ['Montant HT', '<?= number_format((float)$viewFacture['montant_ht'], 2) ?>'],
-                    ['TVA', '<?= number_format((float)$viewFacture['taxe'], 2) ?>%'],
-                    ['Remise', '<?= number_format((float)$viewFacture['remise'], 2) ?>%'],
-                    ['Montant TTC', '<?= number_format((float)$viewFacture['montant_ttc'], 2) ?>'],
-                    ['Avance', '<?= number_format((float)$viewFacture['avance'], 2) ?>'],
-                    ['Reste', '<?= number_format((float)$viewFacture['reste'], 2) ?>'],
-                    ['Contact', '<?= e($viewFacture['nom_prenom_contact'] ?? '—') ?>'],
-                    ['Utilisateur', '<?= e($viewFacture['nom_prenom'] ?? '—') ?>'],
-                    ['État', '<?= e($viewFacture['etat_facture']) ?>']
-                ];
-                let html = '';
-                fields.forEach(([l, v]) => {
-                    let val = v || '—';
-                    html +=
-                        `<div class="col-sm-6"><div class="bg-light p-3 rounded-3 border"><div class="text-muted small text-uppercase fw-bold">${l}</div><div class="fw-semibold">${val}</div></div></div>`;
-                });
-                $('#viewGrid').html(html);
-                viewModal.show();
             });
         <?php endif; ?>
     });

@@ -1,11 +1,10 @@
 <?php
-// produit.php – CRUD produit + ajustement de stock (perte/correction) intégré en modale
+// produit.php – CRUD produit (sans ajustement de stock)
 // Design aligné sur vente.php
 
 ob_start();
-require_once 'databases/database.php';
+require 'databases/database.php';
 
-session_start();
 if (!isset($_SESSION['user_id'])) {
     header('Location: utilisateur/login');
     exit;
@@ -19,28 +18,12 @@ if (!$user) {
     exit;
 }
 
-require_once 'databases/stock_functions.php';
-
 // --- Récupération des catégories ---
 $categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie ORDER BY titre_categorie")->fetchAll(PDO::FETCH_ASSOC);
 
-// --- Boutiques actives ---
+// --- Boutiques actives (pour le stock initial) ---
 $boutiquesActives = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
 $boutiquePrincipale = $boutiquesActives[0]['code_boutique'] ?? null;
-
-// --- Statuts d'ajustement ---
-$statutsReserves = ['008', '009', '010', '011', '012', '016', '017'];
-$statutsAjustement = $pdo->query("
-    SELECT code_statut, titre_statut, type_statut
-    FROM statut
-    WHERE etat_statut = 'Actif'
-      AND LOWER(type_statut) IN ('entree', 'sortie')
-      AND code_statut NOT IN ('" . implode("','", $statutsReserves) . "')
-    ORDER BY type_statut, titre_statut
-")->fetchAll(PDO::FETCH_ASSOC);
-
-$produitsList = $pdo->query("SELECT code_produit, titre_produit FROM produit WHERE etat_produit = 'Actif' ORDER BY titre_produit")->fetchAll(PDO::FETCH_ASSOC);
-$boutiquesList = $boutiquesActives;
 
 // --- Traitement POST ---
 $message = '';
@@ -96,12 +79,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !(isset($_POST['ajax']) && $_POST['
                             $stmt = $pdo->prepare($sql);
                             $stmt->execute([$code, $titre, $prix_fournisseur, $prix_produit, $benefice, $stock_alerte, $categorie_id, $description, $photo, $type_photo, $etat]);
 
+                            // Initialisation du stock dans toutes les boutiques
                             $insSb = $pdo->prepare("INSERT INTO stock_boutique (produit_id, boutique_id, quantite, stock_alerte) VALUES (?, ?, 0, ?)");
                             foreach ($boutiquesActives as $b) {
                                 $insSb->execute([$code, $b['code_boutique'], $stock_alerte]);
                             }
 
+                            // Si stock initial > 0, on crée un mouvement d'entrée (statut 006 = ENTREE_INVENTAIRE)
                             if (is_numeric($stock_initial) && (float) $stock_initial > 0 && !empty($boutique_initiale)) {
+                                require_once 'databases/stock_functions.php';
                                 enregistrerMouvementStock(
                                     $pdo,
                                     $code,
@@ -165,63 +151,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !(isset($_POST['ajax']) && $_POST['
                 }
             }
         }
-
-        // Ajustement de stock
-        if ($action === 'ajustement') {
-            $produitId = $_POST['produit_id_ajust'] ?? '';
-            $boutiqueId = $_POST['boutique_id_ajust'] ?? '';
-            $statutId = $_POST['statut_id_ajust'] ?? '';
-            $quantite = intval($_POST['quantite_ajust'] ?? 0);
-            $commentaire = trim($_POST['commentaire_ajust'] ?? '');
-
-            $statutsCodes = array_column($statutsAjustement, 'code_statut');
-            if (empty($produitId) || empty($boutiqueId) || !in_array($statutId, $statutsCodes) || $quantite <= 0) {
-                $message = "Veuillez renseigner le produit, la boutique, le motif et une quantité positive.";
-                $messageType = 'error';
-            } elseif ($commentaire === '') {
-                $message = "Un commentaire est obligatoire pour justifier ce mouvement (traçabilité).";
-                $messageType = 'error';
-            } else {
-                try {
-                    $stmtPrix = $pdo->prepare("SELECT prix_fournisseur FROM produit WHERE code_produit = ?");
-                    $stmtPrix->execute([$produitId]);
-                    $prixUnitaire = (float) ($stmtPrix->fetchColumn() ?: 0);
-
-                    $resultat = enregistrerMouvementStock(
-                        $pdo,
-                        $produitId,
-                        $boutiqueId,
-                        $statutId,
-                        $quantite,
-                        $prixUnitaire,
-                        null,
-                        $user['id'],
-                        $commentaire
-                    );
-
-                    $message = "Mouvement {$resultat['numero_commande']} ({$resultat['titre_statut']}) enregistré : stock passé de {$resultat['stock_avant']} à {$resultat['stock_apres']}.";
-                    $messageType = 'success';
-                } catch (Exception $ex) {
-                    $message = "Erreur : " . $ex->getMessage();
-                    $messageType = 'error';
-                }
-            }
-        }
     }
 }
 
 $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 $csrf_token = $_SESSION['csrf_token'];
-
-$historiqueAjustements = $pdo->query("
-    SELECT c.numero_commande, c.produit_id, c.boutique_id, c.statut_id, s.titre_statut, s.type_statut,
-           c.quantite_commande, c.stock_avant, c.stock_apres, c.commentaire, c.date_commande, c.heure_commande
-    FROM commande c
-    LEFT JOIN statut s ON c.statut_id = s.code_statut
-    WHERE c.statut_id NOT IN ('008','009','010','011','012','016','017')
-    ORDER BY c.date_commande DESC, c.heure_commande DESC
-    LIMIT 30
-")->fetchAll(PDO::FETCH_ASSOC);
 
 // --- Fonction table (AJAX) ---
 function getTableContent($pdo, $search, $categorie_filter, $page, $perPage = 20)
@@ -376,19 +310,6 @@ function getStockTotal(PDO $pdo, string $produit_id): int
     return (int) $stmt->fetchColumn();
 }
 
-function getStockParBoutique(PDO $pdo, string $produit_id): array
-{
-    $stmt = $pdo->prepare(
-        "SELECT b.nom_boutique, sb.quantite
-         FROM stock_boutique sb
-         JOIN boutique b ON b.code_boutique = sb.boutique_id
-         WHERE sb.produit_id = ?
-         ORDER BY b.nom_boutique"
-    );
-    $stmt->execute([$produit_id]);
-    return $stmt->fetchAll(PDO::FETCH_ASSOC);
-}
-
 $editProduit = null;
 if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $code = $_POST['edit_code'];
@@ -402,7 +323,6 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
 ?>
 <!DOCTYPE html>
 <html lang="fr">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -670,173 +590,8 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
             border-color: var(--b);
             box-shadow: 0 0 0 3px var(--bl);
         }
-
-        /* ===== STYLE DE LA MODALE D'AJUSTEMENT (inchangé) ===== */
-        .modal-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(15, 23, 42, 0.5);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-            padding: 16px;
-        }
-        .modal-overlay.show { display: flex; }
-
-        .modal-box {
-            background: white;
-            border-radius: 16px;
-            width: 900px;
-            max-width: 100%;
-            max-height: 90vh;
-            box-shadow: 0 20px 25px rgba(0, 0, 0, 0.1);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
-
-        .modal-head {
-            padding: 16px 20px;
-            border-bottom: 1px solid var(--brd);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-shrink: 0;
-        }
-        .modal-head h3 {
-            font-size: 16px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            color: var(--dk);
-            margin: 0;
-        }
-        .modal-head h3 i { color: var(--b); }
-
-        .modal-close {
-            background: #f1f5f9;
-            font-size: 18px;
-            color: var(--lt);
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.2s;
-            border: none;
-            cursor: pointer;
-        }
-        .modal-close:hover { background: var(--dngl); color: var(--dng); }
-
-        .modal-body { padding: 20px; overflow-y: auto; flex: 1; }
-
-        .modal-foot {
-            padding: 14px 20px;
-            border-top: 1px solid var(--brd);
-            display: flex;
-            justify-content: flex-end;
-            gap: 10px;
-            flex-shrink: 0;
-            background: #f8fafc;
-        }
-        .modal-foot .btn-secondary {
-            background: #f1f5f9;
-            color: var(--dk);
-            padding: 8px 16px;
-            border-radius: var(--Rs);
-            font-weight: 600;
-            font-size: 14px;
-            border: 1px solid var(--brd);
-            transition: all 0.2s;
-            cursor: pointer;
-        }
-        .modal-foot .btn-secondary:hover { background: #e2e8f0; }
-        .modal-foot .btn-success {
-            background: var(--suc);
-            color: white;
-            padding: 8px 16px;
-            border-radius: var(--Rs);
-            font-weight: 600;
-            font-size: 14px;
-            border: none;
-            transition: background 0.2s;
-            cursor: pointer;
-        }
-        .modal-foot .btn-success:hover { background: #059669; }
-
-        .modal-body .product-ref {
-            background: var(--bl);
-            border: 1px solid var(--bb);
-            border-radius: var(--Rs);
-            padding: 10px 14px;
-            margin-bottom: 16px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-        .modal-body .product-ref .ref-name { font-size: 15px; font-weight: 700; color: var(--bd); }
-        .modal-body .product-ref .ref-stock { font-size: 12px; color: var(--mt); }
-
-        .modal-body .badge-lot {
-            background: var(--bl);
-            color: var(--bd);
-            padding: 2px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-            border: 1px solid var(--bb);
-        }
-        .modal-body .badge-lot.empty {
-            background: #f1f5f9;
-            color: var(--lt);
-            border-color: var(--brd);
-        }
-
-        .modal-body table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
-        }
-        .modal-body thead th {
-            background: var(--b);
-            color: white;
-            padding: 10px 14px;
-            text-align: left;
-            font-weight: 600;
-            font-size: 11px;
-            letter-spacing: 0.03em;
-            white-space: nowrap;
-            position: sticky;
-            top: 0;
-            z-index: 10;
-        }
-        .modal-body tbody td {
-            padding: 10px 14px;
-            border-bottom: 1px solid var(--brd);
-            color: var(--dk);
-            vertical-align: middle;
-        }
-        .modal-body tbody tr:hover { background: var(--bl); }
-        .modal-body .text-center { text-align: center; }
-        .modal-body .text-muted { color: var(--mt); }
-        .modal-body .py-5 { padding-top: 3rem; padding-bottom: 3rem; }
-        .modal-body .btn-sm {
-            padding: 4px 10px;
-            font-size: 12px;
-            border-radius: 6px;
-            border: none;
-            cursor: pointer;
-        }
-        .modal-body .btn-success { background: var(--suc); color: white; }
-        .modal-body .btn-success:hover { background: #059669; }
     </style>
 </head>
-
 <body>
 <div class="W">
     <!-- En-tête -->
@@ -848,7 +603,6 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
         <div class="hdr-r">
             <div class="hdr-badge"><i class="bi bi-cube"></i> <?= $initialData['total'] ?? 0 ?> produits</div>
             <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouveau produit</button>
-            <button class="btn-go" id="ajustBtn" style="background:#059669;"><i class="bi bi-clipboard2-pulse"></i> Ajustement de stock</button>
         </div>
     </div>
 
@@ -1100,122 +854,6 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     </div>
 </div>
 
-<!-- ========================================================= -->
-<!-- MODALE : AJUSTEMENT DE STOCK (perte / correction) -->
-<!-- ========================================================= -->
-<div class="modal-overlay" id="ajustModal">
-    <div class="modal-box">
-        <div class="modal-head">
-            <h3><i class="bi bi-clipboard2-pulse"></i> Ajustement de stock</h3>
-            <button class="modal-close" onclick="closeModal('ajustModal')"><i class="bi bi-x"></i></button>
-        </div>
-        <div class="modal-body">
-            <?php if ($message && $action === 'ajustement'): ?>
-                <div class="alert alert-<?= $messageType === 'success' ? 'success' : 'danger' ?> alert-dismissible fade show" role="alert">
-                    <?= $message ?>
-                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                </div>
-            <?php endif; ?>
-
-            <div class="product-ref">
-                <span class="ref-name"><i class="bi bi-info-circle"></i> Motifs configurables dans <strong>Configurations &gt; Statuts</strong></span>
-                <span class="ref-stock">Les mouvements sont tracés avec commentaire obligatoire.</span>
-            </div>
-
-            <form method="post" id="ajustForm">
-                <input type="hidden" name="action" value="ajustement">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
-                <div class="row g-3">
-                    <div class="col-md-4">
-                        <label for="produit_id_ajust" class="form-label fw-semibold">Produit <span class="text-danger">*</span></label>
-                        <select name="produit_id_ajust" id="produit_id_ajust" class="form-select" required>
-                            <option value="">-- Choisir --</option>
-                            <?php foreach ($produitsList as $p): ?>
-                                <option value="<?= htmlspecialchars($p['code_produit']) ?>"><?= htmlspecialchars($p['titre_produit']) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-md-4">
-                        <label for="boutique_id_ajust" class="form-label fw-semibold">Boutique <span class="text-danger">*</span></label>
-                        <select name="boutique_id_ajust" id="boutique_id_ajust" class="form-select" required>
-                            <option value="">-- Choisir --</option>
-                            <?php foreach ($boutiquesList as $b): ?>
-                                <option value="<?= htmlspecialchars($b['code_boutique']) ?>"><?= htmlspecialchars($b['nom_boutique']) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-md-4">
-                        <label for="statut_id_ajust" class="form-label fw-semibold">Motif (statut) <span class="text-danger">*</span></label>
-                        <select name="statut_id_ajust" id="statut_id_ajust" class="form-select" required>
-                            <option value="">-- Choisir --</option>
-                            <?php foreach ($statutsAjustement as $s): ?>
-                                <option value="<?= htmlspecialchars($s['code_statut']) ?>">
-                                    <?= htmlspecialchars($s['titre_statut']) ?> (<?= strtolower($s['type_statut']) === 'entree' ? 'Entrée' : 'Sortie' ?>)
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-md-3">
-                        <label for="quantite_ajust" class="form-label fw-semibold">Quantité <span class="text-danger">*</span></label>
-                        <input type="number" name="quantite_ajust" id="quantite_ajust" class="form-control" min="1" required>
-                    </div>
-                    <div class="col-md-9">
-                        <label for="commentaire_ajust" class="form-label fw-semibold">Commentaire <span class="text-danger">*</span></label>
-                        <input type="text" name="commentaire_ajust" id="commentaire_ajust" class="form-control" placeholder="Motif précis du mouvement (obligatoire)" required>
-                    </div>
-                    <div class="col-md-12 mt-3">
-                        <button type="submit" class="btn btn-success w-100"><i class="bi bi-save"></i> Enregistrer l'ajustement</button>
-                    </div>
-                </div>
-            </form>
-
-            <hr class="my-4">
-
-            <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-clock-history me-1"></i> Historique des 30 derniers ajustements</h6>
-            <div style="overflow-x:auto;">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Référence</th>
-                            <th>Produit</th>
-                            <th>Boutique</th>
-                            <th>Motif</th>
-                            <th>Qté</th>
-                            <th>Avant</th>
-                            <th>Après</th>
-                            <th>Commentaire</th>
-                            <th>Date</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php if (empty($historiqueAjustements)): ?>
-                            <tr><td colspan="9" class="text-center text-muted py-3">Aucun ajustement enregistré.</td></tr>
-                        <?php else: ?>
-                            <?php foreach ($historiqueAjustements as $h): ?>
-                                <tr>
-                                    <td><?= htmlspecialchars($h['numero_commande']) ?></td>
-                                    <td><?= htmlspecialchars($h['produit_id']) ?></td>
-                                    <td><?= htmlspecialchars($h['boutique_id']) ?></td>
-                                    <td><?= htmlspecialchars($h['titre_statut'] ?? $h['statut_id']) ?></td>
-                                    <td><?= (int)$h['quantite_commande'] ?></td>
-                                    <td><?= (int)$h['stock_avant'] ?></td>
-                                    <td><?= (int)$h['stock_apres'] ?></td>
-                                    <td><?= htmlspecialchars($h['commentaire']) ?></td>
-                                    <td><?= htmlspecialchars($h['date_commande']) ?> <?= htmlspecialchars($h['heure_commande']) ?></td>
-                                </tr>
-                            <?php endforeach; ?>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        <div class="modal-foot">
-            <button class="btn-secondary" onclick="closeModal('ajustModal')">Fermer</button>
-            <button class="btn-success" onclick="location.reload()"><i class="bi bi-arrow-clockwise"></i> Rafraîchir</button>
-        </div>
-    </div>
-</div>
-
 <!-- Formulaires cachés -->
 <form id="deleteForm" method="POST" style="display:none;">
     <input type="hidden" name="btn_supprimer" value="1">
@@ -1370,26 +1008,6 @@ $(document).ready(function() {
             produitModal.show();
         });
     <?php endif; ?>
-
-    // ---- Gestion de la modale d'ajustement ----
-    function openModal(id) {
-        document.getElementById(id).classList.add('show');
-    }
-    function closeModal(id) {
-        document.getElementById(id).classList.remove('show');
-    }
-    window.openModal = openModal;
-    window.closeModal = closeModal;
-
-    $('#ajustBtn').on('click', function() {
-        openModal('ajustModal');
-    });
-
-    document.querySelectorAll('.modal-overlay').forEach(m => {
-        m.addEventListener('click', function(e) {
-            if (e.target === this) this.classList.remove('show');
-        });
-    });
 });
 </script>
 </body>

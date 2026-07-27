@@ -4,9 +4,9 @@ ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
 // depense.php – Gestion des dépenses (design vente)
 // CRUD pour la table depense – avec Bootstrap SelectPicker
 
-require_once 'databases/database.php';
+require 'databases/database.php';
 
-session_start();
+
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');

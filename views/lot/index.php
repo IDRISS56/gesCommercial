@@ -15,7 +15,7 @@ function sendJson($data)
 
 // views/lot_produit/index.php – Gestion des lots de produits (design dashboard)
 require __DIR__ . '/../../databases/database.php';
-session_start();
+
 
 // Vérification session + utilisateur actif
 if (!isset($_SESSION['user_id'])) {

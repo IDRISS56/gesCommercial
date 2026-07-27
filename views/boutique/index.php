@@ -3,7 +3,7 @@ ob_start();
 
 // views/boutique/index.php – Gestion des boutiques (design vente)
 require 'databases/database.php';
-session_start();
+
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');

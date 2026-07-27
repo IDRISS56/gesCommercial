@@ -1,5 +1,5 @@
 <?php
-require 'database/database.php';
+require 'databases/database.php';
 
 // ----------------------------------------------------
 // Vérification des rôles

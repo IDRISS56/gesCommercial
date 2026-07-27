@@ -1,12 +1,12 @@
 <?php
 // dashboard.php – Tableau de bord entièrement en POST
-session_start();
+
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
     exit;
 }
 
-require_once 'databases/database.php';
+require 'databases/database.php';
 
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
@@ -160,17 +160,40 @@ switch ($periode) {
 }
 
 // Indicateurs
+
+// --- Indicateurs de stock (corrigés) ---
+// Récupération du stock disponible par produit à partir de stock_boutique
+$sqlStock = "
+    SELECT 
+        p.code_produit,
+        p.stock_alerte,
+        COALESCE(SUM(sb.quantite - sb.quantite_reservee), 0) AS stock_disponible
+    FROM produit p
+    LEFT JOIN stock_boutique sb ON sb.produit_id = p.code_produit
+    WHERE p.etat_produit = 'Actif'
+    GROUP BY p.code_produit
+";
+$stmtStock = $pdo->query($sqlStock);
+$stockData = $stmtStock->fetchAll(PDO::FETCH_ASSOC);
+
+$stockNul = 0;
+$stockAlerte = 0;
+$stockOk = 0;
+foreach ($stockData as $row) {
+    $dispo = (int)$row['stock_disponible'];
+    $alerte = (int)$row['stock_alerte'];
+    if ($dispo == 0) {
+        $stockNul++;
+    } elseif ($dispo <= $alerte) {
+        $stockAlerte++;
+    } else {
+        $stockOk++;
+    }
+}
+
+// Total des produits actifs (pour le camembert)
 $stmt = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit='Actif'");
 $totalProduits = intval($stmt->fetchColumn());
-
-$stmt = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit='Actif' AND (COALESCE(stock_produit,0)=0)");
-$stockNul = intval($stmt->fetchColumn());
-
-$stmt = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit='Actif' AND (COALESCE(stock_produit,0)>0) AND (COALESCE(stock_produit,0)<=stock_alerte)");
-$stockAlerte = intval($stmt->fetchColumn());
-
-$stmt = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit='Actif' AND (COALESCE(stock_produit,0)>stock_alerte)");
-$stockOk = intval($stmt->fetchColumn());
 
 $stmt = $pdo->query("SELECT COUNT(*) FROM contact WHERE type_contact='Client' AND etat_contact='Actif'");
 $totalClients = intval($stmt->fetchColumn());

@@ -3,7 +3,7 @@ ob_start();
 
 // views/statut/index.php – Gestion des statuts (design vente)
 require __DIR__ . '/../../databases/database.php';
-session_start();
+
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');

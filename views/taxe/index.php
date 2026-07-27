@@ -13,9 +13,9 @@ function sendJson($data)
 }
 
 // taxe.php – Gestion des taxes (design vente)
-require_once 'databases/database.php';
+require 'databases/database.php';
 
-session_start();
+
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');

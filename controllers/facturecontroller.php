@@ -1,7 +1,13 @@
 ﻿<?php
 class facture {
     public function gestion() {
-        include "views/facture/index.php";
+        requirePermission(['Administrateur', 'Superviseur','Proprietaire']);
+        include "views/facture/facture_client.php";
+    }
+
+    public function reglement() {
+        requirePermission(['Administrateur', 'Superviseur','Proprietaire']);
+        include "views/facture/reglement_facture.php";
     }
 }
 ?>

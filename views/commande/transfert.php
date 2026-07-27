@@ -1,12 +1,12 @@
 <?php
 // views/transferts/index.php – Gestion des transferts de stock (design vente)
-session_start();
+
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
     exit;
 }
 
-require_once 'databases/database.php';
+require 'databases/database.php';
 
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);

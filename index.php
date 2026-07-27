@@ -1,3 +1,3 @@
 <?php
 
-require_once 'utilisateur/login.php';
+require 'utilisateur/login';
