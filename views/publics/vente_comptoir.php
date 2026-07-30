@@ -42,14 +42,31 @@ if (!$user) {
 define('USER_ID', $_SESSION['user_id']);
 define('USER_BOUTIQUE', $user['boutique_id'] ?? null);
 
-// Récupération de la caisse active
-$stmt = $pdo->query("SELECT code_caisse FROM caisse WHERE etat_caisse = 'Actif' LIMIT 1");
-$caisse = $stmt->fetch(PDO::FETCH_ASSOC);
-if (!$caisse) {
-    $stmt = $pdo->query("SELECT code_caisse FROM caisse LIMIT 1");
-    $caisse = $stmt->fetch(PDO::FETCH_ASSOC);
+// Récupération de la caisse active (table `caisses` uniquement).
+// La vente au comptoir exige qu'une journée de caisse soit ouverte
+// (voir /caisse/journee) : c'est la seule source de vérité pour
+// savoir si un poste peut encaisser.
+$sqlCaisse = "SELECT cs.* FROM caisses cs WHERE cs.statut = 'ouverte'";
+$paramsCaisse = [];
+if (!empty(USER_BOUTIQUE)) {
+    $sqlCaisse .= " AND (cs.boutique_id = ? OR cs.boutique_id IS NULL)";
+    $paramsCaisse[] = USER_BOUTIQUE;
 }
-define('CAISSE_ID', $caisse['code_caisse'] ?? '1');
+$sqlCaisse .= " ORDER BY cs.boutique_id IS NULL LIMIT 1";
+$stmt = $pdo->prepare($sqlCaisse);
+$stmt->execute($paramsCaisse);
+$caisseActive = $stmt->fetch(PDO::FETCH_ASSOC);
+
+if (!$caisseActive) {
+    if ($isAjax) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'message' => "Aucune caisse ouverte. Merci d'ouvrir une caisse (menu Ouverture / Fermeture de caisse) avant d'encaisser une vente."]);
+        exit;
+    }
+    echo '<script>alert("Aucune caisse ouverte. Merci d\'ouvrir une caisse avant de vendre.");document.location.replace("caisse/journee");</script>';
+    exit;
+}
+define('CAISSE_ID', $caisseActive['caisse_id']);
 
 // CSRF Token
 if (empty($_SESSION['csrf_token'])) {
@@ -372,13 +389,26 @@ if ($isAjax && $action) {
                     }
 
                     if ($avance > 0) {
-                        $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
-                        $stmtTr = $pdo->prepare("INSERT INTO transaction (numero_transaction, date_transaction, heure_transaction, montant_transaction, frais_transaction, montant_total, type_transaction, contact_id, facture_id, mode_reglement, valider_par, etat_transaction) 
-                                                 VALUES (?, CURDATE(), CURTIME(), ?, 0, ?, 'Encaissement', ?, ?, ?, ?, 'Succes')");
-                        $stmtTr->execute([$numTrans, $avance, $avance, $client_id, $numFacture, $payment_mode, USER_ID]);
+                        // Solde de la caisse AVANT encaissement (pour la traçabilité de la transaction)
+                        $stmtSolde = $pdo->prepare("SELECT solde_actuel FROM caisses WHERE caisse_id = ? FOR UPDATE");
+                        $stmtSolde->execute([CAISSE_ID]);
+                        $soldeAvant = floatval($stmtSolde->fetchColumn());
+                        $soldeApres = $soldeAvant + $avance;
 
-                        $stmtCaisse = $pdo->prepare("UPDATE caisse SET solde_physique = CAST(CAST(COALESCE(solde_physique,0) AS DECIMAL(12,2)) + ? AS CHAR), solde_virtuel = CAST(CAST(COALESCE(solde_virtuel,0) AS DECIMAL(12,2)) + ? AS CHAR) WHERE code_caisse = ?");
-                        $stmtCaisse->execute([$avance, $avance, CAISSE_ID]);
+                        $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
+                        $stmtTr = $pdo->prepare("INSERT INTO transaction
+                                (numero_transaction, date_transaction, heure_transaction, montant_transaction, frais_transaction, montant_total,
+                                 type_transaction, objet_transaction, contact_id, utilisateur_id, caisse_id, facture_id, reference_commande,
+                                 mode_reglement, valider_par, solde_avant_caisse, solde_apres_caisse, etat_transaction)
+                            VALUES (?, CURDATE(), CURTIME(), ?, 0, ?, 'Entree', 'Vente comptoir', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Succes')");
+                        $stmtTr->execute([
+                            $numTrans, $avance, $avance,
+                            $client_id, USER_ID, CAISSE_ID, $numFacture, $numFacture,
+                            $payment_mode, USER_ID, $soldeAvant, $soldeApres
+                        ]);
+
+                        $pdo->prepare("UPDATE caisses SET solde_actuel = ? WHERE caisse_id = ?")
+                            ->execute([$soldeApres, CAISSE_ID]);
                     }
 
                     $pdo->commit();
@@ -765,7 +795,9 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
 
 // ---- RÉCUPÉRATION DES DONNÉES POUR LA PAGE ----
 $taxes = $pdo->query("SELECT * FROM taxe WHERE etat_taxe = 'Actif' ORDER BY type_taxe, taux_taxe")->fetchAll();
-$caisse = $pdo->query("SELECT * FROM caisse WHERE code_caisse = '" . CAISSE_ID . "'")->fetch();
+$stmtCaisseInfo = $pdo->prepare("SELECT * FROM caisses WHERE caisse_id = ?");
+$stmtCaisseInfo->execute([CAISSE_ID]);
+$caisse = $stmtCaisseInfo->fetch();
 $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->fetch();
 ?>
 <!DOCTYPE html>

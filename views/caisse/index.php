@@ -1,20 +1,15 @@
 <?php
-ob_start(); // Capture toute sortie parasite (BOM, espaces, etc.)
-
-// Fonction utilitaire pour envoyer une réponse JSON propre
+ob_start();
 function sendJson($data)
 {
-    while (ob_get_level() > 0) {
-        ob_end_clean();
-    }
+    while (ob_get_level() > 0) ob_end_clean();
     header('Content-Type: application/json');
     echo json_encode($data);
     exit;
 }
 
-// views/caisse/index.php – Gestion des caisses (design vente)
+// views/caisse/index.php - Gestion des registres de caisse (table `caisses`)
 require __DIR__ . '/../../databases/database.php';
-
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
@@ -30,24 +25,14 @@ if (!$user) {
     exit;
 }
 
-function e($str)
-{
-    return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
-}
-function fmt($n)
-{
-    return number_format(floatval($n), 0, ',', ' ');
-}
-function fmtDec($n)
-{
-    return number_format(floatval($n), 2, ',', ' ');
-}
+function e($str) { return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8'); }
+function fmtDec($n) { return number_format(floatval($n), 2, ',', ' '); }
 
 function generateCaisseId($pdo)
 {
     $date = date('Ymd');
-    $prefix = 'C-' . $date . '-';
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM caisse WHERE code_caisse LIKE ?");
+    $prefix = 'CS-' . $date . '-';
+    $stmt = $pdo->prepare("SELECT COUNT(*) FROM caisses WHERE code_caisse LIKE ?");
     $stmt->execute([$prefix . '%']);
     $count = intval($stmt->fetchColumn()) + 1;
     return $prefix . str_pad($count, 4, '0', STR_PAD_LEFT);
@@ -58,44 +43,47 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-$utilisateurs = $pdo->query("SELECT id, nom_prenom, login FROM utilisateur ORDER BY nom_prenom")->fetchAll(PDO::FETCH_ASSOC);
+$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
 
 $message = '';
 $messageType = '';
 $action = $_POST['action'] ?? '';
 
+// ------------------------------------------------------------------
+// AJOUT / MODIFICATION
+// ------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($action === 'add' || $action === 'edit')) {
     $token = $_POST['csrf_token'] ?? '';
     if ($token !== $csrf_token) {
         $message = "Token de sécurité invalide.";
         $messageType = 'danger';
     } else {
-        $code = trim($_POST['code_caisse'] ?? '');
-        $titre = trim($_POST['titre_caisse'] ?? '');
-        $solde_virtuel = floatval(str_replace(',', '.', $_POST['solde_virtuel'] ?? 0));
-        $solde_physique = floatval(str_replace(',', '.', $_POST['solde_physique'] ?? 0));
-        $utilisateur_id = trim($_POST['utilisateur_id'] ?? '');
-        $etat = trim($_POST['etat_caisse'] ?? 'Actif');
+        $nom_caisse      = trim($_POST['nom_caisse'] ?? '');
+        $type_caisse     = trim($_POST['type_caisse'] ?? 'Principale');
+        $plafond_maximum = floatval(str_replace(',', '.', $_POST['plafond_maximum'] ?? 0));
+        $boutique_id     = trim($_POST['boutique_id'] ?? '') ?: null;
+        $solde_actuel    = floatval(str_replace(',', '.', $_POST['solde_actuel'] ?? 0));
+
         $errors = [];
-        if (empty($code)) $errors[] = 'Le code caisse est requis.';
-        if (empty($titre)) $errors[] = 'Le titre est requis.';
+        if (empty($nom_caisse)) $errors[] = 'Le nom de la caisse est requis.';
+        if ($plafond_maximum <= 0) $errors[] = 'Le plafond doit être supérieur à 0.';
+
         if (empty($errors)) {
             try {
                 if ($action === 'add') {
                     $code = generateCaisseId($pdo);
-                    $sql = "INSERT INTO caisse (code_caisse, titre_caisse, solde_virtuel, solde_physique, utilisateur_id, etat_caisse)
-                            VALUES (?, ?, ?, ?, ?, ?)";
-                    $stmt = $pdo->prepare($sql);
-                    $stmt->execute([$code, $titre, $solde_virtuel, $solde_physique, $utilisateur_id, $etat]);
-                    $message = "Caisse « $titre » ajoutée avec succès. ID : $code";
+                    $caisse_id = $code; // code_caisse sert aussi d'identifiant lisible
+                    $sql = "INSERT INTO caisses (caisse_id, code_caisse, nom_caisse, type_caisse, solde_actuel, plafond_maximum, boutique_id, statut)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 'fermee')";
+                    $pdo->prepare($sql)->execute([$caisse_id, $code, $nom_caisse, $type_caisse, $solde_actuel, $plafond_maximum, $boutique_id]);
+                    $message = "Caisse « $nom_caisse » créée avec succès. Code : $code";
                     $messageType = 'success';
                 } elseif ($action === 'edit') {
-                    $oldCode = $_POST['old_code'] ?? $code;
-                    $sql = "UPDATE caisse SET titre_caisse=?, solde_virtuel=?, solde_physique=?, utilisateur_id=?, etat_caisse=?
-                            WHERE code_caisse = ?";
-                    $stmt = $pdo->prepare($sql);
-                    $stmt->execute([$titre, $solde_virtuel, $solde_physique, $utilisateur_id, $etat, $oldCode]);
-                    $message = "Caisse « $titre » mise à jour.";
+                    $oldId = $_POST['old_caisse_id'] ?? '';
+                    $sql = "UPDATE caisses SET nom_caisse=?, type_caisse=?, plafond_maximum=?, boutique_id=?
+                            WHERE caisse_id = ?";
+                    $pdo->prepare($sql)->execute([$nom_caisse, $type_caisse, $plafond_maximum, $boutique_id, $oldId]);
+                    $message = "Caisse « $nom_caisse » mise à jour.";
                     $messageType = 'success';
                 }
             } catch (PDOException $e) {
@@ -109,22 +97,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($action === 'add' || $action === '
     }
 }
 
+// ------------------------------------------------------------------
+// SUPPRESSION
+// ------------------------------------------------------------------
 if (isset($_POST['btn_supprimer']) && $_POST['btn_supprimer'] == '1') {
     $token = $_POST['csrf_token'] ?? '';
     if ($token !== $csrf_token) {
         $message = "Token de sécurité invalide.";
         $messageType = 'danger';
     } else {
-        $code = $_POST['sai_supprimer_id'] ?? '';
-        if (!empty($code)) {
+        $caisse_id = $_POST['sai_supprimer_id'] ?? '';
+        if (!empty($caisse_id)) {
             try {
-                $stmt = $pdo->prepare("SELECT titre_caisse FROM caisse WHERE code_caisse = ?");
-                $stmt->execute([$code]);
-                $titre = $stmt->fetchColumn();
-                $stmt = $pdo->prepare("DELETE FROM caisse WHERE code_caisse = ?");
-                $stmt->execute([$code]);
-                $message = "Caisse « $titre » supprimée.";
-                $messageType = 'danger';
+                $stmt = $pdo->prepare("SELECT COUNT(*) FROM journees_caisse WHERE caisse_id = ? AND statut = 'ouverte'");
+                $stmt->execute([$caisse_id]);
+                if ($stmt->fetchColumn() > 0) {
+                    $message = "Impossible de supprimer : une journée de caisse est actuellement ouverte sur ce registre.";
+                    $messageType = 'warning';
+                } else {
+                    $stmt = $pdo->prepare("SELECT nom_caisse FROM caisses WHERE caisse_id = ?");
+                    $stmt->execute([$caisse_id]);
+                    $nom = $stmt->fetchColumn();
+                    $pdo->prepare("DELETE FROM caisses WHERE caisse_id = ?")->execute([$caisse_id]);
+                    $message = "Caisse « $nom » supprimée.";
+                    $messageType = 'danger';
+                }
             } catch (PDOException $e) {
                 $message = "Erreur : " . $e->getMessage();
                 $messageType = 'danger';
@@ -133,716 +130,297 @@ if (isset($_POST['btn_supprimer']) && $_POST['btn_supprimer'] == '1') {
     }
 }
 
-function getTableContent($pdo, $search, $utilisateur_filter, $page, $perPage = 20)
+// ------------------------------------------------------------------
+// LISTE (avec recherche + pagination, réponse AJAX)
+// ------------------------------------------------------------------
+function getTableContent($pdo, $search, $boutique_filter, $page, $perPage = 20)
 {
-    $sql = "SELECT c.*, u.nom_prenom AS utilisateur_nom
-            FROM caisse c
-            LEFT JOIN utilisateur u ON c.utilisateur_id = u.id
+    $sql = "SELECT cs.*, b.nom_boutique
+            FROM caisses cs
+            LEFT JOIN boutique b ON b.code_boutique = cs.boutique_id
             WHERE 1=1";
     $params = [];
     if (!empty($search)) {
-        $sql .= " AND (c.code_caisse LIKE ? OR c.titre_caisse LIKE ?)";
+        $sql .= " AND (cs.code_caisse LIKE ? OR cs.nom_caisse LIKE ?)";
         $like = '%' . $search . '%';
         $params[] = $like;
         $params[] = $like;
     }
-    if (!empty($utilisateur_filter)) {
-        $sql .= " AND c.utilisateur_id = ?";
-        $params[] = $utilisateur_filter;
+    if (!empty($boutique_filter)) {
+        $sql .= " AND cs.boutique_id = ?";
+        $params[] = $boutique_filter;
     }
-    $countSql = str_replace("SELECT c.*, u.nom_prenom AS utilisateur_nom", "SELECT COUNT(*)", $sql);
+    $countSql = str_replace("SELECT cs.*, b.nom_boutique", "SELECT COUNT(*)", $sql);
     $stmt = $pdo->prepare($countSql);
     $stmt->execute($params);
     $total = $stmt->fetchColumn();
     $totalPages = ceil($total / $perPage);
     if ($page > $totalPages && $totalPages > 0) $page = $totalPages;
-    $sql .= " ORDER BY c.code_caisse LIMIT " . (($page - 1) * $perPage) . ", $perPage";
+    $sql .= " ORDER BY cs.code_caisse LIMIT " . (($page - 1) * $perPage) . ", $perPage";
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
-    $caisses = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     ob_start();
-    if (empty($caisses)): ?>
+    if (empty($rows)): ?>
+        <tr><td colspan="7" class="text-center py-5 text-muted">Aucune caisse trouvée</td></tr>
+    <?php else: foreach ($rows as $c): ?>
         <tr>
-            <td colspan="7" class="text-center py-5 text-muted">
-                <i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>
-                Aucune caisse trouvée
+            <td class="fw-bold"><?= e($c['code_caisse']) ?></td>
+            <td class="fw-semibold"><?= e($c['nom_caisse']) ?></td>
+            <td><?= e($c['type_caisse']) ?></td>
+            <td class="text-end"><?= fmtDec($c['solde_actuel']) ?> F</td>
+            <td class="text-end"><?= fmtDec($c['plafond_maximum']) ?> F</td>
+            <td><?= e($c['nom_boutique'] ?? '—') ?></td>
+            <td>
+                <span class="badge <?= $c['statut'] === 'ouverte' ? 'bg-success' : 'bg-secondary' ?>">
+                    <?= $c['statut'] === 'ouverte' ? 'Ouverte' : 'Fermée' ?>
+                </span>
+            </td>
+            <td class="text-end">
+                <button class="btn btn-sm btn-outline-primary editBtn" data-id="<?= e($c['caisse_id']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
+                <button class="btn btn-sm btn-outline-danger deleteBtn" data-id="<?= e($c['caisse_id']) ?>" data-nom="<?= e($c['nom_caisse']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash3"></i></button>
             </td>
         </tr>
-    <?php else: ?>
-        <?php foreach ($caisses as $c): ?>
-            <tr>
-                <td class="td-bold"><?= e($c['code_caisse']) ?></td>
-                <td class="td-semi"><?= e($c['titre_caisse']) ?></td>
-                <td><?= fmtDec($c['solde_virtuel']) ?></td>
-                <td><?= fmtDec($c['solde_physique']) ?></td>
-                <td><?= e($c['utilisateur_nom'] ?? '—') ?></td>
-                <td>
-                    <span class="status-badge <?= $c['etat_caisse'] === 'Actif' ? 'on' : 'off' ?>">
-                        <span class="sdot"></span><?= e($c['etat_caisse']) ?>
-                    </span>
-                </td>
-                <td class="text-end">
-                    <div class="d-inline-flex gap-1">
-                        <button class="act-btn e editBtn" data-code="<?= e($c['code_caisse']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
-                        <button class="act-btn d deleteBtn" data-code="<?= e($c['code_caisse']) ?>" data-nom="<?= e($c['titre_caisse']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash3"></i></button>
-                    </div>
-                </td>
-            </tr>
-        <?php endforeach; ?>
-    <?php endif;
+    <?php endforeach; endif;
     $tableHtml = ob_get_clean();
 
     ob_start();
     if ($totalPages > 1): ?>
-        <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-top bg-light">
-            <span class="text-muted small">Affichage de <?= (($page - 1) * $perPage + 1) ?> à <?= min($page * $perPage, $total) ?> sur <?= $total ?></span>
+        <div class="d-flex justify-content-between align-items-center p-3 border-top bg-light">
+            <span class="text-muted small">Page <?= $page ?> / <?= $totalPages ?> (<?= $total ?> caisse(s))</span>
             <nav>
                 <ul class="pagination pagination-sm mb-0">
-                    <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
-                    </li>
-                    <?php
-                    $start = max(1, $page - 2);
-                    $end = min($totalPages, $page + 2);
-                    if ($start > 1) {
-                        echo '<li class="page-item"><a class="page-link" href="#" data-page="1">1</a></li>';
-                        if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
-                    }
-                    for ($i = $start; $i <= $end; $i++):
-                        ?>
-                        <li class="page-item <?= ($i == $page) ? 'active' : '' ?>">
-                            <a class="page-link" href="#" data-page="<?= $i ?>"><?= $i ?></a>
-                        </li>
-                    <?php endfor;
-                    if ($end < $totalPages) {
-                        if ($end < $totalPages - 1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
-                        echo '<li class="page-item"><a class="page-link" href="#" data-page="' . $totalPages . '">' . $totalPages . '</a></li>';
-                    }
-                    ?>
-                    <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
-                        <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
-                    </li>
+                    <?php for ($i = 1; $i <= $totalPages; $i++): ?>
+                        <li class="page-item <?= $i == $page ? 'active' : '' ?>"><a class="page-link" href="#" data-page="<?= $i ?>"><?= $i ?></a></li>
+                    <?php endfor; ?>
                 </ul>
             </nav>
         </div>
     <?php endif;
     $paginationHtml = ob_get_clean();
 
-    return [
-        'table'      => $tableHtml,
-        'pagination' => $paginationHtml,
-        'total'      => $total,
-        'page'       => $page,
-        'totalPages' => $totalPages
-    ];
+    return ['table' => $tableHtml, 'pagination' => $paginationHtml, 'total' => $total, 'page' => $page, 'totalPages' => $totalPages];
 }
 
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
-    $search = trim($_POST['search'] ?? '');
-    $utilisateur_filter = trim($_POST['utilisateur_filter'] ?? '');
-    $page = (int)($_POST['page'] ?? 1);
-    if ($page < 1) $page = 1;
-    $result = getTableContent($pdo, $search, $utilisateur_filter, $page);
+    $result = getTableContent($pdo, trim($_POST['search'] ?? ''), trim($_POST['boutique_filter'] ?? ''), (int)($_POST['page'] ?? 1));
     sendJson($result);
 }
 
-$search = trim($_POST['search'] ?? '');
-$utilisateur_filter = trim($_POST['utilisateur_filter'] ?? '');
-$page = (int)($_POST['page'] ?? 1);
-if ($page < 1) $page = 1;
-$initialData = getTableContent($pdo, $search, $utilisateur_filter, $page);
+$initialData = getTableContent($pdo, '', '', 1);
 
 $editCaisse = null;
-if ($action === 'load_edit' && isset($_POST['edit_code'])) {
-    $code = $_POST['edit_code'];
-    $stmt = $pdo->prepare("SELECT * FROM caisse WHERE code_caisse = ?");
-    $stmt->execute([$code]);
+if ($action === 'load_edit' && isset($_POST['edit_id'])) {
+    $stmt = $pdo->prepare("SELECT * FROM caisses WHERE caisse_id = ?");
+    $stmt->execute([$_POST['edit_id']]);
     $editCaisse = $stmt->fetch(PDO::FETCH_ASSOC);
 }
-$newId = generateCaisseId($pdo);
+$newCode = generateCaisseId($pdo);
 ?>
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gestion des caisses</title>
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <!-- Bootstrap Icons & Bootstrap -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Bootstrap SelectPicker -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css" rel="stylesheet">
-    <style>
-        /* ===== STYLE DASHBOARD (repris de vente.php) ===== */
-        :root {
-            --b: #2563eb;
-            --bd: #1d4ed8;
-            --bl: #eff6ff;
-            --bb: #bfdbfe;
-            --bg: #f1f5f9;
-            --w: #fff;
-            --dk: #0f172a;
-            --mt: #64748b;
-            --lt: #94a3b8;
-            --brd: #e2e8f0;
-            --dng: #ef4444;
-            --dngl: #fef2f2;
-            --dngb: #fecaca;
-            --suc: #10b981;
-            --sucl: #ecfdf5;
-            --sucb: #a7f3d0;
-            --wrn: #f59e0b;
-            --wrnl: #fffbeb;
-            --wrnb: #fde68a;
-            --prp: #8b5cf6;
-            --prpl: #f5f3ff;
-            --prpb: #e9d5ff;
-            --tl: #0891b2;
-            --tll: #ecfeff;
-            --tlb: #cffafe;
-            --R: 16px;
-            --Rs: 10px;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Inter', -apple-system, sans-serif;
-            background: var(--bg);
-            color: var(--dk);
-            min-height: 100vh;
-            line-height: 1.5;
-            padding: 28px 20px;
-        }
-        ::-webkit-scrollbar { width: 5px; }
-        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-
-        .W { max-width: 1400px; margin: 0 auto; }
-        .hdr {
-            display: flex;
-            align-items: flex-end;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        .hdr-l h1 { font-size: 26px; font-weight: 800; color: var(--dk); letter-spacing: -0.02em; }
-        .hdr-l p { font-size: 13px; color: var(--mt); margin-top: 2px; font-weight: 500; }
-        .hdr-r {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        .hdr-badge {
-            background: var(--bl);
-            border: 1px solid var(--bb);
-            color: var(--b);
-            padding: 8px 14px;
-            border-radius: var(--Rs);
-            font-size: 12px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .pbar {
-            background: var(--w);
-            border: 1px solid var(--brd);
-            border-radius: var(--R);
-            padding: 16px 20px;
-            margin-bottom: 22px;
-            box-shadow: 0 1px 3px rgba(0,0,0,.04);
-        }
-        .prow {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        .prow label {
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--mt);
-            letter-spacing: .03em;
-            text-transform: uppercase;
-        }
-        .prow input, .prow select {
-            padding: 7px 10px;
-            border: 1.5px solid var(--brd);
-            border-radius: 8px;
-            font-size: 13px;
-            font-weight: 500;
-            color: var(--dk);
-            background: var(--bg);
-            font-family: 'Inter', sans-serif;
-            transition: all .2s;
-        }
-        .prow input:focus, .prow select:focus {
-            border-color: var(--b);
-            background: #fff;
-            box-shadow: 0 0 0 3px var(--bl);
-            outline: none;
-        }
-        .prow select {
-            appearance: none;
-            padding-right: 32px;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2364748b' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
-            background-repeat: no-repeat;
-            background-position: right 10px center;
-        }
-        .btn-go {
-            background: var(--b);
-            color: #fff;
-            padding: 7px 16px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            box-shadow: 0 2px 4px rgba(37,99,235,.2);
-            transition: background .15s;
-            border: none;
-            cursor: pointer;
-        }
-        .btn-go:hover { background: var(--bd); }
-        .btn-go-outline {
-            background: transparent;
-            color: var(--mt);
-            border: 1.5px solid var(--brd);
-            padding: 7px 14px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 600;
-            transition: all .2s;
-            cursor: pointer;
-        }
-        .btn-go-outline:hover {
-            background: var(--bg);
-            border-color: var(--lt);
-        }
-
-        .data-table-wrap {
-            background: var(--w);
-            border: 1px solid var(--brd);
-            border-radius: var(--R);
-            overflow: hidden;
-            box-shadow: 0 1px 3px rgba(0,0,0,.04);
-        }
-        .table>:not(caption)>*>* { padding: 12px 18px; }
-        .table thead th {
-            font-size: 0.7rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-            color: var(--lt);
-            background: var(--bg);
-            border-bottom: 1px solid var(--brd);
-        }
-        .table tbody tr {
-            border-bottom: 1px solid var(--brd);
-            transition: background .2s;
-        }
-        .table tbody tr:hover { background: var(--bl); }
-        .table tbody td {
-            vertical-align: middle;
-            color: var(--dk);
-            font-size: 0.85rem;
-        }
-        .td-bold { color: var(--dk) !important; font-weight: 700; }
-        .td-semi { color: var(--dk) !important; font-weight: 500; }
-
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 14px;
-            border-radius: 999px;
-            font-size: 0.73rem;
-            font-weight: 700;
-            text-transform: capitalize;
-        }
-        .status-badge .sdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-        .status-badge.on { background: var(--sucl); color: #059669; }
-        .status-badge.off { background: var(--dngl); color: #dc2626; }
-
-        .act-btn {
-            width: 34px;
-            height: 34px;
-            border-radius: 6px;
-            border: 1px solid transparent;
-            background: transparent;
-            color: var(--lt);
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            transition: all .2s;
-        }
-        .act-btn:hover { transform: scale(1.1); }
-        .act-btn.e:hover { color: var(--wrn); background: var(--wrnl); border-color: rgba(245,158,11,.15); }
-        .act-btn.d:hover { color: var(--dng); background: var(--dngl); border-color: rgba(239,68,68,.15); }
-
-        .pagination .page-link {
-            color: var(--b);
-            border: 1px solid var(--brd);
-            border-radius: 6px;
-            margin: 0 2px;
-            padding: 6px 14px;
-            font-weight: 500;
-        }
-        .pagination .page-link:hover { background: var(--bl); border-color: var(--b); }
-        .pagination .page-item.active .page-link { background: var(--b); border-color: var(--b); color: #fff; }
-        .pagination .page-item.disabled .page-link { color: var(--lt); border-color: var(--brd); }
-
-        .modal-content {
-            border-radius: var(--R);
-            border: none;
-            box-shadow: 0 12px 40px rgba(15,23,42,.08);
-        }
-        .modal-header { border-bottom: 1px solid var(--brd); background: var(--bg); }
-        .modal-footer { border-top: 1px solid var(--brd); background: var(--bg); }
-
-        @keyframes fadeUp {
-            from { opacity: 0; transform: translateY(12px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .data-table-wrap { animation: fadeUp .4s ease both; }
-
-        @media (max-width:700px) {
-            body { padding: 14px; }
-            .hdr { flex-direction: column; align-items: flex-start; }
-            .prow { flex-direction: column; align-items: stretch; }
-            .prow .btn-go { width: 100%; justify-content: center; }
-        }
-        .bootstrap-select .dropdown-toggle .filter-option { color: var(--dk); }
-        .bootstrap-select .dropdown-menu {
-            border-radius: var(--Rs);
-            border-color: var(--brd);
-        }
-        .bootstrap-select .dropdown-menu .bs-searchbox input {
-            border-radius: 6px;
-            border: 1px solid var(--brd);
-            padding: 8px 12px;
-        }
-        .bootstrap-select .dropdown-menu .bs-searchbox input:focus {
-            border-color: var(--b);
-            box-shadow: 0 0 0 3px var(--bl);
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gestion des caisses</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<style>
+body{background:#f1f5f9;font-family:'Segoe UI',sans-serif;padding:24px;}
+.card-app{border:none;border-radius:14px;box-shadow:0 1px 4px rgba(0,0,0,.06);}
+</style>
 </head>
 <body>
-<div class="W">
-    <!-- En-tête -->
-    <div class="hdr">
-        <div class="hdr-l">
-            <h1>Gestion des caisses</h1>
-            <p>Gérez les caisses et leurs soldes</p>
+<div class="container-fluid" style="max-width:1300px;">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h4 class="fw-bold mb-0"><i class="bi bi-cash-register text-primary"></i> Gestion des caisses</h4>
+            <p class="text-muted small mb-0">Registres de caisse (table <code>caisses</code>). Pour ouvrir/fermer une journée, utilisez le menu "Ouverture / Fermeture de caisse".</p>
         </div>
-        <div class="hdr-r">
-            <div class="hdr-badge"><i class="bi bi-cash-register"></i> <?= $initialData['total'] ?? 0 ?> caisse(s)</div>
-            <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouvelle caisse</button>
-        </div>
+        <button class="btn btn-primary" id="addBtn"><i class="bi bi-plus-lg"></i> Nouvelle caisse</button>
     </div>
 
-    <!-- Messages -->
     <?php if ($message): ?>
-        <div class="alert alert-<?= $messageType === 'error' ? 'danger' : 'success' ?> alert-dismissible fade show" role="alert">
-            <?= $message ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
+        <div class="alert alert-<?= e($messageType) ?> alert-dismissible fade show"><?= $message ?><button class="btn-close" data-bs-dismiss="alert"></button></div>
     <?php endif; ?>
 
-    <!-- Barre de recherche / filtres -->
-    <div class="pbar">
-        <form id="searchForm" method="post" onsubmit="return false;">
-            <input type="hidden" name="ajax" value="1">
-            <input type="hidden" name="page" id="pageInput" value="<?= $page ?>">
-            <div class="prow">
-                <label for="searchInput"><i class="bi bi-search"></i> Recherche</label>
-                <input type="text" name="search" id="searchInput" placeholder="Code, titre..." value="<?= e($search) ?>" style="flex:1; min-width:150px;">
-                <label for="utilisateurFilter">Utilisateur</label>
-                <select name="utilisateur_filter" id="utilisateurFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un utilisateur...">
-                    <option value="">Tous</option>
-                    <?php foreach ($utilisateurs as $u): ?>
-                        <option value="<?= e($u['id']) ?>" <?= ($utilisateur_filter == $u['id']) ? 'selected' : '' ?>>
-                            <?= e($u['nom_prenom']) ?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-                <button type="button" class="btn-go" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
-                <button type="button" class="btn-go-outline" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i> Réinitialiser</button>
-            </div>
-        </form>
+    <div class="card card-app mb-3">
+        <div class="card-body py-2">
+            <form id="searchForm" class="row g-2 align-items-center">
+                <div class="col-md-4">
+                    <input type="text" class="form-control" id="searchInput" name="search" placeholder="Rechercher (code, nom)...">
+                </div>
+                <div class="col-md-4">
+                    <select class="form-select" id="boutiqueFilter" name="boutique_filter">
+                        <option value="">Toutes les boutiques</option>
+                        <?php foreach ($boutiques as $b): ?>
+                            <option value="<?= e($b['code_boutique']) ?>"><?= e($b['nom_boutique']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            </form>
+        </div>
     </div>
 
-    <!-- Tableau -->
-    <div class="data-table-wrap" id="tableWrapper">
-        <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
-            <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;">Liste des caisses</h5>
-            <span class="text-muted small" id="totalCount"><?= $initialData['total'] ?> caisse(s) - Page <?= $initialData['page'] ?> / <?= max(1, $initialData['totalPages']) ?></span>
-        </div>
+    <div class="card card-app">
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
-                <thead>
+                <thead class="table-light">
                     <tr>
-                        <th>Code</th>
-                        <th>Titre</th>
-                        <th>Solde virtuel</th>
-                        <th>Solde physique</th>
-                        <th>Utilisateur</th>
-                        <th>État</th>
-                        <th class="text-end">Actions</th>
+                        <th>Code</th><th>Nom</th><th>Type</th><th class="text-end">Solde actuel</th>
+                        <th class="text-end">Plafond</th><th>Boutique</th><th>Statut</th><th></th>
                     </tr>
                 </thead>
-                <tbody id="tableBody">
-                    <?= $initialData['table'] ?>
-                </tbody>
+                <tbody id="tableBody"><?= $initialData['table'] ?></tbody>
             </table>
         </div>
-        <div id="paginationContainer">
-            <?= $initialData['pagination'] ?>
-        </div>
+        <div id="paginationContainer"><?= $initialData['pagination'] ?></div>
     </div>
 </div>
 
-<!-- ========================================================= -->
-<!-- MODAL FORMULAIRE (ajout/modification) -->
-<!-- ========================================================= -->
-<div class="modal fade" id="caisseModal" tabindex="-1" aria-labelledby="modalTitle" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered">
+<!-- MODALE AJOUT/EDITION -->
+<div class="modal fade" id="caisseModal" tabindex="-1">
+    <div class="modal-dialog">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-cash-register text-primary me-2"></i> Nouvelle caisse</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
-            </div>
             <form method="post" id="caisseForm">
-                <input type="hidden" name="action" id="formAction" value="add">
-                <input type="hidden" name="old_code" id="oldCode" value="">
-                <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalTitle">Nouvelle caisse</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
                 <div class="modal-body">
-                    <!-- Identification -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
-                    <div class="row g-3 mb-4">
-                        <div class="col-md-6">
-                            <label for="code_caisse" class="form-label fw-semibold">Code caisse</label>
-                            <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-hash"></i></span>
-                                <input type="text" class="form-control" id="code_caisse" name="code_caisse" readonly value="<?= e($editCaisse['code_caisse'] ?? $newId) ?>">
-                            </div>
-                            <div class="form-text">ID généré automatiquement</div>
+                    <input type="hidden" name="action" id="formAction" value="add">
+                    <input type="hidden" name="old_caisse_id" id="oldCaisseId" value="">
+                    <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
+                    <div class="mb-3">
+                        <label class="form-label">Code caisse</label>
+                        <input type="text" class="form-control" id="code_caisse" readonly>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Nom de la caisse *</label>
+                        <input type="text" class="form-control" name="nom_caisse" id="nom_caisse" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Type</label>
+                        <select class="form-select" name="type_caisse" id="type_caisse">
+                            <option value="Principale">Principale</option>
+                            <option value="Secondaire">Secondaire</option>
+                            <option value="Mobile">Mobile</option>
+                        </select>
+                    </div>
+                    <div class="row g-2">
+                        <div class="col-6">
+                            <label class="form-label">Solde de départ</label>
+                            <input type="number" step="0.01" class="form-control" name="solde_actuel" id="solde_actuel" value="0">
                         </div>
-                        <div class="col-md-6">
-                            <label for="titre_caisse" class="form-label fw-semibold">Titre <span class="text-danger">*</span></label>
-                            <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-cash-register"></i></span>
-                                <input type="text" class="form-control" id="titre_caisse" name="titre_caisse" required placeholder="Nom de la caisse" value="<?= e($editCaisse['titre_caisse'] ?? '') ?>">
-                            </div>
+                        <div class="col-6">
+                            <label class="form-label">Plafond maximum *</label>
+                            <input type="number" step="0.01" class="form-control" name="plafond_maximum" id="plafond_maximum" value="1000000" required>
                         </div>
                     </div>
-
-                    <!-- Soldes -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-coins me-1"></i> Soldes</h6>
-                    <div class="row g-3 mb-4">
-                        <div class="col-md-6">
-                            <label for="solde_virtuel" class="form-label fw-semibold">Solde virtuel</label>
-                            <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-wallet2"></i></span>
-                                <input type="number" step="0.01" class="form-control" id="solde_virtuel" name="solde_virtuel" placeholder="0.00" value="<?= e($editCaisse['solde_virtuel'] ?? '0') ?>">
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <label for="solde_physique" class="form-label fw-semibold">Solde physique</label>
-                            <div class="input-group">
-                                <span class="input-group-text"><i class="bi bi-cash-stack"></i></span>
-                                <input type="number" step="0.01" class="form-control" id="solde_physique" name="solde_physique" placeholder="0.00" value="<?= e($editCaisse['solde_physique'] ?? '0') ?>">
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Utilisateur -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-person me-1"></i> Utilisateur responsable</h6>
-                    <div class="row g-3 mb-4">
-                        <div class="col-md-12">
-                            <label for="utilisateur_id" class="form-label fw-semibold">Utilisateur</label>
-                            <select class="selectpicker form-control" id="utilisateur_id" name="utilisateur_id"
-                                    data-live-search="true"
-                                    data-live-search-placeholder="Rechercher un utilisateur..."
-                                    data-none-selected-text="=== Faites votre choix ===">
-                                <option value="">Aucun</option>
-                                <?php foreach ($utilisateurs as $u): ?>
-                                    <option value="<?= e($u['id']) ?>" <?= (isset($editCaisse) && $editCaisse['utilisateur_id'] == $u['id']) ? 'selected' : '' ?>>
-                                        <?= e($u['nom_prenom']) ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </div>
-                    </div>
-
-                    <!-- État -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-toggle-on me-1"></i> Statut</h6>
-                    <div class="row g-3">
-                        <div class="col-md-6">
-                            <label for="etat_caisse" class="form-label fw-semibold">État</label>
-                            <select class="form-select" id="etat_caisse" name="etat_caisse">
-                                <option value="Actif"   <?= (isset($editCaisse) && $editCaisse['etat_caisse'] === 'Actif')   ? 'selected' : '' ?>>Actif</option>
-                                <option value="Inactif" <?= (isset($editCaisse) && $editCaisse['etat_caisse'] === 'Inactif') ? 'selected' : '' ?>>Inactif</option>
-                            </select>
-                        </div>
+                    <div class="mb-3 mt-2">
+                        <label class="form-label">Boutique</label>
+                        <select class="form-select" name="boutique_id" id="boutique_id">
+                            <option value="">Aucune</option>
+                            <?php foreach ($boutiques as $b): ?>
+                                <option value="<?= e($b['code_boutique']) ?>"><?= e($b['nom_boutique']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
-                    <button type="submit" class="btn btn-primary" id="saveBtn"><i class="bi bi-save"></i> Enregistrer</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                    <button type="submit" class="btn btn-primary">Enregistrer</button>
                 </div>
             </form>
         </div>
     </div>
 </div>
 
-<!-- ========================================================= -->
-<!-- MODALE : CONFIRMATION SUPPRESSION -->
-<!-- ========================================================= -->
-<div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
+<!-- MODALE SUPPRESSION -->
+<div class="modal fade" id="deleteConfirmModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content border-0 shadow" style="border-radius:16px;">
+        <div class="modal-content">
             <div class="modal-body text-center p-4">
-                <div class="mb-3"><i class="bi bi-exclamation-triangle-fill text-warning" style="font-size:3rem;"></i></div>
-                <h5 class="modal-title mb-2" style="font-weight:600;">Confirmer la suppression</h5>
-                <p class="text-danger mb-4">Supprimer la caisse <strong id="deleteNomCaisse"></strong> ?<br>Cette action est irréversible.</p>
+                <i class="bi bi-exclamation-triangle-fill text-warning" style="font-size:2.5rem;"></i>
+                <p class="mt-3">Supprimer la caisse <strong id="deleteNom"></strong> ?</p>
                 <div class="d-flex gap-2 justify-content-center">
-                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
-                    <button type="button" class="btn btn-danger" id="confirmDeleteBtn"><i class="bi bi-trash3 me-1"></i> Supprimer</button>
+                    <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
+                    <button class="btn btn-danger" id="confirmDeleteBtn">Supprimer</button>
                 </div>
             </div>
         </div>
     </div>
 </div>
 
-<!-- Formulaires cachés -->
 <form id="deleteForm" method="POST" style="display:none;">
     <input type="hidden" name="btn_supprimer" value="1">
-    <input type="hidden" name="sai_supprimer_id" id="deleteFormId" value="">
+    <input type="hidden" name="sai_supprimer_id" id="deleteFormId">
     <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
 </form>
-<form method="post" id="actionForm">
-    <input type="hidden" name="action" id="actionField">
-    <input type="hidden" name="edit_code" id="editCodeField">
+<form method="post" id="editLoadForm" style="display:none;">
+    <input type="hidden" name="action" value="load_edit">
+    <input type="hidden" name="edit_id" id="editIdField">
     <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
 </form>
 
-<!-- ========================================================= -->
-<!-- SCRIPTS -->
-<!-- ========================================================= -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
 <script>
-$(document).ready(function() {
-    // Initialisation des selectpicker
-    $('.selectpicker').selectpicker('destroy');
-    $('.selectpicker').selectpicker();
+$(function(){
+    const modal = new bootstrap.Modal(document.getElementById('caisseModal'));
 
-    const caisseModal = new bootstrap.Modal(document.getElementById('caisseModal'));
-
-    // --- Ajout ---
-    $('#addBtn').on('click', function() {
+    $('#addBtn').on('click', function(){
         $('#formAction').val('add');
-        $('#oldCode').val('');
-        $('#modalTitle').html('<i class="bi bi-cash-register text-primary me-2"></i> Nouvelle caisse');
+        $('#oldCaisseId').val('');
+        $('#modalTitle').text('Nouvelle caisse');
         $('#caisseForm')[0].reset();
-        $('#code_caisse').prop('readonly', true);
-        $('#code_caisse').val('<?= $newId ?>');
-        $('#solde_virtuel, #solde_physique').val('0');
-        $('#etat_caisse').val('Actif');
-        $('#utilisateur_id').selectpicker('val', '');
-        caisseModal.show();
+        $('#code_caisse').val('<?= e($newCode) ?>');
+        modal.show();
     });
 
-    // --- Édition (chargement via formulaire POST) ---
-    $(document).on('click', '.editBtn', function() {
-        const code = $(this).data('code');
-        $('#actionField').val('load_edit');
-        $('#editCodeField').val(code);
-        $('#actionForm').submit();
+    $(document).on('click', '.editBtn', function(){
+        $('#editIdField').val($(this).data('id'));
+        $('#editLoadForm').submit();
     });
 
-    // --- Fonction de recherche AJAX ---
-    function rechercher(page) {
+    $(document).on('click', '.deleteBtn', function(){
+        $('#deleteFormId').val($(this).data('id'));
+        $('#deleteNom').text($(this).data('nom'));
+    });
+    $('#confirmDeleteBtn').on('click', function(){ $('#deleteForm').submit(); });
+
+    function rechercher(page){
         page = page || 1;
-        var formData = $('#searchForm').serialize();
-        formData += '&page=' + page;
         $.ajax({
-            url: window.location.href,
-            method: 'POST',
-            data: formData,
-            dataType: 'json',
-            success: function(data) {
+            url: window.location.href, method:'POST',
+            data: $('#searchForm').serialize() + '&ajax=1&page=' + page,
+            dataType:'json',
+            success: function(data){
                 $('#tableBody').html(data.table);
                 $('#paginationContainer').html(data.pagination);
-                $('#totalCount').text(data.total + ' caisse(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
-                $('.page-link').off('click').on('click', function(e) {
-                    e.preventDefault();
-                    var p = $(this).data('page');
-                    if (p) rechercher(p);
-                });
-                $('.selectpicker').selectpicker('refresh');
-            },
-            error: function(xhr, status, error) {
-                console.error('Statut :', status);
-                console.error('Réponse brute :', xhr.responseText);
-                alert('Erreur lors de la recherche (code ' + xhr.status + '). Voir console pour détails.');
             }
         });
     }
+    let t=null;
+    $('#searchInput').on('input', function(){ clearTimeout(t); t=setTimeout(()=>rechercher(1),300); });
+    $('#boutiqueFilter').on('change', function(){ rechercher(1); });
+    $(document).on('click', '.page-link', function(e){ e.preventDefault(); rechercher($(this).data('page')); });
 
-    // Auto-submit
-    var searchTimeout = null;
-    $('#searchInput').on('input', function() {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(function() { rechercher(1); }, 300);
-    });
-    $('#utilisateurFilter').on('changed.bs.select', function() {
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(function() { rechercher(1); }, 300);
-    });
-    $('#filterBtn').on('click', function() { rechercher(1); });
-    $('#resetBtn').on('click', function() {
-        $('#searchInput').val('');
-        $('#utilisateurFilter').selectpicker('val', '');
-        rechercher(1);
-    });
+    setTimeout(()=>$('.alert').alert('close'), 5000);
 
-    // Pagination initiale
-    $('.page-link').on('click', function(e) {
-        e.preventDefault();
-        var page = $(this).data('page');
-        if (page) rechercher(page);
-    });
-
-    // --- Suppression ---
-    $(document).on('click', '.deleteBtn', function() {
-        const code = $(this).data('code');
-        const nom = $(this).data('nom');
-        $('#deleteNomCaisse').text(nom);
-        $('#deleteFormId').val(code);
-    });
-    $('#confirmDeleteBtn').on('click', function() { $('#deleteForm').submit(); });
-
-    // Auto-fermeture des alertes
-    setTimeout(function() { $('.alert').alert('close'); }, 5000);
-
-    // --- Si édition via POST (chargement des données) ---
-    <?php if (isset($editCaisse) && $action === 'load_edit'): ?>
-    $(function() {
+    <?php if ($editCaisse): ?>
+    $(function(){
         $('#formAction').val('edit');
-        $('#oldCode').val('<?= e($editCaisse['code_caisse']) ?>');
-        $('#modalTitle').html('<i class="bi bi-cash-register text-primary me-2"></i> Modifier la caisse');
-        $('#code_caisse').prop('readonly', true);
-        $('#utilisateur_id').selectpicker('refresh');
-        caisseModal.show();
+        $('#oldCaisseId').val('<?= e($editCaisse['caisse_id']) ?>');
+        $('#modalTitle').text('Modifier la caisse');
+        $('#code_caisse').val('<?= e($editCaisse['code_caisse']) ?>');
+        $('#nom_caisse').val('<?= e($editCaisse['nom_caisse']) ?>');
+        $('#type_caisse').val('<?= e($editCaisse['type_caisse']) ?>');
+        $('#solde_actuel').val('<?= e($editCaisse['solde_actuel']) ?>').prop('readonly', true);
+        $('#plafond_maximum').val('<?= e($editCaisse['plafond_maximum']) ?>');
+        $('#boutique_id').val('<?= e($editCaisse['boutique_id']) ?>');
+        modal.show();
     });
     <?php endif; ?>
 });

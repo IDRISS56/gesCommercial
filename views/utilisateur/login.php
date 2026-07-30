@@ -3,13 +3,6 @@
 require 'databases/database.php';
 
 
-
-// Si l'utilisateur est déjà connecté, rediriger vers le dashboard
-if (isset($_SESSION['user_id'])) {
-    header('Location: ../publics/dashboard');
-    exit;
-}
-
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {

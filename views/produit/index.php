@@ -1,7 +1,6 @@
 <?php
-// produit.php – CRUD produit (sans ajustement de stock)
+// produit.php – CRUD produit (avec gestion du stock_produit)
 // Design aligné sur vente.php
-
 ob_start();
 require 'databases/database.php';
 
@@ -48,6 +47,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !(isset($_POST['ajax']) && $_POST['
             $categorie_id = trim($_POST['categorie_id'] ?? '');
             $description = trim($_POST['description_produit'] ?? '');
             $etat = trim($_POST['etat_produit'] ?? 'Actif');
+            $stock_produit = trim($_POST['stock_produit'] ?? 0); // NOUVEAU
+
             $benefice = 0;
             if (is_numeric($prix_fournisseur) && is_numeric($prix_produit)) {
                 $benefice = $prix_produit - $prix_fournisseur;
@@ -74,10 +75,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !(isset($_POST['ajax']) && $_POST['
                             $message = "Ce code produit existe déjà.";
                             $messageType = 'warning';
                         } else {
-                            $sql = "INSERT INTO produit (code_produit, titre_produit, prix_fournisseur, prix_produit, benefice_produit, stock_alerte, categorie_id, description_produit, photo, type_photo, etat_produit)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                            $sql = "INSERT INTO produit (code_produit, titre_produit, prix_fournisseur, prix_produit, benefice_produit, stock_alerte, categorie_id, description_produit, photo, type_photo, etat_produit, stock_produit)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
                             $stmt = $pdo->prepare($sql);
-                            $stmt->execute([$code, $titre, $prix_fournisseur, $prix_produit, $benefice, $stock_alerte, $categorie_id, $description, $photo, $type_photo, $etat]);
+                            $stmt->execute([$code, $titre, $prix_fournisseur, $prix_produit, $benefice, $stock_alerte, $categorie_id, $description, $photo, $type_photo, $etat, $stock_produit]);
 
                             // Initialisation du stock dans toutes les boutiques
                             $insSb = $pdo->prepare("INSERT INTO stock_boutique (produit_id, boutique_id, quantite, stock_alerte) VALUES (?, ?, 0, ?)");
@@ -99,6 +100,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !(isset($_POST['ajax']) && $_POST['
                                     $_SESSION['user_id'] ?? '1',
                                     'Stock initial à la création du produit'
                                 );
+                                // Mettre à jour stock_produit en ajoutant la quantité initiale
+                                $pdo->prepare("UPDATE produit SET stock_produit = stock_produit + ? WHERE code_produit = ?")
+                                    ->execute([(int) $stock_initial, $code]);
                             }
 
                             $message = "Produit « $titre » ajouté avec succès.";
@@ -107,15 +111,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !(isset($_POST['ajax']) && $_POST['
                     } elseif ($action === 'edit') {
                         $oldCode = $_POST['old_code'] ?? $code;
                         if ($photo !== null) {
-                            $sql = "UPDATE produit SET code_produit=?, titre_produit=?, prix_fournisseur=?, prix_produit=?, benefice_produit=?, stock_alerte=?, categorie_id=?, description_produit=?, photo=?, type_photo=?, etat_produit=?
+                            $sql = "UPDATE produit SET code_produit=?, titre_produit=?, prix_fournisseur=?, prix_produit=?, benefice_produit=?, stock_alerte=?, categorie_id=?, description_produit=?, photo=?, type_photo=?, etat_produit=?, stock_produit=?
                                     WHERE code_produit = ?";
                             $stmt = $pdo->prepare($sql);
-                            $stmt->execute([$code, $titre, $prix_fournisseur, $prix_produit, $benefice, $stock_alerte, $categorie_id, $description, $photo, $type_photo, $etat, $oldCode]);
+                            $stmt->execute([$code, $titre, $prix_fournisseur, $prix_produit, $benefice, $stock_alerte, $categorie_id, $description, $photo, $type_photo, $etat, $stock_produit, $oldCode]);
                         } else {
-                            $sql = "UPDATE produit SET code_produit=?, titre_produit=?, prix_fournisseur=?, prix_produit=?, benefice_produit=?, stock_alerte=?, categorie_id=?, description_produit=?, etat_produit=?
+                            $sql = "UPDATE produit SET code_produit=?, titre_produit=?, prix_fournisseur=?, prix_produit=?, benefice_produit=?, stock_alerte=?, categorie_id=?, description_produit=?, etat_produit=?, stock_produit=?
                                     WHERE code_produit = ?";
                             $stmt = $pdo->prepare($sql);
-                            $stmt->execute([$code, $titre, $prix_fournisseur, $prix_produit, $benefice, $stock_alerte, $categorie_id, $description, $etat, $oldCode]);
+                            $stmt->execute([$code, $titre, $prix_fournisseur, $prix_produit, $benefice, $stock_alerte, $categorie_id, $description, $etat, $stock_produit, $oldCode]);
                         }
                         if ($oldCode !== $code) {
                             $pdo->prepare("UPDATE stock_boutique SET produit_id = ? WHERE produit_id = ?")->execute([$code, $oldCode]);
@@ -181,11 +185,10 @@ function getTableContent($pdo, $search, $categorie_filter, $page, $perPage = 20)
     $totalPages = ceil($total / $perPage);
     if ($page > $totalPages && $totalPages > 0) $page = $totalPages;
 
-    $sql = "SELECT p.*, COALESCE(SUM(sb.quantite), 0) AS stock_total
+    // On récupère directement stock_produit (plus de jointure avec stock_boutique)
+    $sql = "SELECT p.*
             FROM produit p
-            LEFT JOIN stock_boutique sb ON sb.produit_id = p.code_produit
             $where
-            GROUP BY p.code_produit
             ORDER BY p.code_produit LIMIT " . (($page - 1) * $perPage) . ", $perPage";
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
@@ -218,8 +221,8 @@ function getTableContent($pdo, $search, $categorie_filter, $page, $perPage = 20)
                 <td><?= htmlspecialchars($p['benefice_produit']) ?></td>
                 <td><?= htmlspecialchars($p['stock_alerte']) ?></td>
                 <td>
-                    <?php $enAlerte = (int) $p['stock_total'] <= (int) $p['stock_alerte']; ?>
-                    <span class="<?= $enAlerte ? 'text-danger fw-bold' : '' ?>"><?= (int) $p['stock_total'] ?></span>
+                    <?php $enAlerte = (int) $p['stock_produit'] <= (int) $p['stock_alerte']; ?>
+                    <span class="<?= $enAlerte ? 'text-danger fw-bold' : '' ?>"><?= (int) $p['stock_produit'] ?></span>
                 </td>
                 <td><?= htmlspecialchars($p['categorie_id']) ?></td>
                 <td>
@@ -654,7 +657,7 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
                         <th>Prix vente</th>
                         <th>Bénéfice</th>
                         <th>Stock alerte</th>
-                        <th>Stock</th>
+                        <th>Stock (produit)</th>   <!-- Colonne modifiée -->
                         <th>Catégorie</th>
                         <th>État</th>
                         <th class="text-end">Actions</th>
@@ -732,7 +735,7 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
                         </div>
                     </div>
 
-                    <!-- Stock -->
+                    <!-- Gestion de stock -->
                     <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-boxes me-1"></i> Gestion de stock</h6>
                     <div class="row g-3 mb-4">
                         <div class="col-md-6">
@@ -742,23 +745,23 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
                                 <input type="text" class="form-control" id="stock_alerte" name="stock_alerte" placeholder="10" value="<?= htmlspecialchars($editProduit['stock_alerte'] ?? '10') ?>">
                             </div>
                         </div>
-                        <div class="col-md-6" id="blocStockTotal" style="display:none;">
-                            <label class="form-label fw-semibold">Stock actuel (toutes boutiques)</label>
+                        <div class="col-md-6">
+                            <label for="stock_produit" class="form-label fw-semibold">Stock total (produit)</label>
                             <div class="input-group">
                                 <span class="input-group-text"><i class="bi bi-cubes"></i></span>
-                                <input type="text" class="form-control" readonly value="<?= (int) ($editProduit['stock_total'] ?? 0) ?>">
+                                <input type="number" class="form-control" id="stock_produit" name="stock_produit" step="1" min="0" value="<?= htmlspecialchars($editProduit['stock_produit'] ?? 0) ?>">
                             </div>
-                            <div class="form-text">Non modifiable ici. Passez par un mouvement d'inventaire pour corriger une quantité.</div>
+                            <div class="form-text">Stock global du produit (mis à jour automatiquement lors des mouvements).</div>
                         </div>
                     </div>
                     <div class="row g-3 mb-4" id="blocStockInitial">
                         <div class="col-md-6">
-                            <label for="stock_initial" class="form-label fw-semibold">Quantité initiale</label>
+                            <label for="stock_initial" class="form-label fw-semibold">Quantité initiale (à la création)</label>
                             <div class="input-group">
                                 <span class="input-group-text"><i class="bi bi-cubes"></i></span>
                                 <input type="text" class="form-control" id="stock_initial" name="stock_initial" placeholder="0">
                             </div>
-                            <div class="form-text">Génère un mouvement ENTREE_INVENTAIRE à la création.</div>
+                            <div class="form-text">Génère un mouvement ENTREE_INVENTAIRE à la création et ajoute au stock_produit.</div>
                         </div>
                         <div class="col-md-6">
                             <label for="boutique_initiale" class="form-label fw-semibold">Boutique</label>
@@ -896,12 +899,13 @@ $(document).ready(function() {
         $('#prix_fournisseur').val('');
         $('#prix_produit').val('');
         $('#stock_alerte').val('10');
+        $('#stock_produit').val(0);
         $('#stock_initial').val('');
         $('#description_produit').val('');
         $('#etat_produit').val('Actif');
 
         $('#blocStockInitial').show();
-        $('#blocStockTotal').hide();
+        // On n'affiche pas de blocStockTotal car on modifie directement stock_produit
 
         $('#categorie_id').selectpicker('val', '');
         $('#boutique_initiale').selectpicker('destroy').selectpicker();
@@ -935,6 +939,9 @@ $(document).ready(function() {
         }
     });
 
+    // =========================================================
+    // FONCTION DE RECHERCHE AJAX
+    // =========================================================
     function rechercher(page) {
         page = page || 1;
         var search = $('#searchInput').val();
@@ -953,11 +960,6 @@ $(document).ready(function() {
                 $('#tableBody').html(data.table);
                 $('#paginationContainer').html(data.pagination);
                 $('#totalCount').text(data.total + ' produit(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
-                $('.page-link').off('click').on('click', function(e) {
-                    e.preventDefault();
-                    var p = $(this).data('page');
-                    if (p) rechercher(p);
-                });
             },
             error: function() {
                 alert('Erreur lors de la recherche.');
@@ -965,6 +967,18 @@ $(document).ready(function() {
         });
     }
 
+    // =========================================================
+    // GESTION DE LA PAGINATION AVEC DÉLÉGATION D'ÉVÉNEMENTS
+    // =========================================================
+    $(document).on('click', '.page-link', function(e) {
+        e.preventDefault();
+        var p = $(this).data('page');
+        if (p) rechercher(p);
+    });
+
+    // =========================================================
+    // ÉVÉNEMENTS SUR LES CHAMPS DE RECHERCHE/FILTRES
+    // =========================================================
     var searchTimeout = null;
     $('#searchInput').on('input', function() {
         clearTimeout(searchTimeout);
@@ -983,6 +997,9 @@ $(document).ready(function() {
         rechercher(1);
     });
 
+    // =========================================================
+    // SUPPRESSION
+    // =========================================================
     $(document).on('click', '.deleteBtn', function() {
         const code = $(this).data('code');
         const nom = $(this).data('nom');
@@ -996,6 +1013,9 @@ $(document).ready(function() {
 
     setTimeout(function() { $('.alert').alert('close'); }, 5000);
 
+    // =========================================================
+    // ÉDITION (chargement du modal via POST)
+    // =========================================================
     <?php if (isset($editProduit) && $action === 'load_edit'): ?>
         $(function() {
             $('#formAction').val('edit');
@@ -1003,7 +1023,7 @@ $(document).ready(function() {
             $('#modalTitle').text('Modifier le produit');
             $('#code_produit').prop('readonly', true);
             $('#blocStockInitial').hide();
-            $('#blocStockTotal').show();
+            // Le champ stock_produit est déjà rempli
             $('#categorie_id').selectpicker('destroy').selectpicker();
             produitModal.show();
         });

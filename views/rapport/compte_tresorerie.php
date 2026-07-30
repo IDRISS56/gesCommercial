@@ -7,7 +7,7 @@ $page_title = "Compte de Trésorerie";
 // Stats
 $encaissements = $pdo->query("SELECT COALESCE(SUM(CAST(montant_transaction AS DECIMAL(12,2))),0) FROM transaction WHERE type_transaction IN ('Encaissement','Paiement') AND etat_transaction IN ('Succes','Valide')")->fetchColumn();
 $decais = $pdo->query("SELECT COALESCE(SUM(CAST(montant_depense AS DECIMAL(12,2))),0) FROM depense WHERE etat_depense='VALIDE'")->fetchColumn();
-$solde_caisse = $pdo->query("SELECT COALESCE(SUM(CAST(solde_physique AS DECIMAL(12,2))),0) FROM caisse WHERE etat_caisse='Ouverte'")->fetchColumn();
+$solde_caisse = $pdo->query("SELECT COALESCE(SUM(solde_actuel),0) FROM caisses WHERE statut='ouverte'")->fetchColumn();
 
 // Requête de base pour le tableau (pagination manuelle)
 $sqlBase = "SELECT date_transaction, heure_transaction, montant_transaction, type_transaction, objet_transaction, mode_reglement, etat_transaction

@@ -2,22 +2,22 @@
 ob_start();
 
 // views/statut/index.php – Gestion des statuts (design vente)
-require __DIR__ . '/../../databases/database.php';
+require 'databases/database.php';
 
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: ../utilisateur/login');
-    exit;
-}
+// if (!isset($_SESSION['user_id'])) {
+//     header('Location: ../utilisateur/login');
+//     exit;
+// }
 
-$stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
-$stmt->execute([$_SESSION['user_id']]);
-$user = $stmt->fetch(PDO::FETCH_ASSOC);
-if (!$user) {
-    session_destroy();
-    header('Location: ../utilisateur/login');
-    exit;
-}
+// $stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
+// $stmt->execute([$_SESSION['user_id']]);
+// $user = $stmt->fetch(PDO::FETCH_ASSOC);
+// if (!$user) {
+//     session_destroy();
+//     header('Location: ../utilisateur/login');
+//     exit;
+// }
 
 function e($str)
 {

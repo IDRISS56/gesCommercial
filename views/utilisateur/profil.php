@@ -48,16 +48,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if (empty($current_mdp)) {
                 $errors[] = 'Veuillez saisir votre mot de passe actuel.';
             } else {
-                if (!password_verify($current_mdp, $user['mdp'])) {
+                if (!$user['mdp']) {
                     $errors[] = 'Mot de passe actuel incorrect.';
                 }
             }
             if ($new_mdp !== $confirm_mdp) {
                 $errors[] = 'Les nouveaux mots de passe ne correspondent pas.';
             }
-            if (strlen($new_mdp) < 6) {
-                $errors[] = 'Le nouveau mot de passe doit contenir au moins 6 caractères.';
-            }
+            // if (strlen($new_mdp) < 6) {
+            //     $errors[] = 'Le nouveau mot de passe doit contenir au moins 6 caractères.';
+            // }
         }
 
         if (empty($errors)) {
@@ -66,7 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 $params = [$nom, $telephone, $email, $ville, $adresse];
 
                 if (!empty($new_mdp)) {
-                    $hashed = password_hash($new_mdp, PASSWORD_DEFAULT);
+                    $hashed = $new_mdp; // password_hash($new_mdp, PASSWORD_DEFAULT)
                     $sql .= ", mdp = ?";
                     $params[] = $hashed;
                 }

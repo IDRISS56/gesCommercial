@@ -437,42 +437,64 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
 }
 
 // ---- EXPORT PDF (inchangé) ----
+// ---- EXPORT PDF (portrait, style vente.php) ----
 if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST['numero'])) {
     error_reporting(0);
     while (ob_get_level()) ob_end_clean();
 
     $numero = $_POST['numero'];
-    $stmt = $pdo->prepare("SELECT f.*, c.nom_prenom_contact, c.adresse_contact, c.telephone_contact, c.email_contact,
-        u.nom_prenom AS vendeur_nom
+    // Récupération de la facture et du contact
+    $stmt = $pdo->prepare("
+        SELECT f.*, c.nom_prenom_contact, c.adresse_contact, c.telephone_contact, c.email_contact,
+               u.nom_prenom AS vendeur_nom
         FROM facture f
         LEFT JOIN contact c ON f.contact_id = c.code_contact
         LEFT JOIN utilisateur u ON f.utilisateur_id = u.id
-        WHERE f.numero_facture = ?");
+        WHERE f.numero_facture = ?
+    ");
     $stmt->execute([$numero]);
     $facture = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$facture) die('Facture introuvable');
 
+    // Récupération de la boutique (première active)
     $boutique = $pdo->query("SELECT * FROM boutique WHERE etat_boutique = 'Actif' LIMIT 1")->fetch(PDO::FETCH_ASSOC);
     if (!$boutique) {
         $boutique = [
-            'nom_boutique' => 'ABC DISTRIBUTION SARL',
+            'nom_boutique'   => 'ABC DISTRIBUTION SARL',
             'adresse_boutique' => '01 BP 1234 Bouaké 01',
             'ville_boutique' => 'Bouaké',
-            'pays_boutique' => 'Côte d\'Ivoire',
+            'pays_boutique'  => 'Côte d\'Ivoire',
             'telephone_boutique' => '+225 07 08 09 10 11',
-            'email_boutique' => 'contact@abcdistribution.ci'
+            'email_boutique' => 'contact@abcdistribution.ci',
+            'logo'           => null,
+            'type_logo'      => null
         ];
     }
 
-    $stmt = $pdo->prepare("SELECT c.*, p.titre_produit,
-        COALESCE(c.facteur_conversion, 1) AS facteur_conversion
+    // Récupération des lignes de commande liées à cette facture
+    $stmt = $pdo->prepare("
+        SELECT c.*, p.titre_produit,
+               COALESCE(c.facteur_conversion, 1) AS facteur_conversion
         FROM commande c
         LEFT JOIN produit p ON c.produit_id = p.code_produit
-        WHERE c.facture_id = ?");
+        WHERE c.facture_id = ?
+    ");
     $stmt->execute([$numero]);
     $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $pdf = new FPDF('L', 'mm', 'A4');
+    // ---- Gestion du logo (fichier temporaire) ----
+    $logoPath = null;
+    if (!empty($boutique['logo'])) {
+        $tmp = tmpfile();
+        if ($tmp !== false) {
+            fwrite($tmp, $boutique['logo']);
+            $meta = stream_get_meta_data($tmp);
+            $logoPath = $meta['uri'];
+        }
+    }
+
+    // ---- Création du PDF (PORTRAIT) ----
+    $pdf = new FPDF('P', 'mm', 'A4');
     $pdf->AddPage();
     $pdf->SetFont('Arial', '', 10);
     $blueDark = [0, 51, 102];
@@ -480,141 +502,161 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $grayBg = [245, 245, 245];
     $toLatin = function($chaine) { return safeText($chaine); };
 
+    // ---- EN‑TÊTE : titre à gauche, logo à droite ----
     $yStart = 10;
-    $pdf->SetFont('Arial', 'B', 14);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text(10, $yStart + 6, $toLatin(strtoupper($boutique['nom_boutique'])));
-    $pdf->SetFont('Arial', '', 8);
-    $pdf->SetTextColor(80, 80, 80);
-    $pdf->Text(10, $yStart + 11, $toLatin("Commerce Général - Distribution de Produits"));
-    $pdf->Text(10, $yStart + 15, $toLatin($boutique['adresse_boutique'] . ', ' . $boutique['ville_boutique'] . ', ' . $boutique['pays_boutique']));
-    $pdf->Text(10, $yStart + 19, $toLatin("Tél. : " . $boutique['telephone_boutique']));
-    $pdf->Text(10, $yStart + 23, $toLatin("Email : " . $boutique['email_boutique']));
-    $pdf->Text(10, $yStart + 27, $toLatin("N° CC : CI-BOUA-2020-B-12345   N° Contribuable : 1949444F"));
-
-    $pdf->SetFont('Arial', 'B', 24);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
     $titreDoc = match($facture['categorie_facture']) {
         'Avoir' => 'AVOIR FOURNISSEUR',
         'Devis' => 'DEVIS FOURNISSEUR',
         default => 'FACTURE FOURNISSEUR'
     };
-    $pdf->Text(125, $yStart + 10, $toLatin($titreDoc));
 
-    $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Rect(115, $yStart + 13, 50, 10, 'F');
-    $pdf->SetTextColor(255, 255, 255);
-    $pdf->SetFont('Arial', 'B', 12);
-    $pdf->Text(122, $yStart + 20, $toLatin('N° ' . $facture['numero_facture']));
+    // 1. Titre à gauche
+    $pdf->SetFont('Arial', 'B', 22);
+    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
+    $pdf->SetXY(10, $yStart);
+    $pdf->Cell(0, 10, $toLatin($titreDoc), 0, 0, 'L');
+
+    // 2. Logo à droite (si présent)
+    if ($logoPath && !empty($boutique['type_logo'])) {
+        $imageType = strtoupper(str_replace('image/', '', $boutique['type_logo']));
+        $pdf->Image($logoPath, 165, $yStart, 35, 0, $imageType);
+    }
+
+    // 3. Informations sous le titre
+    $pdf->SetFont('Arial', 'B', 10);
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->SetXY(10, $yStart + 12);
+    $pdf->Cell(0, 6, $toLatin('N° ' . $facture['numero_facture']), 0, 1, 'L');
 
     $pdf->SetFont('Arial', '', 9);
-    $pdf->SetTextColor(0, 0, 0);
-    $xRight = 200;
-    $yInfo = $yStart;
-    $pdf->Text($xRight, $yInfo + 5, $toLatin('Date de facture'));
-    $pdf->Text($xRight + 40, $yInfo + 5, ': ' . date('d/m/Y', strtotime($facture['date_facture'])));
+    $pdf->SetXY(10, $yStart + 18);
+    $pdf->Cell(0, 6, $toLatin('Date : ' . date('d/m/Y', strtotime($facture['date_facture']))), 0, 1, 'L');
+
     $echeance = date('d/m/Y', strtotime($facture['date_facture'] . ' + 30 days'));
-    $pdf->Text($xRight, $yInfo + 10, $toLatin("Date d'échéance"));
-    $pdf->Text($xRight + 40, $yInfo + 10, ': ' . $echeance);
-    $pdf->Text($xRight, $yInfo + 15, $toLatin("Mode de paiement"));
-    $pdf->Text($xRight + 40, $yInfo + 15, ': Virement bancaire');
-    $pdf->Text($xRight, $yInfo + 20, $toLatin("Bon de commande"));
-    $pdf->Text($xRight + 40, $yInfo + 20, ': BC-2026-0001');
-    $pdf->Text($xRight, $yInfo + 25, $toLatin("Bon de livraison"));
-    $pdf->Text($xRight + 40, $yInfo + 25, ': BL-2026-0015');
+    $pdf->SetXY(10, $yStart + 22);
+    $pdf->Cell(0, 6, $toLatin("Échéance : " . $echeance), 0, 1, 'L');
+
+    $pdf->SetXY(10, $yStart + 26);
+    $pdf->Cell(0, 6, $toLatin("Statut : " . $facture['etat_facture']), 0, 1, 'L');
+
+    // Ligne de séparation
+    $pdf->Line(10, $yStart + 46, 200, $yStart + 46);
+
+     $yBlocks = $yStart + 52; // environ 62
 
     $pdf->SetDrawColor(200, 200, 200);
-    $pdf->Line(10, 42, 287, 42);
+    $pdf->Line(10, 46, 200, 46);
 
     $yBlocks = 48;
     $drawAddressBlock = function($pdf, $x, $y, $w, $title, $name, $address, $phone, $email) use ($toLatin, $blueDark, $grayBg) {
-        $h = 30;
+        $h = 36;
+        // Titre du bloc
         $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
-        $pdf->Rect($x, $y, 40, 6, 'F');
+        $pdf->Rect($x, $y, 35, 6, 'F');
         $pdf->SetTextColor(255, 255, 255);
         $pdf->SetFont('Arial', 'B', 8);
         $pdf->Text($x + 3, $y + 4.5, $toLatin(strtoupper($title)));
+        // Fond du bloc
         $pdf->SetFillColor($grayBg[0], $grayBg[1], $grayBg[2]);
         $pdf->Rect($x, $y + 6, $w, $h - 6, 'F');
         $pdf->SetDrawColor(200, 200, 200);
         $pdf->Rect($x, $y + 6, $w, $h - 6, 'D');
+        // Contenu
         $pdf->SetTextColor(0, 0, 0);
         $pdf->SetFont('Arial', 'B', 9);
-        $pdf->Text($x + 3, $y + 13, $toLatin($name));
+        $pdf->Text($x + 3, $y + 12, $toLatin($name));
         $pdf->SetFont('Arial', '', 8);
-        $pdf->Text($x + 3, $y + 18, $toLatin($address));
-        $pdf->Text($x + 3, $y + 23, $toLatin('Tél. : ' . $phone));
-        $pdf->Text($x + 3, $y + 28, $toLatin('Email : ' . $email));
+        $pdf->Text($x + 3, $y + 17, $toLatin($address));
+        $pdf->Text($x + 3, $y + 22, $toLatin('Tél. : ' . $phone));
+        $pdf->Text($x + 3, $y + 27, $toLatin('Email : ' . $email));
     };
-    $wBlock = (277 - 10) / 2;
-    $drawAddressBlock($pdf, 10, $yBlocks, $wBlock, 'ACHETEUR (Notre boutique)',
+
+    // Pour facture fournisseur : expéditeur = notre boutique (acheteur), destinataire = fournisseur
+    $drawAddressBlock(
+        $pdf,
+        10,
+        $yBlocks,
+        $wBlock,
+        'ACHETEUR (Notre boutique)',
         $boutique['nom_boutique'],
-        $boutique['ville_boutique'] . ', ' . $boutique['pays_boutique'],
-        $boutique['telephone_boutique'],
-        $boutique['email_boutique']);
-    $drawAddressBlock($pdf, 10 + $wBlock + 10, $yBlocks, $wBlock, 'FOURNISSEUR',
+        ($boutique['adresse_boutique'] ?? '') . ', ' . ($boutique['ville_boutique'] ?? '') . ', ' . ($boutique['pays_boutique'] ?? ''),
+        $boutique['telephone_boutique'] ?? '',
+        $boutique['email_boutique'] ?? ''
+    );
+
+    $drawAddressBlock(
+        $pdf,
+        10 + $wBlock + 10,
+        $yBlocks,
+        $wBlock,
+        'FOURNISSEUR',
         $facture['nom_prenom_contact'],
         $facture['adresse_contact'] ?? '',
         $facture['telephone_contact'] ?? '',
-        $facture['email_contact'] ?? '');
+        $facture['email_contact'] ?? ''
+    );
 
-    $yTable = 80;
-    $pageBottom = 195;
-    $colWidths = [25, 100, 28, 22, 27, 35, 40];
-    $headers = ['RÉFÉRENCE', 'DÉSIGNATION', 'NB UNITÉ/CARTON', 'CARTON', 'QTÉ (UNITÉ)', 'P.U. (FCFA)', 'MONTANT (FCFA)'];
+    // ---- TABLEAU DES LIGNES ----
+    $yTable = 95;
+    $colWidths = [18, 82, 18, 14, 18, 18, 22]; // total 190
+    $headers = ['RÉF.', 'DÉSIGNATION', 'LOT/UNITÉ', 'QTÉ (lots)', 'QTÉ (base)', 'P.U. (FCFA)', 'MONTANT (FCFA)'];
     $headerH = 7;
     $rowH = 7;
+    $pageBottom = 250; // pour gérer les sauts de page
 
     $drawTableHeader = function() use ($pdf, $colWidths, $headers, $headerH, $toLatin, $blueDark, &$yTable) {
         $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
         $pdf->SetTextColor(255, 255, 255);
-        $pdf->SetFont('Arial', 'B', 7);
+        $pdf->SetFont('Arial', 'B', 6.5);
         $x = 10;
         foreach ($headers as $i => $h) {
             $label = $toLatin($h);
             $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
-            $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
+            $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5, $label);
             $x += $colWidths[$i];
         }
+        $yTable += $headerH;
     };
     $drawTableHeader();
 
     $pdf->SetTextColor(0, 0, 0);
-    $pdf->SetFont('Arial', '', 8);
-    $yCurrent = $yTable + $headerH;
+    $pdf->SetFont('Arial', '', 7);
+    $yCurrent = $yTable;
     $totalHT = 0;
 
     foreach ($lignes as $ligne) {
         if ($yCurrent + $rowH > $pageBottom) {
             $pdf->AddPage();
-            $yTable = 15;
-            $yCurrent = $yTable + $headerH;
+            $yTable = 20;
             $drawTableHeader();
             $pdf->SetTextColor(0, 0, 0);
-            $pdf->SetFont('Arial', '', 8);
+            $pdf->SetFont('Arial', '', 7);
+            $yCurrent = $yTable;
         }
 
         $ref = $ligne['produit_id'];
         $des = substr($ligne['titre_produit'] ?? $ligne['produit_id'], 0, 45);
-        $unites_par_carton = (int)($ligne['facteur_conversion'] ?? 1);
-        $qte_commande = (int)$ligne['quantite_commande'];
-        $nb_cartons = ($unites_par_carton > 0) ? ceil($qte_commande / $unites_par_carton) : 0;
+        $unite = $ligne['unite_affichage'] ?? 'Unité';
+        $facteur = intval($ligne['facteur_conversion'] ?: 1);
+        $qtLots = $ligne['quantite_commande'] / max(1, $facteur);
+        $qtBase = $ligne['quantite_commande'];
         $pu = (float)$ligne['prix_commande'];
-        $total_ligne = (float)$ligne['montant_commande'];
-        $totalHT += $total_ligne;
+        $totalLigne = (float)$ligne['montant_commande'];
+        $totalHT += $totalLigne;
 
         $data = [
             $ref,
             $des,
-            $unites_par_carton,
-            $nb_cartons,
-            $qte_commande,
+            $unite,
+            number_format($qtLots, 0),
+            $qtBase,
             number_format($pu, 0, ',', ' '),
-            number_format($total_ligne, 0, ',', ' ')
+            number_format($totalLigne, 0, ',', ' ')
         ];
+
         $x = 10;
         foreach ($data as $i => $val) {
-            $align = ($i >= 2 && $i != 3) ? 'C' : (($i >= 5) ? 'R' : 'L');
+            $align = ($i >= 3 && $i != 4) ? 'C' : (($i >= 5) ? 'R' : 'L');
             $label = $toLatin((string)$val);
             $txtX = ($align == 'R') ? $x + $colWidths[$i] - 2 - $pdf->GetStringWidth($label) : (($align == 'C') ? $x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2) : $x + 1);
             $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
@@ -624,65 +666,77 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
         $yCurrent += $rowH;
     }
 
-    if ($yCurrent + 65 > $pageBottom + 15) {
+    // ---- TOTAUX, OBSERVATIONS, SIGNATURES ----
+    $yAfterLines = $yCurrent + 5;
+    $pageHeight = 297;
+    $marginBottom = 15;
+    if ($yAfterLines + 45 > $pageHeight - $marginBottom) {
         $pdf->AddPage();
-        $yCurrent = 15;
+        $yAfterLines = 20;
     }
 
-    $yTotals = $yCurrent + 6;
-    $wObs = 170;
-    $hObs = 28;
+    // Observations
+    $yObs = $yAfterLines;
+    $wObs = 120;
+    $hObs = 26;
     $pdf->SetDrawColor($blueDark[0], $blueDark[1], $blueDark[2]);
     $pdf->SetLineWidth(0.3);
-    $pdf->Rect(10, $yTotals, $wObs, $hObs, 'D');
+    $pdf->Rect(10, $yObs, $wObs, $hObs, 'D');
     $pdf->SetFont('Arial', 'B', 9);
     $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text(12, $yTotals + 6, $toLatin('Observations :'));
+    $pdf->Text(12, $yObs + 6, $toLatin('Observations :'));
     $pdf->SetFont('Arial', '', 8);
     $pdf->SetTextColor(0, 0, 0);
-    $pdf->SetXY(12, $yTotals + 9);
+    $pdf->SetXY(12, $yObs + 9);
     $pdf->MultiCell($wObs - 4, 5, $toLatin($facture['titre_facture'] ?? "Merci de votre confiance.\nVeuillez effectuer le paiement avant la date d'échéance."), 0, 'L');
 
-    $xTot = 10 + $wObs + 10;
-    $wTot = 287 - $xTot;
-    $hTot = 7;
-    $pdf->SetFont('Arial', '', 9);
-    $pdf->SetTextColor(0, 0, 0);
+    // Bloc des totaux (à droite)
+    $xTot = 10 + $wObs + 8;
+    $wTot = 200 - $xTot;
+    $hTot = 6;
     $taxe = (float)($facture['taxe'] ?? 0);
     $remise = (float)($facture['remise'] ?? 0);
-    $montantTtcSaisi = (float)($facture['montant_ttc'] ?? 0);
-    $totalTTC = $montantTtcSaisi > 0 ? $montantTtcSaisi : ($totalHT * (1 + $taxe / 100) - $remise);
+    $montantTtc = (float)($facture['montant_ttc'] ?? 0);
 
-    $pdf->Rect($xTot, $yTotals, $wTot, $hTot, 'D');
-    $pdf->Text($xTot + 2, $yTotals + 5, $toLatin('TOTAL HORS TAXES (HT)'));
-    $pdf->SetXY($xTot, $yTotals + 5);
+    // Total HT
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetTextColor(0, 0, 0);
+    $pdf->Rect($xTot, $yObs, $wTot, $hTot, 'D');
+    $pdf->Text($xTot + 2, $yObs + 5, $toLatin('TOTAL HORS TAXES (HT)'));
+    $pdf->SetXY($xTot, $yObs + 5);
     $pdf->Cell($wTot - 2, 0, number_format($totalHT, 0, ',', ' '), 0, 0, 'R');
 
-    $pdf->Rect($xTot, $yTotals + $hTot, $wTot, $hTot, 'D');
-    $pdf->Text($xTot + 2, $yTotals + $hTot + 5, $toLatin('TVA (' . $taxe . '%)'));
-    $pdf->SetXY($xTot, $yTotals + $hTot + 5);
+    // TVA
+    $pdf->Rect($xTot, $yObs + $hTot, $wTot, $hTot, 'D');
+    $pdf->Text($xTot + 2, $yObs + $hTot + 5, $toLatin('TVA (' . $taxe . '%)'));
+    $pdf->SetXY($xTot, $yObs + $hTot + 5);
     $pdf->Cell($wTot - 2, 0, number_format($totalHT * $taxe / 100, 0, ',', ' '), 0, 0, 'R');
 
-    $pdf->Rect($xTot, $yTotals + ($hTot * 2), $wTot, $hTot, 'D');
-    $pdf->Text($xTot + 2, $yTotals + ($hTot * 2) + 5, $toLatin('REMISE'));
-    $pdf->SetXY($xTot, $yTotals + ($hTot * 2) + 5);
+    // Remise
+    $pdf->Rect($xTot, $yObs + ($hTot * 2), $wTot, $hTot, 'D');
+    $pdf->Text($xTot + 2, $yObs + ($hTot * 2) + 5, $toLatin('REMISE'));
+    $pdf->SetXY($xTot, $yObs + ($hTot * 2) + 5);
     $pdf->Cell($wTot - 2, 0, number_format($remise, 0, ',', ' '), 0, 0, 'R');
 
+    // Net à payer
     $pdf->SetFillColor($blueLight[0], $blueLight[1], $blueLight[2]);
-    $pdf->Rect($xTot, $yTotals + ($hTot * 3), $wTot, $hTot + 2, 'FD');
-    $pdf->SetFont('Arial', 'B', 10);
+    $pdf->Rect($xTot, $yObs + ($hTot * 3), $wTot, $hTot + 2, 'FD');
+    $pdf->SetFont('Arial', 'B', 9);
     $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text($xTot + 2, $yTotals + ($hTot * 3) + 5.5, $toLatin('NET À PAYER (TTC)'));
-    $pdf->SetXY($xTot, $yTotals + ($hTot * 3) + 5.5);
-    $pdf->Cell($wTot - 2, 0, number_format($totalTTC, 0, ',', ' '), 0, 0, 'R');
+    $pdf->Text($xTot + 2, $yObs + ($hTot * 3) + 5.5, $toLatin('NET À PAYER (TTC)'));
+    $pdf->SetXY($xTot, $yObs + ($hTot * 3) + 5.5);
+    $pdf->Cell($wTot - 2, 0, number_format($montantTtc, 0, ',', ' '), 0, 0, 'R');
 
-    $hSig = 26;
-    $ySig = $yTotals + $hObs + 8;
-    if ($ySig + $hSig > $pageBottom + 15) {
+    // Signatures
+    $ySig = $yObs + $hObs + 6;
+    if ($ySig + 24 > $pageHeight - $marginBottom) {
         $pdf->AddPage();
         $ySig = 20;
     }
-    $wSig = 133;
+    $hSig = 24;
+    $wSig = 90;
+
+    // Signature fournisseur (à gauche)
     $pdf->SetDrawColor(200, 200, 200);
     $pdf->Rect(10, $ySig, $wSig, $hSig, 'D');
     $pdf->SetFont('Arial', 'B', 9);
@@ -693,15 +747,16 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $pdf->Text(12, $ySig + 10, $toLatin('Nom et Signature'));
 
     $pdf->SetDrawColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Rect(60, $ySig + 5, 70, $hSig - 6, 'D');
+    $pdf->Rect(50, $ySig + 5, 45, $hSig - 6, 'D');
     $pdf->SetFont('Arial', 'B', 7);
     $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text(63, $ySig + 9, $toLatin($facture['nom_prenom_contact']));
+    $pdf->Text(52, $ySig + 9, $toLatin($facture['nom_prenom_contact'] ?? ''));
     $pdf->SetFont('Arial', '', 6);
-    $pdf->Text(63, $ySig + 13, $toLatin($facture['adresse_contact'] ?? ''));
-    $pdf->Text(63, $ySig + 17, $toLatin('Tél. : ' . $facture['telephone_contact'] ?? ''));
+    $pdf->Text(52, $ySig + 13, $toLatin($facture['adresse_contact'] ?? ''));
+    $pdf->Text(52, $ySig + 17, $toLatin('Tél. : ' . ($facture['telephone_contact'] ?? '')));
 
-    $xClient = 10 + $wSig + 21;
+    // Signature entreprise (à droite)
+    $xClient = 10 + $wSig + 10;
     $pdf->SetDrawColor(200, 200, 200);
     $pdf->Rect($xClient, $ySig, $wSig, $hSig, 'D');
     $pdf->SetFont('Arial', 'B', 9);
@@ -711,6 +766,7 @@ if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST[
     $pdf->SetTextColor(0, 0, 0);
     $pdf->Text($xClient + 2, $ySig + 10, $toLatin('Nom et Signature'));
 
+    // ---- FIN : nettoyage et envoi ----
     while (ob_get_level()) ob_end_clean();
     $pdf->Output('I', 'Facture_Fournisseur_' . $facture['numero_facture'] . '.pdf');
     exit;

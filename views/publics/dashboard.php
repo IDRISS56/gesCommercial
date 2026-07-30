@@ -198,7 +198,7 @@ $totalProduits = intval($stmt->fetchColumn());
 $stmt = $pdo->query("SELECT COUNT(*) FROM contact WHERE type_contact='Client' AND etat_contact='Actif'");
 $totalClients = intval($stmt->fetchColumn());
 
-$stmt = $pdo->query("SELECT COALESCE(CAST(solde_physique AS DECIMAL(12,2)),0) FROM caisse LIMIT 1");
+$stmt = $pdo->query("SELECT COALESCE(SUM(solde_actuel),0) FROM caisses WHERE statut='ouverte'");
 $soldeCaisse = floatval($stmt->fetchColumn() ?? 0);
 
 $stmt = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE etat_commande='Valider' AND date_commande BETWEEN ? AND ?");

@@ -67,6 +67,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $couleur = trim($_POST['couleur'] ?? '');
             $etat = trim($_POST['etat_boutique'] ?? 'Actif');
 
+            // Gestion du logo
+            $logo = null;
+            $type_logo = null;
+            if (isset($_FILES['logo']) && $_FILES['logo']['error'] === UPLOAD_ERR_OK) {
+                $logoData = file_get_contents($_FILES['logo']['tmp_name']);
+                if ($logoData !== false) {
+                    $logo = $logoData;
+                    $type_logo = $_FILES['logo']['type'];
+                }
+            }
+
+            // Si pas de nouveau logo et qu'on est en édition, on garde l'ancien
+            $keepLogo = isset($_POST['keep_logo']) && $_POST['keep_logo'] == '1';
+
             if (!empty($latitude) && !is_numeric($latitude)) {
                 $message = 'La latitude doit être un nombre valide.';
                 $messageType = 'warning';
@@ -83,18 +97,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     try {
                         if ($action === 'add') {
                             $code = generateBoutiqueId($pdo);
-                            $sql = "INSERT INTO boutique (code_boutique, nom_boutique, telephone_boutique, email_boutique, pays_boutique, ville_boutique, quartier_boutique, adresse_boutique, latitude, longitude, couleur, etat_boutique)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                            $sql = "INSERT INTO boutique (code_boutique, nom_boutique, telephone_boutique, email_boutique, pays_boutique, ville_boutique, quartier_boutique, adresse_boutique, latitude, longitude, couleur, etat_boutique, logo, type_logo)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
                             $stmt = $pdo->prepare($sql);
-                            $stmt->execute([$code, $nom, $telephone, $email, $pays, $ville, $quartier, $adresse, $latitude, $longitude, $couleur, $etat]);
+                            $stmt->execute([$code, $nom, $telephone, $email, $pays, $ville, $quartier, $adresse, $latitude, $longitude, $couleur, $etat, $logo, $type_logo]);
                             $message = "Boutique « $nom » ajoutée avec succès. ID : $code";
                             $messageType = 'success';
                         } elseif ($action === 'edit') {
                             $oldCode = $_POST['old_code'] ?? $code;
-                            $sql = "UPDATE boutique SET code_boutique=?, nom_boutique=?, telephone_boutique=?, email_boutique=?, pays_boutique=?, ville_boutique=?, quartier_boutique=?, adresse_boutique=?, latitude=?, longitude=?, couleur=?, etat_boutique=?
-                                    WHERE code_boutique = ?";
-                            $stmt = $pdo->prepare($sql);
-                            $stmt->execute([$code, $nom, $telephone, $email, $pays, $ville, $quartier, $adresse, $latitude, $longitude, $couleur, $etat, $oldCode]);
+                            if ($logo !== null) {
+                                // Nouveau logo uploadé
+                                $sql = "UPDATE boutique SET code_boutique=?, nom_boutique=?, telephone_boutique=?, email_boutique=?, pays_boutique=?, ville_boutique=?, quartier_boutique=?, adresse_boutique=?, latitude=?, longitude=?, couleur=?, etat_boutique=?, logo=?, type_logo=?
+                                        WHERE code_boutique = ?";
+                                $stmt = $pdo->prepare($sql);
+                                $stmt->execute([$code, $nom, $telephone, $email, $pays, $ville, $quartier, $adresse, $latitude, $longitude, $couleur, $etat, $logo, $type_logo, $oldCode]);
+                            } else {
+                                // Pas de nouveau logo : on conserve l'ancien (sauf si demandé de le supprimer ? on peut ajouter une case à cocher mais ici on garde)
+                                $sql = "UPDATE boutique SET code_boutique=?, nom_boutique=?, telephone_boutique=?, email_boutique=?, pays_boutique=?, ville_boutique=?, quartier_boutique=?, adresse_boutique=?, latitude=?, longitude=?, couleur=?, etat_boutique=?
+                                        WHERE code_boutique = ?";
+                                $stmt = $pdo->prepare($sql);
+                                $stmt->execute([$code, $nom, $telephone, $email, $pays, $ville, $quartier, $adresse, $latitude, $longitude, $couleur, $etat, $oldCode]);
+                            }
                             $message = "Boutique « $nom » mise à jour.";
                             $messageType = 'success';
                         }
@@ -131,7 +154,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
 {
-    $sql = "SELECT * FROM boutique WHERE 1=1";
+    $sql = "SELECT code_boutique, nom_boutique, telephone_boutique, email_boutique, pays_boutique, ville_boutique, quartier_boutique, adresse_boutique, latitude, longitude, couleur, etat_boutique, logo, type_logo
+            FROM boutique WHERE 1=1";
     $params = [];
     if (!empty($search)) {
         $sql .= " AND (code_boutique LIKE ? OR nom_boutique LIKE ? OR ville_boutique LIKE ? OR pays_boutique LIKE ?)";
@@ -143,7 +167,11 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
         $params[] = $filtres['etat'];
     }
 
-    $countSql = str_replace("SELECT *", "SELECT COUNT(*)", $sql);
+    $countSql = str_replace(
+        "SELECT code_boutique, nom_boutique, telephone_boutique, email_boutique, pays_boutique, ville_boutique, quartier_boutique, adresse_boutique, latitude, longitude, couleur, etat_boutique, logo, type_logo",
+        "SELECT COUNT(*)",
+        $sql
+    );
     $stmt = $pdo->prepare($countSql);
     $stmt->execute($params);
     $total = $stmt->fetchColumn();
@@ -158,7 +186,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
     ob_start();
     if (empty($boutiques)): ?>
         <tr>
-            <td colspan="10" class="text-center py-5 text-muted">
+            <td colspan="11" class="text-center py-5 text-muted">
                 <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                 Aucune boutique trouvée
             </td>
@@ -168,6 +196,13 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
             <tr>
                 <td class="td-bold"><?= e($b['code_boutique']) ?></td>
                 <td><?= e($b['nom_boutique']) ?></td>
+                <td>
+                    <?php if (!empty($b['type_logo'])): ?>
+                        <img src="data:<?= e($b['type_logo']) ?>;base64,<?= base64_encode($b['logo'] ?? '') ?>" alt="Logo" style="width:40px;height:40px;object-fit:contain;border-radius:4px;border:1px solid var(--brd);">
+                    <?php else: ?>
+                        <span class="text-muted">—</span>
+                    <?php endif; ?>
+                </td>
                 <td><?= e($b['telephone_boutique'] ?? '—') ?></td>
                 <td><?= e($b['email_boutique'] ?? '—') ?></td>
                 <td><?= e($b['pays_boutique']) ?></td>
@@ -556,6 +591,14 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
             border: 1px solid var(--brd);
             vertical-align: middle;
         }
+        .logo-preview {
+            max-width: 120px;
+            max-height: 80px;
+            border-radius: 6px;
+            border: 1px solid var(--brd);
+            object-fit: contain;
+            background: white;
+        }
     </style>
 </head>
 
@@ -613,6 +656,7 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
                     <tr>
                         <th>Code</th>
                         <th>Nom</th>
+                        <th>Logo</th>
                         <th>Téléphone</th>
                         <th>Email</th>
                         <th>Pays</th>
@@ -635,7 +679,7 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
 </div>
 
 <!-- ========================================================= -->
-<!-- MODAL FORMULAIRE (ajout/modification) avec carte -->
+<!-- MODAL FORMULAIRE (ajout/modification) avec carte et logo -->
 <!-- ========================================================= -->
 <div class="modal fade" id="boutiqueModal" tabindex="-1" aria-labelledby="modalTitle" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
@@ -644,10 +688,11 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
                 <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-shop text-primary me-2"></i> Nouvelle boutique</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
             </div>
-            <form method="post" id="boutiqueForm">
+            <form method="post" id="boutiqueForm" enctype="multipart/form-data">
                 <input type="hidden" name="action" id="formAction" value="add">
                 <input type="hidden" name="old_code" id="oldCode" value="">
                 <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
+                <input type="hidden" name="keep_logo" id="keepLogo" value="1">
                 <div class="modal-body">
                     <!-- Identification -->
                     <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tag me-1"></i> Identification</h6>
@@ -743,6 +788,21 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
                                 <option value="Actif" <?= (isset($editBoutique) && $editBoutique['etat_boutique'] === 'Actif') ? 'selected' : '' ?>>Actif</option>
                                 <option value="Inactif" <?= (isset($editBoutique) && $editBoutique['etat_boutique'] === 'Inactif') ? 'selected' : '' ?>>Inactif</option>
                             </select>
+                        </div>
+                    </div>
+
+                    <!-- Logo -->
+                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-image me-1"></i> Logo</h6>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-12">
+                            <?php if (isset($editBoutique) && !empty($editBoutique['logo'])): ?>
+                                <div class="mb-2">
+                                    <img src="data:<?= e($editBoutique['type_logo'] ?? 'image/png') ?>;base64,<?= base64_encode($editBoutique['logo']) ?>" alt="Logo actuel" class="logo-preview">
+                                    <div class="form-text">Logo actuel. Téléchargez une nouvelle image pour le remplacer.</div>
+                                </div>
+                            <?php endif; ?>
+                            <input type="file" class="form-control" id="logo" name="logo" accept="image/*">
+                            <div class="form-text">Formats acceptés : JPEG, PNG, GIF, etc. (taille max 2 Mo).</div>
                         </div>
                     </div>
                 </div>
@@ -860,6 +920,9 @@ $(document).ready(function() {
         $('#latitude').val('');
         $('#longitude').val('');
         $('#etat_boutique').val('Actif');
+        $('#keepLogo').val('1');
+        // Supprimer l'aperçu du logo s'il existe
+        $('.logo-preview').parent().remove();
 
         boutiqueModal.show();
 
@@ -910,6 +973,7 @@ $(document).ready(function() {
                 $('#tableBody').html(data.table);
                 $('#paginationContainer').html(data.pagination);
                 $('#totalCount').text(data.total + ' boutique(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
+                // Gestion de la pagination avec délégation
                 $('.page-link').off('click').on('click', function(e) {
                     e.preventDefault();
                     var p = $(this).data('page');
@@ -923,6 +987,13 @@ $(document).ready(function() {
             }
         });
     }
+
+    // Délégation pour la pagination (même technique que pour les autres pages)
+    $(document).on('click', '.page-link', function(e) {
+        e.preventDefault();
+        var p = $(this).data('page');
+        if (p) rechercher(p);
+    });
 
     var searchTimeout = null;
     $('#searchInput').on('input', function() {
@@ -940,13 +1011,6 @@ $(document).ready(function() {
         $('#searchInput').val('');
         $('#etatFilter').selectpicker('val', '');
         rechercher(1);
-    });
-
-    // Pagination initiale
-    $('.page-link').on('click', function(e) {
-        e.preventDefault();
-        var page = $(this).data('page');
-        if (page) rechercher(page);
     });
 
     // --- Gestion suppression ---
@@ -972,6 +1036,9 @@ $(document).ready(function() {
             $('#oldCode').val('<?= e($editBoutique['code_boutique']) ?>');
             $('#modalTitle').html('<i class="bi bi-shop text-primary me-2"></i> Modifier la boutique');
             $('#code_boutique').prop('readonly', true);
+
+            // Conserver le logo existant en cachant le champ ou en laissant le hidden keep_logo=1
+            $('#keepLogo').val('1');
 
             boutiqueModal.show();
 

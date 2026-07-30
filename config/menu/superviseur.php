@@ -1818,12 +1818,6 @@
                          icon: 'bi-bar-chart',
                          label: 'Produits',
                          url: '/produit/gestion'
-                     },
-
-                     {
-                         icon: 'bi-list-ul',
-                         label: 'Prix',
-                         url: '/prix/gestion'
                      }
                  ]
              },
@@ -1935,24 +1929,21 @@
                  icon: 'bi-graph-up',
                  emoji: '💰',
                  items: [{
-                         icon: 'bi-pin-map',
-                         label: 'Caisse',
-                         url: '/caisse/gestion'
-                     },
-                     {
                          icon: 'bi-door-open',
                          label: 'Ouverture / Fermeture caisse',
                          url: '/caisse/journee'
                      },
+
                      {
-                         icon: 'bi-list-ul',
-                         label: 'Depenses',
-                         url: '/depense/gestion'
+                        icon: 'bi-wallet2',
+                        label: 'Compte de Trésorerie', 
+                        url: '/rapport/compteTresorerie'
                      },
+                     
                      {
-                         icon: 'bi-eye',
-                         label: 'Transactions',
-                         url: '/transaction/gestion'
+                         icon: 'bi-pin-map',
+                         label: 'Caisse',
+                         url: '/caisse/gestion'
                      }
                  ]
              },
@@ -1989,7 +1980,6 @@
     emoji: '📈',
     items: [
         { icon: 'bi-people', label: 'Situation des Clients', url: '/rapport/situationClient' },
-        { icon: 'bi-wallet2', label: 'Compte de Trésorerie', url: '/rapport/compteTresorerie' },
         { icon: 'bi-bar-chart-line', label: 'Résumé des Ventes', url: '/rapport/resumeVente' },
         { icon: 'bi-cart-check', label: 'Résumé des Achats', url: '/rapport/resumeAchat' },
         { icon: 'bi-trophy', label: 'Performance des Vendeurs', url: '/rapport/performanceVendeur' },
