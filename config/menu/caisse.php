@@ -1887,6 +1887,18 @@
                          label: 'Suivi de vente',
                          url: '/commande/vente'
                      },
+
+                     {
+                         icon: 'bi-cash-coin',
+                         label: 'Reglement Factures Clients',
+                         url: '/facture/reglementClient'
+                     },
+
+                     {
+                         icon: 'bi-list-ul',
+                         label: 'Bon de livraison',
+                         url: '/facture/bonLivraison'
+                     },
                  ]
              },
 
@@ -1907,6 +1919,12 @@
                          url: '/commande/suiviAchat'
                      },
 
+                     {
+                         icon: 'bi-truck',
+                         label: 'Reglement Factures Fournisseurs',
+                         url: '/facture/reglementFournisseur'
+                     },
+
                  ]
              },
 
@@ -1921,11 +1939,6 @@
                          url: '/facture/gestion'
                      },
 
-                     {
-                         icon: 'bi-list-ul',
-                         label: 'Reglement facture',
-                         url: '/facture/reglement'
-                     },
 
                  ]
              },
@@ -1944,11 +1957,7 @@
                          label: 'Ouverture / Fermeture caisse',
                          url: '/caisse/journee'
                      },
-                     {
-                         icon: 'bi-list-ul',
-                         label: 'Depenses',
-                         url: '/depense/gestion'
-                     },
+                     
                      {
                          icon: 'bi-eye',
                          label: 'Transactions',

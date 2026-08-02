@@ -2,29 +2,27 @@
 require 'databases/database.php';
 require 'fonctions_rapport.php';
 
-$page_title = "Mouvement de Stock";
+$page_title = "Rentabilité des Ventes";
 
-// Graphique entrées/sorties mensuelles
-$mouvementsMois = $pdo->query("SELECT DATE_FORMAT(date_commande,'%Y-%m') AS mois, SUM(CASE WHEN statut_id IN ('011','009','010','006') THEN quantite_commande ELSE 0 END) AS entrees, SUM(CASE WHEN statut_id IN ('012','008','007','001','002','003','004') THEN quantite_commande ELSE 0 END) AS sorties FROM commande WHERE etat_commande NOT IN ('En attente','Annulé') AND date_commande >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH) GROUP BY mois ORDER BY mois ASC")->fetchAll(PDO::FETCH_ASSOC);
-
-// Requête de base pour le tableau (avec pagination manuelle)
-$sqlBase = "SELECT c.numero_commande, c.date_commande, c.quantite_commande, c.statut_id, c.etat_commande,
-                   p.titre_produit,
-                   b.nom_boutique,
-                   CASE WHEN c.statut_id IN ('011','009','010','006') THEN 'ENTRÉE' ELSE 'SORTIE' END AS type_mvt
+// Requête de base pour le tableau (pagination manuelle)
+$sqlBase = "SELECT c.numero_commande, c.date_commande, p.titre_produit,
+                   c.quantite_commande,
+                   CAST(c.montant_commande AS DECIMAL(12,2)) AS montant,
+                   CAST(c.prix_achat AS DECIMAL(12,2)) AS prix_achat,
+                   (CAST(c.montant_commande AS DECIMAL(12,2)) - (CAST(COALESCE(c.prix_achat,0) AS DECIMAL(12,2)) * c.quantite_commande)) AS benefice,
+                   ((CAST(c.montant_commande AS DECIMAL(12,2)) - (CAST(COALESCE(c.prix_achat,0) AS DECIMAL(12,2)) * c.quantite_commande)) / CAST(c.montant_commande AS DECIMAL(12,2))) * 100 AS taux
             FROM commande c
             JOIN produit p ON c.produit_id = p.code_produit
-            LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
-            WHERE c.etat_commande NOT IN ('En attente','Annulé')
-            ORDER BY c.date_commande DESC, c.heure_commande DESC";
+            WHERE c.statut_id='012' AND c.etat_commande NOT IN ('En attente','Annulé')
+            ORDER BY benefice DESC";
 
 // Pagination
 $perPage = 20;
 $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 
-// Compter le total
-$countSql = "SELECT COUNT(*) FROM commande c WHERE c.etat_commande NOT IN ('En attente','Annulé')";
+// Compter le total de ventes
+$countSql = "SELECT COUNT(*) FROM commande c WHERE c.statut_id='012' AND c.etat_commande NOT IN ('En attente','Annulé')";
 $stmtCount = $pdo->prepare($countSql);
 $stmtCount->execute();
 $total = $stmtCount->fetchColumn();
@@ -35,43 +33,36 @@ $offset = ($page - 1) * $perPage;
 $sql = $sqlBase . " LIMIT $perPage OFFSET $offset";
 $stmt = $pdo->prepare($sql);
 $stmt->execute();
-$mouvements = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$ventes = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Construction du tableau HTML
 ob_start();
-if (empty($mouvements)): ?>
+if (empty($ventes)): ?>
     <tr>
         <td colspan="7" class="text-center py-5 text-muted">
             <i class="bi bi-inbox d-block mb-2 opacity-50" style="font-size:2rem;"></i>
-            Aucun mouvement trouvé
+            Aucune vente trouvée
         </td>
     </tr>
-<?php else: foreach ($mouvements as $row): ?>
+<?php else: foreach ($ventes as $row):
+    $benefice = (float)$row['benefice'];
+    $taux = (float)$row['taux'];
+    if ($taux > 20) {
+        $badge = 'badge-success';
+    } elseif ($taux > 10) {
+        $badge = 'badge-warning';
+    } else {
+        $badge = 'badge-danger';
+    }
+    ?>
     <tr>
-        <td><?= htmlspecialchars($row['numero_commande']) ?></td>
-        <td><?= htmlspecialchars($row['date_commande']) ?></td>
+        <td class="td-bold"><?= htmlspecialchars($row['numero_commande']) ?></td>
+        <td><?= date('d/m/Y', strtotime($row['date_commande'])) ?></td>
         <td><?= htmlspecialchars($row['titre_produit']) ?></td>
-        <td><?= htmlspecialchars($row['nom_boutique'] ?? '—') ?></td>
         <td><?= (int)$row['quantite_commande'] ?></td>
-        <td>
-            <?php if ($row['type_mvt'] === 'ENTRÉE'): ?>
-                <span class="badge badge-success">ENTRÉE</span>
-            <?php else: ?>
-                <span class="badge badge-danger">SORTIE</span>
-            <?php endif; ?>
-        </td>
-        <td>
-            <?php
-            $etat = $row['etat_commande'];
-            if ($etat === 'Valider' || $etat === 'Validé') {
-                echo '<span class="badge badge-success">' . htmlspecialchars($etat) . '</span>';
-            } elseif ($etat === 'Reçu') {
-                echo '<span class="badge badge-info">Reçu</span>';
-            } else {
-                echo '<span class="badge badge-danger">' . htmlspecialchars($etat) . '</span>';
-            }
-            ?>
-        </td>
+        <td><strong><?= number_format((float)$row['montant'], 0, ',', ' ') ?> F</strong></td>
+        <td><?= number_format($benefice, 0, ',', ' ') ?> F</td>
+        <td><span class="badge <?= $badge ?>"><?= number_format($taux, 1) ?>%</span></td>
     </tr>
 <?php endforeach; endif;
 $tableHtml = ob_get_clean();
@@ -126,25 +117,34 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     ]);
     exit;
 }
+
+// Fonctions e() et fmt() si elles ne sont pas définies
+if (!function_exists('e')) {
+    function e($str) {
+        return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
+    }
+}
+if (!function_exists('fmt')) {
+    function fmt($n) {
+        return number_format(floatval($n), 0, ',', ' ');
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mouvement de Stock</title>
+    <title>Rentabilité des Ventes</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body { font-family: 'Inter', sans-serif; background: #f1f5f9; padding: 28px 20px; color: #0f172a; }
         .W { max-width: 1400px; margin: 0 auto; }
         .hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
         .hdr h1 { font-size: 26px; font-weight: 800; margin: 0; }
         .hdr p { font-size: 13px; color: #64748b; margin: 0; }
-        .chart-card { background: white; border-radius: 10px; padding: 16px; border: 1px solid #e2e8f0; margin-bottom: 20px; }
-        .chart-card h4 { font-size: 0.9rem; font-weight: 700; margin-bottom: 12px; }
         .report-card { background: white; border-radius: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.04); border: 1px solid #e2e8f0; padding: 20px 24px; margin-bottom: 20px; }
         .report-card h3 { font-size: 1rem; font-weight: 700; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
         .table-wrapper { overflow-x: auto; border-radius: 8px; border: 1px solid #e2e8f0; background: white; }
@@ -155,33 +155,29 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
         tbody tr:hover { background: #dbeafe; }
         .badge { padding: 3px 9px; border-radius: 16px; font-size: 0.68rem; font-weight: 700; }
         .badge-success { background: #d1fae5; color: #065f46; }
+        .badge-warning { background: #ffedd5; color: #9a3412; }
         .badge-danger { background: #fee2e2; color: #991b1b; }
-        .badge-info { background: #e0f2fe; color: #075985; }
         .empty-cell { text-align: center; padding: 30px 16px; color: #94a3b8; }
         .pagination .page-link { color: #1e40af; border: 1px solid #e2e8f0; border-radius: 6px; margin: 0 2px; padding: 6px 14px; }
         .pagination .page-link:hover { background: #dbeafe; }
         .pagination .page-item.active .page-link { background: #1e40af; border-color: #1e40af; color: #fff; }
         .pagination .page-item.disabled .page-link { color: #94a3b8; }
-        .header-badge { background: #eff6ff; border: 1px solid #bfdbfe; color: #2563eb; padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 700; }
+        .header-badge { background: #eff6ff; border: 1px solid #bfdbfe; color: #2563eb; padding: 8px 14px; border-radius: 8px; font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+        .td-bold { font-weight: 700; color: #0f172a; }
     </style>
 </head>
 <body>
 <div class="W">
     <div class="hdr">
-        <div><h1>Mouvement de Stock</h1><p>Traçabilité des entrées/sorties</p></div>
-        <div class="header-badge"><i class="bi bi-arrow-left-right"></i> <?= $total ?> mouvements</div>
-    </div>
-
-    <div class="chart-card">
-        <h4><i class="bi bi-bar-chart"></i> Entrées / Sorties mensuelles</h4>
-        <canvas id="chartStock" height="150"></canvas>
+        <div><h1>Rentabilité des Ventes</h1><p>Bénéfice par vente</p></div>
+        <div class="header-badge"><i class="bi bi-graph-up"></i> <?= $total ?> ventes</div>
     </div>
 
     <div class="report-card">
-        <h3><i class="bi bi-list-ul me-2"></i> Derniers mouvements <span class="text-muted small"><?= $total ?> lignes</span></h3>
+        <h3><i class="bi bi-list-ul me-2"></i> Détail des ventes <span class="text-muted small"><?= $total ?> lignes</span></h3>
         <div class="table-wrapper">
             <table>
-                <thead><tr><th>N°</th><th>Date</th><th>Produit</th><th>Boutique</th><th>Quantité</th><th>Type</th><th>État</th></tr></thead>
+                <thead><tr><th>N°</th><th>Date</th><th>Produit</th><th>Qte</th><th>Montant</th><th>Bénéfice</th><th>Taux</th></tr></thead>
                 <tbody id="tableBody"><?= $tableHtml ?></tbody>
             </table>
         </div>
@@ -189,27 +185,14 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     </div>
 </div>
 
-<form id="filterForm" style="display:none;"><input type="hidden" name="page" id="pageInput" value="<?= $page ?>"></form>
+<!-- Formulaire caché pour AJAX -->
+<form id="filterForm" style="display:none;">
+    <input type="hidden" name="page" id="pageInput" value="<?= $page ?>">
+</form>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script>
 $(document).ready(function() {
-    const ctx = document.getElementById('chartStock')?.getContext('2d');
-    if (ctx) {
-        const data = <?= json_encode($mouvementsMois) ?>;
-        new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: data.map(d => d.mois),
-                datasets: [
-                    { label: 'Entrées', data: data.map(d => parseInt(d.entrees) || 0), backgroundColor: 'rgba(5,150,105,0.7)', borderRadius: 4 },
-                    { label: 'Sorties', data: data.map(d => parseInt(d.sorties) || 0), backgroundColor: 'rgba(220,38,38,0.7)', borderRadius: 4 }
-                ]
-            },
-            options: { responsive: true, plugins: { legend: { position: 'bottom' } }, scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } } }
-        });
-    }
-
     function recharger(page) {
         $('#pageInput').val(page);
         var fd = new FormData(document.getElementById('filterForm'));

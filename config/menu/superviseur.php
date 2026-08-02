@@ -1800,7 +1800,7 @@
              },
              {
                  key: 'article',
-                 title: 'ARTICLES',
+                 title: 'ARTICLES & BOUTIQUES',
                  icon: 'bi-box-seam',
                  emoji: '📦',
                  items: [{
@@ -1808,16 +1808,23 @@
                          label: 'Catégories',
                          url: '/categorie/gestion'
                      },
-                     {
-                         icon: 'bi-list-ul',
-                         label: 'Lot produit',
-                         url: '/lot/gestion'
-                     },
 
                      {
                          icon: 'bi-bar-chart',
                          label: 'Produits',
                          url: '/produit/gestion'
+                     },
+
+                     {
+                         icon: 'bi-geo',
+                         label: 'Boutiques',
+                         url: '/boutique/gestion'
+                     },
+                     
+                     {
+                         icon: 'bi-envelope',
+                         label: 'Taxes',
+                         url: '/taxe/gestion'
                      }
                  ]
              },
@@ -1851,16 +1858,6 @@
                          icon: 'bi-bar-chart',
                          label: 'Stock disponible',
                          url: '/produit/stockDisponible'
-                     },
-                     {
-                         icon: 'bi-bar-chart',
-                         label: 'Alerte stock',
-                         url: '/produit/stockAlerte'
-                     },
-                     {
-                         icon: 'bi-bar-chart',
-                         label: 'Rupture de stock',
-                         url: '/produit/stockRupture'
                      }
 
                  ]
@@ -1881,6 +1878,18 @@
                          label: 'Suivi de vente',
                          url: '/commande/vente'
                      },
+
+                     {
+                         icon: 'bi-cash-coin',
+                         label: 'Reglement Factures Clients',
+                         url: '/facture/reglementClient'
+                     },
+
+                     {
+                         icon: 'bi-list-ul',
+                         label: 'Bon de livraison',
+                         url: '/facture/bonLivraison'
+                     },
                  ]
              },
 
@@ -1891,59 +1900,45 @@
                  emoji: '🛍️',
                  items: [{
                          icon: 'bi-list-ul',
-                         label: 'Achat fournisseur',
+                         label: 'Enregistrer Facture fournisseur',
                          url: '/commande/achat'
                      },
 
                      {
                          icon: 'bi-list-ul',
-                         label: 'Suivi achat',
+                         label: 'Suivi des achats',
                          url: '/commande/suiviAchat'
                      },
 
-                 ]
-             },
-
-             {
-                 key: 'facture',
-                 title: 'FATURES',
-                 icon: 'bi-cash',
-                 emoji: '🧾',
-                 items: [{
-                         icon: 'bi-list-ul',
-                         label: 'Factures clients',
-                         url: '/facture/gestion'
-                     },
-
                      {
-                         icon: 'bi-list-ul',
-                         label: 'Reglement facture',
-                         url: '/facture/reglement'
+                         icon: 'bi-truck',
+                         label: 'Reglement Factures Fournisseurs',
+                         url: '/facture/reglementFournisseur'
                      },
 
                  ]
              },
+              
              {
                  key: 'tresorerie',
                  title: 'TRESORERIE',
                  icon: 'bi-graph-up',
                  emoji: '💰',
                  items: [{
+                         icon: 'bi-pin-map',
+                         label: 'Caisse',
+                         url: '/caisse/gestion'
+                     },
+                     {
                          icon: 'bi-door-open',
                          label: 'Ouverture / Fermeture caisse',
                          url: '/caisse/journee'
                      },
-
-                     {
-                        icon: 'bi-wallet2',
-                        label: 'Compte de Trésorerie', 
-                        url: '/rapport/compteTresorerie'
-                     },
                      
                      {
-                         icon: 'bi-pin-map',
-                         label: 'Caisse',
-                         url: '/caisse/gestion'
+                         icon: 'bi-eye',
+                         label: 'Transactions',
+                         url: '/transaction/gestion'
                      }
                  ]
              },
@@ -1960,11 +1955,6 @@
                      },
 
                      {
-                         icon: 'bi-plus-circle',
-                         label: 'Statuts',
-                         url: '/statut/gestion'
-                     },
-                     {
                          icon: 'bi-envelope',
                          label: 'Taxes',
                          url: '/taxe/gestion'
@@ -1979,22 +1969,25 @@
     icon: 'bi-clock-history',
     emoji: '📈',
     items: [
-        { icon: 'bi-people', label: 'Situation des Clients', url: '/rapport/situationClient' },
-        { icon: 'bi-bar-chart-line', label: 'Résumé des Ventes', url: '/rapport/resumeVente' },
-        { icon: 'bi-cart-check', label: 'Résumé des Achats', url: '/rapport/resumeAchat' },
-        { icon: 'bi-trophy', label: 'Performance des Vendeurs', url: '/rapport/performanceVendeur' },
-        { icon: 'bi-percent', label: 'Marge Bénéficiaire', url: '/rapport/margeBeneficiaire' },
-        { icon: 'bi-graph-up-arrow', label: 'Rentabilité des Ventes', url: '/rapport/rentabiliteVente' },
-        { icon: 'bi-pie-chart', label: 'Chiffre d\'Affaires', url: '/rapport/chiffreAffaire' },
-        { icon: 'bi-arrow-left-right', label: 'Mouvement de Stock', url: '/rapport/mouvementStock' },
-        { icon: 'bi-file-earmark-text', label: 'Factures Clients', url: '/rapport/factureClient' },
-        { icon: 'bi-file-earmark-invoice', label: 'Factures Fournisseurs', url: '/rapport/factureFournisseur' },
-        { icon: 'bi-credit-card-2-front', label: 'Transactions Clients', url: '/rapport/transactionClient' }
+        { 
+            icon: 'bi-wallet2',
+            label: 'Rapport Commercial',
+            url: '/rapport/rapportCommercial'
+        },
+
+        { 
+            icon: 'bi-bar-chart-line',
+            label: 'Rapport Financier',
+            url: '/rapport/rapportFinancier'
+        },
+
+        {
+            icon: 'bi-arrow-left-right',
+            label: 'Mouvement de Stock',
+            url: '/rapport/mouvementStock'
+         }
     ]
 }
-
-
-
          ];
 
          // =========================================

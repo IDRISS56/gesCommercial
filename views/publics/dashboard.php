@@ -162,15 +162,14 @@ switch ($periode) {
 // Indicateurs
 
 // --- Indicateurs de stock (corrigés) ---
-// Récupération du stock disponible par produit à partir de stock_boutique
+// Récupération du stock disponible par produit à partir de `stock`
 $sqlStock = "
     SELECT 
         p.code_produit,
         p.stock_alerte,
-        COALESCE(SUM(sb.quantite - sb.quantite_reservee), 0) AS stock_disponible
+        COALESCE(s.quantite, 0) AS stock_disponible
     FROM produit p
-    LEFT JOIN stock_boutique sb ON sb.produit_id = p.code_produit
-    WHERE p.etat_produit = 'Actif'
+    LEFT JOIN stock s ON s.produit_id = p.code_produit
     GROUP BY p.code_produit
 ";
 $stmtStock = $pdo->query($sqlStock);
@@ -179,7 +178,9 @@ $stockData = $stmtStock->fetchAll(PDO::FETCH_ASSOC);
 $stockNul = 0;
 $stockAlerte = 0;
 $stockOk = 0;
+$totalProduits = 0;
 foreach ($stockData as $row) {
+    $totalProduits++;
     $dispo = (int)$row['stock_disponible'];
     $alerte = (int)$row['stock_alerte'];
     if ($dispo == 0) {
@@ -191,33 +192,36 @@ foreach ($stockData as $row) {
     }
 }
 
-// Total des produits actifs (pour le camembert)
-$stmt = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit='Actif'");
-$totalProduits = intval($stmt->fetchColumn());
-
+// Nombre total de clients actifs
 $stmt = $pdo->query("SELECT COUNT(*) FROM contact WHERE type_contact='Client' AND etat_contact='Actif'");
 $totalClients = intval($stmt->fetchColumn());
 
-$stmt = $pdo->query("SELECT COALESCE(SUM(solde_actuel),0) FROM caisses WHERE statut='ouverte'");
+// Solde des caisses ouvertes (table `caisse`, colonne `solde`)
+$stmt = $pdo->query("SELECT COALESCE(SUM(solde),0) FROM caisse WHERE statut='Ouverte'");
 $soldeCaisse = floatval($stmt->fetchColumn() ?? 0);
 
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE etat_commande='Valider' AND date_commande BETWEEN ? AND ?");
+// Commandes validées de la période (etat_commande = 'VALIDEE')
+// statut_id = '012' = ligne de VENTE (le '011' correspond aux lignes d'ACHAT
+// fournisseur qui partagent désormais la même table `commande` et ne doivent
+// jamais entrer dans les statistiques de chiffre d'affaires ci-dessous).
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE etat_commande='VALIDEE' AND statut_id='012' AND date_commande BETWEEN ? AND ?");
 $stmt->execute([$date_debut, $date_fin]);
 $cmdPeriode = intval($stmt->fetchColumn());
 
-$stmt = $pdo->prepare("SELECT SUM(CAST(montant_commande AS DECIMAL(12,2))) FROM commande WHERE etat_commande='Valider' AND date_commande BETWEEN ? AND ?");
+$stmt = $pdo->prepare("SELECT SUM(CAST(montant_commande AS DECIMAL(12,2))) FROM commande WHERE etat_commande='VALIDEE' AND statut_id='012' AND date_commande BETWEEN ? AND ?");
 $stmt->execute([$date_debut, $date_fin]);
 $caPeriode = floatval($stmt->fetchColumn() ?? 0);
 
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE etat_commande='Valider' AND date_commande BETWEEN ? AND ?");
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE etat_commande='VALIDEE' AND statut_id='012' AND date_commande BETWEEN ? AND ?");
 $stmt->execute([$date_debut_prev, $date_fin_prev]);
 $cmdPrev = intval($stmt->fetchColumn());
 
-$stmt = $pdo->prepare("SELECT SUM(CAST(montant_commande AS DECIMAL(12,2))) FROM commande WHERE etat_commande='Valider' AND date_commande BETWEEN ? AND ?");
+$stmt = $pdo->prepare("SELECT SUM(CAST(montant_commande AS DECIMAL(12,2))) FROM commande WHERE etat_commande='VALIDEE' AND statut_id='012' AND date_commande BETWEEN ? AND ?");
 $stmt->execute([$date_debut_prev, $date_fin_prev]);
 $caPrev = floatval($stmt->fetchColumn() ?? 0);
 
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE etat_commande!='Valider' AND date_commande BETWEEN ? AND ?");
+// Commandes en attente (etat_commande = 'EN ATTENTE') — ventes uniquement
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE etat_commande='EN ATTENTE' AND statut_id='012' AND date_commande BETWEEN ? AND ?");
 $stmt->execute([$date_debut, $date_fin]);
 $cmdAttente = intval($stmt->fetchColumn() ?? 0);
 
@@ -228,10 +232,11 @@ $deltaCmd = $cmdPeriode - $cmdPrev;
 $deltaCA = $caPeriode - $caPrev;
 $pctCA = $caPrev > 0 ? round(($deltaCA / $caPrev) * 100, 1) : ($caPeriode > 0 ? 100 : 0);
 
+// Modes de règlement
 $stmt = $pdo->prepare("SELECT t.mode_reglement, SUM(CAST(t.montant_transaction AS DECIMAL(12,2))) AS total
                        FROM commande c
                        INNER JOIN transaction t ON c.facture_id = t.facture_id
-                       WHERE c.etat_commande='Valider' AND c.date_commande BETWEEN ? AND ?
+                       WHERE c.etat_commande='VALIDEE' AND c.statut_id='012' AND t.type_transaction='Entree' AND c.date_commande BETWEEN ? AND ?
                        GROUP BY t.mode_reglement
                        ORDER BY total DESC");
 $stmt->execute([$date_debut, $date_fin]);
@@ -246,9 +251,10 @@ foreach ($reglementData as $r) {
     $regValues[] = floatval($r['total']);
 }
 
+// Top 5 produits vendus
 $stmt = $pdo->prepare("SELECT produit_id, SUM(CAST(quantite_commande AS UNSIGNED)) as total_qte
                        FROM commande
-                       WHERE etat_commande='Valider' AND date_commande BETWEEN ? AND ?
+                       WHERE etat_commande='VALIDEE' AND statut_id='012' AND date_commande BETWEEN ? AND ?
                        GROUP BY produit_id ORDER BY total_qte DESC LIMIT 5");
 $stmt->execute([$date_debut, $date_fin]);
 $topProduits = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -260,9 +266,10 @@ foreach ($topProduits as $row) {
 }
 $maxQte = !empty($topDetails) ? max(array_column($topDetails, 'total_qte')) : 1;
 
+// Activité récente
 $stmt = $pdo->prepare("SELECT c.numero_commande, c.date_commande, c.heure_commande, c.contact_id, c.produit_id, CAST(c.montant_commande AS DECIMAL(12,2)) as montant, c.etat_commande
                        FROM commande c
-                       WHERE c.etat_commande='Valider' AND c.date_commande BETWEEN ? AND ?
+                       WHERE c.etat_commande='VALIDEE' AND c.statut_id='012' AND c.date_commande BETWEEN ? AND ?
                        ORDER BY c.date_commande DESC, c.heure_commande DESC LIMIT 8");
 $stmt->execute([$date_debut, $date_fin]);
 $activite = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -277,6 +284,7 @@ foreach ($activite as $a) {
     $actDetails[] = ['numero' => $a['numero_commande'], 'date' => $a['date_commande'], 'heure' => $a['heure_commande'], 'client' => $client, 'produit' => $prod, 'montant' => $a['montant'], 'etat' => $a['etat_commande']];
 }
 
+// Évolution des ventes
 $debutObj = new DateTime($date_debut);
 $finObj = new DateTime($date_fin);
 $nbJours = $debutObj->diff($finObj)->days + 1;
@@ -285,7 +293,7 @@ elseif ($nbJours <= 93) $groupBy = "WEEK(date_commande)";
 else $groupBy = "DATE_FORMAT(date_commande, '%Y-%m')";
 $stmt = $pdo->prepare("SELECT $groupBy as periode, SUM(CAST(montant_commande AS DECIMAL(12,2))) as total_ventes
                        FROM commande
-                       WHERE etat_commande='Valider' AND date_commande BETWEEN ? AND ?
+                       WHERE etat_commande='VALIDEE' AND statut_id='012' AND date_commande BETWEEN ? AND ?
                        GROUP BY periode ORDER BY periode ASC");
 $stmt->execute([$date_debut, $date_fin]);
 $evolution = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -359,7 +367,6 @@ $spPct = function ($v, $t) {
         ::-webkit-scrollbar {
             width: 5px;
         }
-
         ::-webkit-scrollbar-thumb {
             background: #cbd5e1;
             border-radius: 4px;
@@ -379,28 +386,24 @@ $spPct = function ($v, $t) {
             gap: 12px;
             margin-bottom: 20px;
         }
-
         .hdr-l h1 {
             font-size: 26px;
             font-weight: 800;
             color: var(--dk);
             letter-spacing: -0.02em;
         }
-
         .hdr-l p {
             font-size: 13px;
             color: var(--mt);
             margin-top: 2px;
             font-weight: 500;
         }
-
         .hdr-r {
             display: flex;
             align-items: center;
             gap: 10px;
             flex-wrap: wrap;
         }
-
         .hdr-badge {
             background: var(--bl);
             border: 1px solid var(--bb);
@@ -413,7 +416,6 @@ $spPct = function ($v, $t) {
             align-items: center;
             gap: 6px;
         }
-
         .hdr-solde {
             background: var(--sucl);
             border: 1px solid var(--sucb);
@@ -433,16 +435,14 @@ $spPct = function ($v, $t) {
             border-radius: var(--R);
             padding: 16px 20px;
             margin-bottom: 22px;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, .04);
+            box-shadow: 0 1px 3px rgba(0,0,0,.04);
         }
-
         .ptabs {
             display: flex;
             gap: 5px;
             flex-wrap: wrap;
             margin-bottom: 12px;
         }
-
         .ptab {
             padding: 6px 14px;
             border-radius: 8px;
@@ -457,23 +457,18 @@ $spPct = function ($v, $t) {
             gap: 5px;
             cursor: pointer;
         }
-
         .ptab:hover {
             color: var(--b);
             border-color: var(--bb);
             background: var(--bl);
         }
-
         .ptab.on {
             background: var(--b);
             color: #fff;
             border-color: var(--b);
-            box-shadow: 0 2px 8px rgba(37, 99, 235, .25);
+            box-shadow: 0 2px 8px rgba(37,99,235,.25);
         }
-
-        .ptab i {
-            font-size: 13px;
-        }
+        .ptab i { font-size: 13px; }
 
         .prow {
             display: flex;
@@ -481,7 +476,6 @@ $spPct = function ($v, $t) {
             gap: 10px;
             flex-wrap: wrap;
         }
-
         .prow label {
             font-size: 11px;
             font-weight: 600;
@@ -489,9 +483,7 @@ $spPct = function ($v, $t) {
             letter-spacing: .03em;
             text-transform: uppercase;
         }
-
-        .prow input,
-        .prow select {
+        .prow input, .prow select {
             padding: 7px 10px;
             border: 1.5px solid var(--brd);
             border-radius: 8px;
@@ -502,15 +494,12 @@ $spPct = function ($v, $t) {
             font-family: 'Inter', sans-serif;
             transition: all .2s;
         }
-
-        .prow input:focus,
-        .prow select:focus {
+        .prow input:focus, .prow select:focus {
             border-color: var(--b);
             background: #fff;
             box-shadow: 0 0 0 3px var(--bl);
             outline: none;
         }
-
         .prow select {
             appearance: none;
             padding-right: 32px;
@@ -518,7 +507,6 @@ $spPct = function ($v, $t) {
             background-repeat: no-repeat;
             background-position: right 10px center;
         }
-
         .btn-go {
             background: var(--b);
             color: #fff;
@@ -529,15 +517,12 @@ $spPct = function ($v, $t) {
             display: flex;
             align-items: center;
             gap: 5px;
-            box-shadow: 0 2px 4px rgba(37, 99, 235, .2);
+            box-shadow: 0 2px 4px rgba(37,99,235,.2);
             transition: background .15s;
             border: none;
             cursor: pointer;
         }
-
-        .btn-go:hover {
-            background: var(--bd);
-        }
+        .btn-go:hover { background: var(--bd); }
 
         .plbl {
             font-size: 12px;
@@ -548,10 +533,7 @@ $spPct = function ($v, $t) {
             align-items: center;
             gap: 5px;
         }
-
-        .plbl i {
-            color: var(--b);
-        }
+        .plbl i { color: var(--b); }
 
         .sec {
             font-size: 11px;
@@ -564,25 +546,19 @@ $spPct = function ($v, $t) {
             align-items: center;
             gap: 8px;
         }
-
         .sec::after {
             content: '';
             flex: 1;
             height: 1px;
             background: var(--brd);
         }
-
-        .sec i {
-            font-size: 14px;
-            color: var(--b);
-        }
+        .sec i { font-size: 14px; color: var(--b); }
 
         .kpis {
             display: grid;
             grid-template-columns: repeat(5, 1fr);
             gap: 12px;
         }
-
         .kpi {
             background: var(--w);
             border: 1px solid var(--brd);
@@ -592,41 +568,22 @@ $spPct = function ($v, $t) {
             overflow: hidden;
             transition: all .2s;
         }
-
         .kpi:hover {
             transform: translateY(-3px);
-            box-shadow: 0 10px 20px rgba(15, 23, 42, .07);
+            box-shadow: 0 10px 20px rgba(15,23,42,.07);
         }
-
         .kpi::before {
             content: '';
             position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
+            top: 0; left: 0; right: 0;
             height: 3px;
             border-radius: var(--R) var(--R) 0 0;
         }
-
-        .kpi.kb::before {
-            background: var(--b);
-        }
-
-        .kpi.kg::before {
-            background: var(--suc);
-        }
-
-        .kpi.kp::before {
-            background: var(--prp);
-        }
-
-        .kpi.ko::before {
-            background: var(--wrn);
-        }
-
-        .kpi.kt::before {
-            background: var(--tl);
-        }
+        .kpi.kb::before { background: var(--b); }
+        .kpi.kg::before { background: var(--suc); }
+        .kpi.kp::before { background: var(--prp); }
+        .kpi.ko::before { background: var(--wrn); }
+        .kpi.kt::before { background: var(--tl); }
 
         .kr {
             display: flex;
@@ -634,7 +591,6 @@ $spPct = function ($v, $t) {
             gap: 8px;
             margin-bottom: 8px;
         }
-
         .ki {
             width: 36px;
             height: 36px;
@@ -644,38 +600,13 @@ $spPct = function ($v, $t) {
             justify-content: center;
             font-size: 16px;
         }
+        .ki.ib { background: var(--bl); color: var(--b); }
+        .ki.ig { background: var(--sucl); color: var(--suc); }
+        .ki.ip { background: var(--prpl); color: var(--prp); }
+        .ki.io { background: var(--wrnl); color: var(--wrn); }
+        .ki.it { background: var(--tll); color: var(--tl); }
 
-        .ki.ib {
-            background: var(--bl);
-            color: var(--b);
-        }
-
-        .ki.ig {
-            background: var(--sucl);
-            color: var(--suc);
-        }
-
-        .ki.ip {
-            background: var(--prpl);
-            color: var(--prp);
-        }
-
-        .ki.io {
-            background: var(--wrnl);
-            color: var(--wrn);
-        }
-
-        .ki.it {
-            background: var(--tll);
-            color: var(--tl);
-        }
-
-        .klb {
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--mt);
-        }
-
+        .klb { font-size: 11px; font-weight: 600; color: var(--mt); }
         .kv {
             font-size: 24px;
             font-weight: 900;
@@ -684,10 +615,7 @@ $spPct = function ($v, $t) {
             line-height: 1;
             margin-bottom: 5px;
         }
-
-        .kv.sm {
-            font-size: 18px;
-        }
+        .kv.sm { font-size: 18px; }
 
         .kd {
             display: inline-flex;
@@ -698,38 +626,17 @@ $spPct = function ($v, $t) {
             padding: 2px 7px;
             border-radius: 5px;
         }
-
-        .kd.u {
-            background: var(--sucl);
-            color: var(--suc);
-        }
-
-        .kd.d {
-            background: var(--dngl);
-            color: var(--dng);
-        }
-
-        .kd.n {
-            background: #f1f5f9;
-            color: var(--mt);
-        }
-
-        .kd i {
-            font-size: 12px;
-        }
-
-        .ks {
-            font-size: 10px;
-            color: var(--lt);
-            margin-left: 2px;
-        }
+        .kd.u { background: var(--sucl); color: var(--suc); }
+        .kd.d { background: var(--dngl); color: var(--dng); }
+        .kd.n { background: #f1f5f9; color: var(--mt); }
+        .kd i { font-size: 12px; }
+        .ks { font-size: 10px; color: var(--lt); margin-left: 2px; }
 
         .stock-row {
             display: grid;
             grid-template-columns: 1fr 1fr 1fr 280px;
             gap: 12px;
         }
-
         .stk {
             background: var(--w);
             border: 1px solid var(--brd);
@@ -740,12 +647,10 @@ $spPct = function ($v, $t) {
             gap: 12px;
             transition: all .2s;
         }
-
         .stk:hover {
             transform: translateY(-2px);
-            box-shadow: 0 6px 16px rgba(15, 23, 42, .05);
+            box-shadow: 0 6px 16px rgba(15,23,42,.05);
         }
-
         .stk-r {
             width: 42px;
             height: 42px;
@@ -756,41 +661,13 @@ $spPct = function ($v, $t) {
             font-size: 16px;
             font-weight: 800;
         }
+        .stk-r.sr { background: var(--dngl); color: var(--dng); border: 2px solid var(--dngb); }
+        .stk-r.so { background: var(--wrnl); color: #92400e; border: 2px solid var(--wrnb); }
+        .stk-r.sg { background: var(--sucl); color: #065f46; border: 2px solid var(--sucb); }
 
-        .stk-r.sr {
-            background: var(--dngl);
-            color: var(--dng);
-            border: 2px solid var(--dngb);
-        }
-
-        .stk-r.so {
-            background: var(--wrnl);
-            color: #92400e;
-            border: 2px solid var(--wrnb);
-        }
-
-        .stk-r.sg {
-            background: var(--sucl);
-            color: #065f46;
-            border: 2px solid var(--sucb);
-        }
-
-        .stk-i {
-            flex: 1;
-        }
-
-        .stk-v {
-            font-size: 15px;
-            font-weight: 800;
-            color: var(--dk);
-        }
-
-        .stk-l {
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--mt);
-        }
-
+        .stk-i { flex: 1; }
+        .stk-v { font-size: 15px; font-weight: 800; color: var(--dk); }
+        .stk-l { font-size: 11px; font-weight: 600; color: var(--mt); }
         .stk-bar {
             height: 4px;
             background: #e2e8f0;
@@ -798,31 +675,20 @@ $spPct = function ($v, $t) {
             margin-top: 5px;
             overflow: hidden;
         }
-
         .stk-f {
             height: 100%;
             border-radius: 2px;
             transition: width .5s;
         }
-
-        .stk-f.sr {
-            background: var(--dng);
-        }
-
-        .stk-f.so {
-            background: var(--wrn);
-        }
-
-        .stk-f.sg {
-            background: var(--suc);
-        }
+        .stk-f.sr { background: var(--dng); }
+        .stk-f.so { background: var(--wrn); }
+        .stk-f.sg { background: var(--suc); }
 
         .ch-row {
             display: grid;
             grid-template-columns: 1.3fr 1fr;
             gap: 12px;
         }
-
         .dt-row {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -836,14 +702,8 @@ $spPct = function ($v, $t) {
             overflow: hidden;
             transition: box-shadow .2s;
         }
-
-        .cd:hover {
-            box-shadow: 0 4px 12px rgba(15, 23, 42, .04);
-        }
-
-        .ci {
-            padding: 18px 20px;
-        }
+        .cd:hover { box-shadow: 0 4px 12px rgba(15,23,42,.04); }
+        .ci { padding: 18px 20px; }
 
         .ch {
             display: flex;
@@ -853,7 +713,6 @@ $spPct = function ($v, $t) {
             padding-bottom: 10px;
             border-bottom: 1px solid var(--brd);
         }
-
         .ct {
             font-size: 14px;
             font-weight: 700;
@@ -862,12 +721,7 @@ $spPct = function ($v, $t) {
             align-items: center;
             gap: 6px;
         }
-
-        .ct i {
-            color: var(--b);
-            font-size: 16px;
-        }
-
+        .ct i { color: var(--b); font-size: 16px; }
         .cb {
             font-size: 11px;
             font-weight: 600;
@@ -878,20 +732,9 @@ $spPct = function ($v, $t) {
             border: 1px solid var(--bb);
         }
 
-        .chbx {
-            height: 260px;
-            position: relative;
-        }
-
-        .pibx {
-            height: 260px;
-            position: relative;
-        }
-
-        .sdbx {
-            height: 200px;
-            position: relative;
-        }
+        .chbx { height: 260px; position: relative; }
+        .pibx { height: 260px; position: relative; }
+        .sdbx { height: 200px; position: relative; }
 
         .ebx {
             display: flex;
@@ -901,31 +744,16 @@ $spPct = function ($v, $t) {
             padding: 40px 20px;
             color: var(--lt);
         }
+        .ebx i { font-size: 36px; opacity: .1; color: var(--b); margin-bottom: 6px; }
+        .ebx p { font-size: 12px; }
 
-        .ebx i {
-            font-size: 36px;
-            opacity: .1;
-            color: var(--b);
-            margin-bottom: 6px;
-        }
-
-        .ebx p {
-            font-size: 12px;
-        }
-
-        .bl {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
+        .bl { display: flex; flex-direction: column; gap: 10px; }
         .bi-rk {
             display: flex;
             align-items: center;
             gap: 8px;
             margin-bottom: 2px;
         }
-
         .rk {
             width: 22px;
             height: 22px;
@@ -938,12 +766,7 @@ $spPct = function ($v, $t) {
             color: var(--b);
             background: var(--bl);
         }
-
-        .rk.g {
-            background: var(--sucl);
-            color: #065f46;
-        }
-
+        .rk.g { background: var(--sucl); color: #065f46; }
         .bi-l {
             font-size: 12px;
             font-weight: 600;
@@ -953,13 +776,7 @@ $spPct = function ($v, $t) {
             overflow: hidden;
             text-overflow: ellipsis;
         }
-
-        .bi-n {
-            font-size: 11px;
-            font-weight: 700;
-            color: var(--b);
-        }
-
+        .bi-n { font-size: 11px; font-weight: 700; color: var(--b); }
         .bi-tk {
             height: 5px;
             background: #e2e8f0;
@@ -967,27 +784,15 @@ $spPct = function ($v, $t) {
             overflow: hidden;
             margin-top: 3px;
         }
-
         .bi-fl {
             height: 100%;
             border-radius: 3px;
             transition: width .5s;
         }
+        .bi-fl.bf { background: linear-gradient(90deg, var(--b), #60a5fa); }
+        .bi-fl.bfg { background: linear-gradient(90deg, var(--suc), #6ee7b7); }
 
-        .bi-fl.bf {
-            background: linear-gradient(90deg, var(--b), #60a5fa);
-        }
-
-        .bi-fl.bfg {
-            background: linear-gradient(90deg, var(--suc), #6ee7b7);
-        }
-
-        .acts {
-            display: flex;
-            flex-direction: column;
-            gap: 0;
-        }
-
+        .acts { display: flex; flex-direction: column; gap: 0; }
         .act {
             display: flex;
             align-items: flex-start;
@@ -995,11 +800,7 @@ $spPct = function ($v, $t) {
             padding: 8px 0;
             border-bottom: 1px solid var(--brd);
         }
-
-        .act:last-child {
-            border-bottom: none;
-        }
-
+        .act:last-child { border-bottom: none; }
         .adot {
             width: 28px;
             height: 28px;
@@ -1010,22 +811,9 @@ $spPct = function ($v, $t) {
             font-size: 12px;
             flex-shrink: 0;
         }
-
-        .adot.av {
-            background: var(--sucl);
-            color: var(--suc);
-        }
-
-        .adot.aw {
-            background: var(--wrnl);
-            color: var(--wrn);
-        }
-
-        .abdy {
-            flex: 1;
-            min-width: 0;
-        }
-
+        .adot.av { background: var(--sucl); color: var(--suc); }
+        .adot.aw { background: var(--wrnl); color: var(--wrn); }
+        .abdy { flex: 1; min-width: 0; }
         .at {
             font-size: 11px;
             font-weight: 600;
@@ -1034,20 +822,8 @@ $spPct = function ($v, $t) {
             overflow: hidden;
             text-overflow: ellipsis;
         }
-
-        .ad {
-            font-size: 10px;
-            color: var(--mt);
-            margin-top: 1px;
-        }
-
-        .aa {
-            font-size: 10px;
-            font-weight: 700;
-            color: var(--b);
-            margin-top: 1px;
-        }
-
+        .ad { font-size: 10px; color: var(--mt); margin-top: 1px; }
+        .aa { font-size: 10px; font-weight: 700; color: var(--b); margin-top: 1px; }
         .atm {
             font-size: 10px;
             color: var(--lt);
@@ -1058,86 +834,32 @@ $spPct = function ($v, $t) {
         }
 
         @keyframes fadeUp {
-            from {
-                opacity: 0;
-                transform: translateY(12px);
-            }
-
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
         }
-
-        .kpi,
-        .stk,
-        .cd {
+        .kpi, .stk, .cd {
             animation: fadeUp .4s ease both;
         }
-
-        .kpi:nth-child(2) {
-            animation-delay: .05s;
-        }
-
-        .kpi:nth-child(3) {
-            animation-delay: .1s;
-        }
-
-        .kpi:nth-child(4) {
-            animation-delay: .15s;
-        }
-
-        .kpi:nth-child(5) {
-            animation-delay: .2s;
-        }
+        .kpi:nth-child(2) { animation-delay: .05s; }
+        .kpi:nth-child(3) { animation-delay: .1s; }
+        .kpi:nth-child(4) { animation-delay: .15s; }
+        .kpi:nth-child(5) { animation-delay: .2s; }
 
         @media (max-width:1100px) {
-            .kpis {
-                grid-template-columns: repeat(3, 1fr);
-            }
-
-            .stock-row {
-                grid-template-columns: repeat(2, 1fr);
-            }
-
-            .ch-row,
-            .dt-row {
-                grid-template-columns: 1fr;
-            }
+            .kpis { grid-template-columns: repeat(3, 1fr); }
+            .stock-row { grid-template-columns: repeat(2, 1fr); }
+            .ch-row, .dt-row { grid-template-columns: 1fr; }
         }
-
         @media (max-width:700px) {
-            .W {
-                padding: 14px;
-            }
-
-            .kpis {
-                grid-template-columns: repeat(2, 1fr);
-            }
-
-            .stock-row {
-                grid-template-columns: 1fr;
-            }
-
-            .hdr {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-
-            .prow {
-                flex-direction: column;
-                align-items: stretch;
-            }
-
-            .plbl {
-                margin-left: 0;
-            }
+            .W { padding: 14px; }
+            .kpis { grid-template-columns: repeat(2, 1fr); }
+            .stock-row { grid-template-columns: 1fr; }
+            .hdr { flex-direction: column; align-items: flex-start; }
+            .prow { flex-direction: column; align-items: stretch; }
+            .plbl { margin-left: 0; }
         }
-
         @media (max-width:480px) {
-            .kpis {
-                grid-template-columns: 1fr;
-            }
+            .kpis { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -1215,35 +937,58 @@ $spPct = function ($v, $t) {
                     <div class="ki ib"><i class="bi bi-receipt-cutoff"></i></div>
                     <div class="klb">Commandes</div>
                 </div>
-                <div class="kv"><?= $cmdPeriode ?></div><?php if ($deltaCmd > 0): ?><span class="kd u"><i class="bi bi-arrow-up-short"></i>+<?= abs($deltaCmd) ?></span><span class="ks">vs <?= e($libelle_periode_prev) ?></span><?php elseif ($deltaCmd < 0): ?><span class="kd d"><i class="bi bi-arrow-down-short"></i><?= abs($deltaCmd) ?></span><span class="ks">vs <?= e($libelle_periode_prev) ?></span><?php else: ?><span class="kd n"><i class="bi bi-dash"></i>Stable</span><?php endif; ?>
+                <div class="kv"><?= $cmdPeriode ?></div>
+                <?php if ($deltaCmd > 0): ?>
+                    <span class="kd u"><i class="bi bi-arrow-up-short"></i>+<?= abs($deltaCmd) ?></span><span class="ks">vs <?= e($libelle_periode_prev) ?></span>
+                <?php elseif ($deltaCmd < 0): ?>
+                    <span class="kd d"><i class="bi bi-arrow-down-short"></i><?= abs($deltaCmd) ?></span><span class="ks">vs <?= e($libelle_periode_prev) ?></span>
+                <?php else: ?>
+                    <span class="kd n"><i class="bi bi-dash"></i>Stable</span>
+                <?php endif; ?>
             </div>
             <div class="kpi kp">
                 <div class="kr">
                     <div class="ki ip"><i class="bi bi-cash-stack"></i></div>
                     <div class="klb">Chiffre d'affaires</div>
                 </div>
-                <div class="kv sm"><?= fmtK($caPeriode) ?> F</div><?php if ($deltaCA > 0): ?><span class="kd u"><i class="bi bi-arrow-up-short"></i>+<?= fmtK(abs($deltaCA)) ?> F</span><span class="ks">(+<?= $pctCA ?>%)</span><?php elseif ($deltaCA < 0): ?><span class="kd d"><i class="bi bi-arrow-down-short"></i><?= fmtK(abs($deltaCA)) ?> F</span><span class="ks">(<?= $pctCA ?>%)</span><?php else: ?><span class="kd n"><i class="bi bi-dash"></i>Stable</span><?php endif; ?>
+                <div class="kv sm"><?= fmtK($caPeriode) ?> F</div>
+                <?php if ($deltaCA > 0): ?>
+                    <span class="kd u"><i class="bi bi-arrow-up-short"></i>+<?= fmtK(abs($deltaCA)) ?> F</span><span class="ks">(+<?= $pctCA ?>%)</span>
+                <?php elseif ($deltaCA < 0): ?>
+                    <span class="kd d"><i class="bi bi-arrow-down-short"></i><?= fmtK(abs($deltaCA)) ?> F</span><span class="ks">(<?= $pctCA ?>%)</span>
+                <?php else: ?>
+                    <span class="kd n"><i class="bi bi-dash"></i>Stable</span>
+                <?php endif; ?>
             </div>
             <div class="kpi kt">
                 <div class="kr">
                     <div class="ki it"><i class="bi bi-cart4"></i></div>
                     <div class="klb">Panier moyen</div>
                 </div>
-                <div class="kv sm"><?= fmt($panierMoyen) ?> F</div><?php if ($deltaPanier > 0): ?><span class="kd u"><i class="bi bi-arrow-up-short"></i>+<?= fmt(abs($deltaPanier)) ?> F</span><?php elseif ($deltaPanier < 0): ?><span class="kd d"><i class="bi bi-arrow-down-short"></i><?= fmt(abs($deltaPanier)) ?> F</span><?php else: ?><span class="kd n"><i class="bi bi-dash"></i>Stable</span><?php endif; ?>
+                <div class="kv sm"><?= fmt($panierMoyen) ?> F</div>
+                <?php if ($deltaPanier > 0): ?>
+                    <span class="kd u"><i class="bi bi-arrow-up-short"></i>+<?= fmt(abs($deltaPanier)) ?> F</span>
+                <?php elseif ($deltaPanier < 0): ?>
+                    <span class="kd d"><i class="bi bi-arrow-down-short"></i><?= fmt(abs($deltaPanier)) ?> F</span>
+                <?php else: ?>
+                    <span class="kd n"><i class="bi bi-dash"></i>Stable</span>
+                <?php endif; ?>
             </div>
             <div class="kpi kg">
                 <div class="kr">
                     <div class="ki ig"><i class="bi bi-people-fill"></i></div>
                     <div class="klb">Clients actifs</div>
                 </div>
-                <div class="kv"><?= $totalClients ?></div><span class="kd n"><i class="bi bi-dash"></i>Total</span><span class="ks">enregistrés</span>
+                <div class="kv"><?= $totalClients ?></div>
+                <span class="kd n"><i class="bi bi-dash"></i>Total</span><span class="ks">enregistrés</span>
             </div>
             <div class="kpi ko">
                 <div class="kr">
                     <div class="ki io"><i class="bi bi-hourglass-split"></i></div>
                     <div class="klb">En attente</div>
                 </div>
-                <div class="kv"><?= $cmdAttente ?></div><span class="kd n"><i class="bi bi-dash"></i>Sur la période</span>
+                <div class="kv"><?= $cmdAttente ?></div>
+                <span class="kd n"><i class="bi bi-dash"></i>Sur la période</span>
             </div>
         </div>
 
@@ -1297,9 +1042,12 @@ $spPct = function ($v, $t) {
                     <div class="ch">
                         <div class="ct"><i class="bi bi-graph-up"></i> Évolution des ventes</div>
                         <div class="cb"><?= e($libelle_periode) ?></div>
-                    </div><?php if (empty($chartData)): ?><div class="ebx"><i class="bi bi-bar-chart"></i>
-                            <p>Aucune donnée pour cette période.</p>
-                        </div><?php else: ?><div class="chbx"><canvas id="vChart"></canvas></div><?php endif; ?>
+                    </div>
+                    <?php if (empty($chartData)): ?>
+                        <div class="ebx"><i class="bi bi-bar-chart"></i><p>Aucune donnée pour cette période.</p></div>
+                    <?php else: ?>
+                        <div class="chbx"><canvas id="vChart"></canvas></div>
+                    <?php endif; ?>
                 </div>
             </div>
             <div class="cd">
@@ -1307,9 +1055,12 @@ $spPct = function ($v, $t) {
                     <div class="ch">
                         <div class="ct"><i class="bi bi-credit-card-2-front-fill"></i> Modes de règlement</div>
                         <div class="cb"><?= fmtK($caPeriode) ?> F</div>
-                    </div><?php if (empty($regValues)): ?><div class="ebx"><i class="bi bi-pie-chart"></i>
-                            <p>Aucune donnée de règlement.</p>
-                        </div><?php else: ?><div class="pibx"><canvas id="pieChart"></canvas></div><?php endif; ?>
+                    </div>
+                    <?php if (empty($regValues)): ?>
+                        <div class="ebx"><i class="bi bi-pie-chart"></i><p>Aucune donnée de règlement.</p></div>
+                    <?php else: ?>
+                        <div class="pibx"><canvas id="pieChart"></canvas></div>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
@@ -1321,16 +1072,25 @@ $spPct = function ($v, $t) {
                     <div class="ch">
                         <div class="ct"><i class="bi bi-trophy-fill"></i> Top 5 produits vendus</div>
                         <div class="cb"><?= $cmdPeriode ?> commandes</div>
-                    </div><?php if (empty($topDetails)): ?><div class="ebx" style="padding:20px"><i class="bi bi-trophy"></i>
-                            <p>Aucune vente.</p>
-                        </div><?php else: ?><div class="bl"><?php foreach ($topDetails as $i => $item): ?><div>
+                    </div>
+                    <?php if (empty($topDetails)): ?>
+                        <div class="ebx" style="padding:20px"><i class="bi bi-trophy"></i><p>Aucune vente.</p></div>
+                    <?php else: ?>
+                        <div class="bl">
+                            <?php foreach ($topDetails as $i => $item): ?>
+                                <div>
                                     <div class="bi-rk">
-                                        <div class="rk <?= $i === 0 ? 'g' : '' ?>"><?= $i + 1 ?></div><span class="bi-l"><?= e($item['titre']) ?></span><span class="bi-n"><?= $item['total_qte'] ?> vendus</span>
+                                        <div class="rk <?= $i === 0 ? 'g' : '' ?>"><?= $i + 1 ?></div>
+                                        <span class="bi-l"><?= e($item['titre']) ?></span>
+                                        <span class="bi-n"><?= $item['total_qte'] ?> vendus</span>
                                     </div>
                                     <div class="bi-tk">
                                         <div class="bi-fl <?= $i === 0 ? 'bfg' : 'bf' ?>" style="width:<?= round(($item['total_qte'] / $maxQte) * 100) ?>%"></div>
                                     </div>
-                                </div><?php endforeach; ?></div><?php endif; ?>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
                 </div>
             </div>
             <div class="cd">
@@ -1338,16 +1098,27 @@ $spPct = function ($v, $t) {
                     <div class="ch">
                         <div class="ct"><i class="bi bi-lightning-fill"></i> Activité récente</div>
                         <div class="cb"><?= e($libelle_periode) ?></div>
-                    </div><?php if (empty($actDetails)): ?><div class="ebx" style="padding:20px"><i class="bi bi-clock-history"></i>
-                            <p>Aucune activité.</p>
-                        </div><?php else: ?><div class="acts"><?php foreach ($actDetails as $a): ?><?php $isV = $a['etat'] === 'Valider'; ?><div class="act">
-                                <div class="adot <?= $isV ? 'av' : 'aw' ?>"><i class="bi <?= $isV ? 'bi-check-circle-fill' : 'bi-hourglass' ?>"></i></div>
-                                <div class="abdy">
-                                    <div class="at"><?= e($a['client']) ?></div>
-                                    <div class="ad"><?= e($a['produit']) ?></div><?php if ($a['montant'] > 0): ?><div class="aa"><?= fmt($a['montant']) ?> F</div><?php endif; ?>
+                    </div>
+                    <?php if (empty($actDetails)): ?>
+                        <div class="ebx" style="padding:20px"><i class="bi bi-clock-history"></i><p>Aucune activité.</p></div>
+                    <?php else: ?>
+                        <div class="acts">
+                            <?php foreach ($actDetails as $a): ?>
+                                <?php $isV = $a['etat'] === 'VALIDEE'; ?>
+                                <div class="act">
+                                    <div class="adot <?= $isV ? 'av' : 'aw' ?>"><i class="bi <?= $isV ? 'bi-check-circle-fill' : 'bi-hourglass' ?>"></i></div>
+                                    <div class="abdy">
+                                        <div class="at"><?= e($a['client']) ?></div>
+                                        <div class="ad"><?= e($a['produit']) ?></div>
+                                        <?php if ($a['montant'] > 0): ?>
+                                            <div class="aa"><?= fmt($a['montant']) ?> F</div>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="atm"><?= e($a['date']) ?></div>
                                 </div>
-                                <div class="atm"><?= e($a['date']) ?></div>
-                            </div><?php endforeach; ?></div><?php endif; ?>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
@@ -1358,17 +1129,8 @@ $spPct = function ($v, $t) {
             afterDraw(chart) {
                 const opts = chart.config.options.plugins.centerText;
                 if (!opts) return;
-                const {
-                    ctx,
-                    chartArea: {
-                        left,
-                        right,
-                        top,
-                        bottom
-                    }
-                } = chart;
-                const cx = (left + right) / 2,
-                    cy = (top + bottom) / 2;
+                const { ctx, chartArea: { left, right, top, bottom } } = chart;
+                const cx = (left + right) / 2, cy = (top + bottom) / 2;
                 ctx.save();
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
@@ -1405,21 +1167,11 @@ $spPct = function ($v, $t) {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
-                        legend: {
-                            display: false
-                        },
+                        legend: { display: false },
                         tooltip: {
                             backgroundColor: '#0f172a',
-                            titleFont: {
-                                family: 'Inter',
-                                size: 12,
-                                weight: '700'
-                            },
-                            bodyFont: {
-                                family: 'Inter',
-                                size: 11,
-                                weight: '600'
-                            },
+                            titleFont: { family: 'Inter', size: 12, weight: '700' },
+                            bodyFont: { family: 'Inter', size: 11, weight: '600' },
                             padding: 10,
                             cornerRadius: 8,
                             displayColors: false,
@@ -1430,31 +1182,14 @@ $spPct = function ($v, $t) {
                     },
                     scales: {
                         x: {
-                            grid: {
-                                display: false
-                            },
-                            ticks: {
-                                font: {
-                                    family: 'Inter',
-                                    size: 11,
-                                    weight: '600'
-                                },
-                                color: '#64748b'
-                            },
-                            border: {
-                                display: false
-                            }
+                            grid: { display: false },
+                            ticks: { font: { family: 'Inter', size: 11, weight: '600' }, color: '#64748b' },
+                            border: { display: false }
                         },
                         y: {
-                            grid: {
-                                color: '#f1f5f9'
-                            },
+                            grid: { color: '#f1f5f9' },
                             ticks: {
-                                font: {
-                                    family: 'Inter',
-                                    size: 10,
-                                    weight: '500'
-                                },
+                                font: { family: 'Inter', size: 10, weight: '500' },
                                 color: '#94a3b8',
                                 callback: v => {
                                     if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
@@ -1462,16 +1197,11 @@ $spPct = function ($v, $t) {
                                     return v;
                                 }
                             },
-                            border: {
-                                display: false
-                            },
+                            border: { display: false },
                             beginAtZero: true
                         }
                     },
-                    animation: {
-                        duration: 700,
-                        easing: 'easeOutQuart'
-                    }
+                    animation: { duration: 700, easing: 'easeOutQuart' }
                 }
             });
         <?php endif; ?>
@@ -1513,26 +1243,14 @@ $spPct = function ($v, $t) {
                                 borderRadius: 2,
                                 useBorderRadius: true,
                                 padding: 12,
-                                font: {
-                                    family: 'Inter',
-                                    size: 11,
-                                    weight: '600'
-                                },
+                                font: { family: 'Inter', size: 11, weight: '600' },
                                 color: '#64748b'
                             }
                         },
                         tooltip: {
                             backgroundColor: '#0f172a',
-                            titleFont: {
-                                family: 'Inter',
-                                size: 12,
-                                weight: '700'
-                            },
-                            bodyFont: {
-                                family: 'Inter',
-                                size: 11,
-                                weight: '600'
-                            },
+                            titleFont: { family: 'Inter', size: 12, weight: '700' },
+                            bodyFont: { family: 'Inter', size: 11, weight: '600' },
                             padding: 10,
                             cornerRadius: 8,
                             callbacks: {
@@ -1544,10 +1262,7 @@ $spPct = function ($v, $t) {
                             }
                         }
                     },
-                    animation: {
-                        animateRotate: true,
-                        duration: 700
-                    }
+                    animation: { animateRotate: true, duration: 700 }
                 }
             });
         <?php endif; ?>
@@ -1580,11 +1295,7 @@ $spPct = function ($v, $t) {
                             borderRadius: 2,
                             useBorderRadius: true,
                             padding: 10,
-                            font: {
-                                family: 'Inter',
-                                size: 10,
-                                weight: '600'
-                            },
+                            font: { family: 'Inter', size: 10, weight: '600' },
                             color: '#64748b'
                         }
                     },
@@ -1601,10 +1312,7 @@ $spPct = function ($v, $t) {
                         }
                     }
                 },
-                animation: {
-                    animateRotate: true,
-                    duration: 700
-                }
+                animation: { animateRotate: true, duration: 700 }
             }
         });
     </script>

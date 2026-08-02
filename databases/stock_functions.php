@@ -6,6 +6,23 @@
 // Il n'y a plus de colonne type_mouvement redondante : la table `statut`
 // (via son champ type_statut) est la seule source de vérité.
 
+if (!function_exists('calculerEtatProduit')) {
+    /**
+     * Calcule l'état d'un produit (RUPTURE / ALERTE / DISPONIBLE) à partir
+     * de son stock courant et de son seuil d'alerte. Utilisé partout où le
+     * stock d'un produit est modifié directement (hors enregistrerMouvementStock,
+     * qui le fait déjà automatiquement).
+     */
+    function calculerEtatProduit($stock, $stockAlerte)
+    {
+        $stock = (int) $stock;
+        $stockAlerte = (int) $stockAlerte;
+        if ($stock <= 0) return 'RUPTURE';
+        if ($stock <= $stockAlerte) return 'ALERTE';
+        return 'DISPONIBLE';
+    }
+}
+
 if (!function_exists('enregistrerMouvementStock')) {
     /**
      * Enregistre un mouvement de stock immédiat (hors achat/vente qui suivent
@@ -50,21 +67,21 @@ if (!function_exists('enregistrerMouvementStock')) {
         }
 
         try {
+            // Vérifier le stock actuel dans la table `stock` (pas de réservation)
             $stmt = $pdo->prepare(
-                "SELECT quantite, quantite_reservee FROM stock_boutique WHERE produit_id = ? AND boutique_id = ? FOR UPDATE"
+                "SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE"
             );
             $stmt->execute([$produit_id, $boutique_id]);
             $ligne = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if ($ligne === false) {
+                // Si pas de ligne, on crée un stock à zéro
                 $pdo->prepare(
-                    "INSERT INTO stock_boutique (produit_id, boutique_id, quantite, quantite_reservee) VALUES (?, ?, 0, 0)"
+                    "INSERT INTO stock (produit_id, boutique_id, quantite) VALUES (?, ?, 0)"
                 )->execute([$produit_id, $boutique_id]);
                 $stock_avant = 0;
-                $reserve = 0;
             } else {
                 $stock_avant = (int) $ligne['quantite'];
-                $reserve = (int) ($ligne['quantite_reservee'] ?? 0);
             }
 
             $stock_apres = $stock_avant + ($sens * $quantite);
@@ -75,26 +92,21 @@ if (!function_exists('enregistrerMouvementStock')) {
                         "(disponible : $stock_avant, demandé : $quantite)."
                 );
             }
-            // Une sortie ne doit jamais entamer la part déjà réservée par des ventes en attente.
-            if ($sens < 0 && ($stock_avant - $reserve) < $quantite) {
-                throw new Exception(
-                    "Stock insuffisant (hors réservations) pour $produit_id dans la boutique $boutique_id " .
-                        "(disponible net : " . ($stock_avant - $reserve) . ", demandé : $quantite)."
-                );
-            }
 
+            // Générer un numéro de commande
             $jour = date('Ymd');
             $stmtCode = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE numero_commande LIKE ?");
             $stmtCode->execute(["MV-$jour-%"]);
             $numero_commande = sprintf('MV-%s-%03d', $jour, ((int) $stmtCode->fetchColumn()) + 1);
 
+            // Insérer la commande (mouvement) avec les colonnes existantes
             $pdo->prepare(
                 "INSERT INTO commande
                     (numero_commande, produit_id, boutique_id, statut_id,
-                     date_commande, heure_commande, prix_achat, quantite_commande, montant_commande,
-                     utilisateur_id, etat_commande, stock_avant, stock_apres, commentaire,
-                     date_validation, utilisateur_validation_id)
-                 VALUES (?, ?, ?, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, 'Valider', ?, ?, ?, NOW(), ?)"
+                     date_commande, heure_commande, prix_achat, prix_commande,
+                     quantite_commande, montant_commande,
+                     utilisateur_id, etat_commande)
+                 VALUES (?, ?, ?, ?, CURDATE(), CURTIME(), ?, 0, ?, ?, ?, 'VALIDEE')"
             )->execute([
                 $numero_commande,
                 $produit_id,
@@ -104,21 +116,27 @@ if (!function_exists('enregistrerMouvementStock')) {
                 $quantite,
                 $quantite * $prix_unitaire,
                 $utilisateur_id,
-                $stock_avant,
-                $stock_apres,
-                $commentaire ?? $reference_document,
-                $utilisateur_id,
             ]);
 
+            // Mettre à jour le stock dans la table `stock`
             $pdo->prepare(
-                "UPDATE stock_boutique SET quantite = ? WHERE produit_id = ? AND boutique_id = ?"
+                "UPDATE stock SET quantite = ? WHERE produit_id = ? AND boutique_id = ?"
             )->execute([$stock_apres, $produit_id, $boutique_id]);
 
+            // Mettre à jour le stock total dans `produit`
+            $delta = $sens * $quantite;
             $pdo->prepare(
-                "UPDATE produit SET stock_produit = (
-                    SELECT COALESCE(SUM(quantite), 0) FROM stock_boutique WHERE produit_id = ?
-                ) WHERE code_produit = ?"
-            )->execute([$produit_id, $produit_id]);
+                "UPDATE produit SET stock_produit = COALESCE(stock_produit, 0) + ? WHERE code_produit = ?"
+            )->execute([$delta, $produit_id]);
+
+            // Mettre à jour l'état du produit
+            $pdo->prepare(
+                "UPDATE produit SET etat_produit = CASE
+                    WHEN stock_produit <= 0 THEN 'RUPTURE'
+                    WHEN stock_produit <= COALESCE(stock_alerte, 0) THEN 'ALERTE'
+                    ELSE 'DISPONIBLE' END
+                WHERE code_produit = ?"
+            )->execute([$produit_id]);
 
             if (!$dejaEnTransaction) {
                 $pdo->commit();

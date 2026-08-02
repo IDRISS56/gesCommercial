@@ -1,910 +1,815 @@
 <?php
-// views/achats/achat_fournisseur.php – Création de bons de commande fournisseur + réception directe
-// Design dashboard identique à vente.php
+// achat_fournisseur.php – Enregistrement des achats / factures fournisseur
+// Même design (POS) et mêmes conventions que vente_comptoir.php, mais en sens
+// inverse : ENTRÉE de stock au lieu de sortie. Le règlement du fournisseur est
+// géré par une interface dédiée existante — cette page ne fait qu'enregistrer
+// l'achat et faire entrer le stock.
+while (ob_get_level()) ob_end_clean();
+ob_start();
 
-if (!isset($_SESSION['user_id'])) {
+$isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
+$isAjax = $isAjax || (isset($_POST['ajax']) && $_POST['ajax'] == '1');
+
+// if (session_status() === PHP_SESSION_NONE) { session_start(); }
+// if (!isset($_SESSION['user_id'])) {
+//     if ($isAjax) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['success'=>false,'message'=>'Session expirée']); exit; }
+//     header('Location: ../utilisateur/login'); exit;
+// }
+
+$host = 'localhost';
+$dbname = 'gescommercial';
+$dbuser = 'root';
+$dbpass = '';
+
+try {
+    $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8", $dbuser, $dbpass);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch (PDOException $e) {
+    die("Erreur de connexion : " . $e->getMessage());
+}
+
+// Récupération utilisateur et boutique
+$stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
+$stmt->execute([$_SESSION['user_id'] ?? '']);
+$userInfo = $stmt->fetch(PDO::FETCH_ASSOC);
+if (!$userInfo) {
+    if ($isAjax) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'message' => 'Utilisateur inactif ou session expirée']);
+        exit;
+    }
     header('Location: ../utilisateur/login');
     exit;
 }
 
-require 'databases/database.php';
+define('USER_ID', $_SESSION['user_id']);
+define('USER_BOUTIQUE', $userInfo['boutique_id'] ?? null);
 
-$stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
-$stmt->execute([$_SESSION['user_id']]);
-$user = $stmt->fetch(PDO::FETCH_ASSOC);
-if (!$user) {
-    session_destroy();
-    header('Location: ../utilisateur/login');
-    exit;
-}
-
-function e($str)
-{
-    return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
-}
-function fmt($n)
-{
-    return number_format(floatval($n), 0, ',', ' ');
-}
-
+// CSRF
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-// ---- LISTES ----
-$fournisseurs = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact WHERE type_contact = 'Fournisseur' AND etat_contact = 'Actif' ORDER BY nom_prenom_contact")->fetchAll(PDO::FETCH_ASSOC);
-$boutiques = $pdo->query("SELECT code_boutique, nom_boutique, adresse_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
-$produits = $pdo->query("SELECT code_produit, titre_produit, prix_fournisseur FROM produit WHERE etat_produit = 'Actif' ORDER BY titre_produit")->fetchAll(PDO::FETCH_ASSOC);
+// ==========================================
+// TRAITEMENT AJAX
+// ==========================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $action = $_POST['action'];
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        switch ($action) {
 
-// ---- FACTURES FOURNISSEUR EXISTANTES ----
-$facturesFournisseur = $pdo->query("
-    SELECT numero_facture, titre_facture, date_facture, montant_ttc, contact_id
-    FROM facture 
-    WHERE type_facture = 'Fournisseur' AND etat_facture != 'Annulée'
-    ORDER BY date_facture DESC
-")->fetchAll(PDO::FETCH_ASSOC);
-
-// ---- PRÉCHARGEMENT DES LOTS ----
-$lotsParProduit = [];
-$stmtLots = $pdo->query("SELECT produit_id, code_lot_produit, titre_lot, unites_par_lot FROM lot_produit WHERE etat_lot = 'Actif'");
-while ($lot = $stmtLots->fetch(PDO::FETCH_ASSOC)) {
-    $lotsParProduit[$lot['produit_id']][] = $lot;
-}
-
-// ---- PRIX FOURNISSEUR ----
-$prixFournisseur = [];
-foreach ($produits as $p) {
-    $prixFournisseur[$p['code_produit']] = $p['prix_fournisseur'] ?? 0;
-}
-
-// ---- TRAITEMENT DU FORMULAIRE DE CRÉATION DE BON ----
-$message = '';
-$messageType = '';
-$bonData = null;
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'valider_bon') {
-    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $csrf_token) {
-        $message = "Token de sécurité invalide.";
-        $messageType = 'error';
-    } else {
-        $fournisseurId = $_POST['fournisseur_id'] ?? '';
-        $dateBon = $_POST['date_bon'] ?? date('Y-m-d');
-        $boutiqueId = $_POST['boutique_id'] ?? '';
-        $dateLivraison = $_POST['date_livraison'] ?? null;
-        $factureId = $_POST['facture_id'] ?? ''; // peut être vide
-        $numBon = 'BC-' . date('Y') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
-
-        $produitsPost = $_POST['produit_id'] ?? [];
-        $lots = $_POST['lot_id'] ?? [];
-        $quantites = $_POST['quantite'] ?? [];
-        $prixUnitaires = $_POST['prix_unitaire'] ?? [];
-        $totalBon = 0;
-
-        if (empty($fournisseurId) || empty($boutiqueId) || empty($produitsPost)) {
-            $message = "Veuillez sélectionner un fournisseur, une boutique et au moins un produit.";
-            $messageType = 'error';
-        } elseif (empty($dateLivraison) || $dateLivraison < date('Y-m-d')) {
-            $message = "La date de livraison ne peut pas être antérieure à aujourd'hui.";
-            $messageType = 'error';
-        } else {
-            $errors = false;
-            $lignesValides = [];
-            foreach ($produitsPost as $index => $produitId) {
-                if (empty($produitId)) continue;
-                $quantite = intval($quantites[$index] ?? 0);
-                $prix = floatval($prixUnitaires[$index] ?? 0);
-                if ($quantite <= 0 || $prix < 0) {
-                    $errors = true;
-                    $message = "Vérifiez les quantités et prix unitaires (positifs).";
-                    $messageType = 'error';
-                    break;
+            // ===== FOURNISSEURS POUR LE SELECTPICKER =====
+            case 'get_fournisseurs':
+                $q = trim($_POST['q'] ?? '');
+                $sql = "SELECT code_contact, nom_prenom_contact, telephone_contact, adresse_contact, statut_contact
+                        FROM contact
+                        WHERE type_contact = 'Fournisseur' AND etat_contact = 'Actif'";
+                $params = [];
+                if ($q) {
+                    $sql .= " AND (nom_prenom_contact LIKE ? OR telephone_contact LIKE ? OR code_contact LIKE ?)";
+                    $params = ["%$q%", "%$q%", "%$q%"];
                 }
-                $lotId = $lots[$index] ?? null;
-                $facteur = 1;
-                $uniteAff = 'Unité';
-                if (!empty($lotId)) {
-                    $stmtLot = $pdo->prepare("SELECT unites_par_lot, titre_lot FROM lot_produit WHERE code_lot_produit = ? AND produit_id = ?");
-                    $stmtLot->execute([$lotId, $produitId]);
-                    $lotData = $stmtLot->fetch(PDO::FETCH_ASSOC);
-                    if ($lotData) {
-                        $facteur = intval($lotData['unites_par_lot'] ?: 1);
-                        $uniteAff = $lotData['titre_lot'];
-                    }
-                }
-                $quantiteBase = $quantite * $facteur;
-                $totalLigne = $quantiteBase * $prix;
-                $totalBon += $totalLigne;
-                $lignesValides[] = [
-                    'produit_id' => $produitId,
-                    'lot_id' => $lotId,
-                    'quantite_saisie' => $quantite,
-                    'facteur' => $facteur,
-                    'quantite_base' => $quantiteBase,
-                    'prix_unitaire' => $prix,
-                    'total_ligne' => $totalLigne,
-                    'unite_affichage' => $uniteAff
-                ];
-            }
+                $sql .= " ORDER BY nom_prenom_contact ASC LIMIT 500";
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($params);
+                echo json_encode(['success' => true, 'fournisseurs' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
+                exit;
 
-            if (!$errors && !empty($lignesValides)) {
+            // ===== CRÉER UN FOURNISSEUR =====
+            case 'create_fournisseur':
+                $token = $_POST['csrf_token'] ?? '';
+                if ($token !== $csrf_token) {
+                    echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
+                    exit;
+                }
+                $nom = trim($_POST['nom'] ?? '');
+                if (!$nom) {
+                    echo json_encode(['success' => false, 'message' => 'Nom requis']);
+                    exit;
+                }
+                $numFourn = 'CT-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
+                $stmt = $pdo->prepare("INSERT INTO contact (code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, adresse_contact, etat_contact)
+                                       VALUES (?, ?, ?, ?, 'Fournisseur', ?, ?, 'Actif')");
+                $stmt->execute([
+                    $numFourn, $nom, $_POST['tel'] ?? '', $_POST['email'] ?? '',
+                    $_POST['statut'] ?? 'Société', $_POST['adresse'] ?? ''
+                ]);
+                echo json_encode(['success' => true, 'code' => $numFourn, 'nom' => $nom]);
+                exit;
+
+            // ===== PRODUITS (tous, y compris en rupture — c'est ce qu'on réapprovisionne) =====
+            case 'get_products':
+                $q = trim($_POST['q'] ?? '');
+                $cat = $_POST['categorie'] ?? 'Tous';
+                $sql = "SELECT p.code_produit, p.titre_produit, p.prix_fournisseur, p.prix_produit,
+                               p.etat_produit, COALESCE(c.titre_categorie, 'Autre') as categorie,
+                               COALESCE(sb.quantite, CAST(p.stock_produit AS SIGNED)) as stock
+                        FROM produit p
+                        LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
+                        LEFT JOIN stock sb ON sb.produit_id = p.code_produit AND sb.boutique_id = ?
+                        WHERE 1=1";
+                $params = [USER_BOUTIQUE];
+                if ($cat !== 'Tous') {
+                    $sql .= " AND c.titre_categorie = ?";
+                    $params[] = $cat;
+                }
+                if ($q) {
+                    $sql .= " AND (p.titre_produit LIKE ? OR p.code_produit LIKE ?)";
+                    $params[] = "%$q%";
+                    $params[] = "%$q%";
+                }
+                $sql .= " ORDER BY p.titre_produit ASC LIMIT 80";
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($params);
+                echo json_encode(['success' => true, 'products' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
+                exit;
+
+            // ===== VALIDER L'ACHAT =====
+            case 'valider_achat':
+                $token = $_POST['csrf_token'] ?? '';
+                if ($token !== $csrf_token) {
+                    echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
+                    exit;
+                }
+
+                $panier = json_decode($_POST['panier'] ?? '[]', true) ?: [];
+                if (empty($panier)) throw new Exception('Le panier est vide.');
+
+                $fournisseur_id = $_POST['fournisseur_id'] ?? null;
+                if (empty($fournisseur_id)) throw new Exception('Veuillez sélectionner un fournisseur.');
+
+                $is_attente = filter_var($_POST['en_attente'] ?? false, FILTER_VALIDATE_BOOLEAN);
+                $maj_prix_fournisseur = filter_var($_POST['maj_prix_fournisseur'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+                $montantHT = 0;
+                foreach ($panier as $item) {
+                    $montantHT += floatval($item['montant'] ?? (floatval($item['prix_achat'] ?? 0) * intval($item['qte'] ?? 1)));
+                }
+                $montantTTC = round($montantHT, 2); // pas de TVA sur les achats fournisseur par défaut
+
+                if ($is_attente) {
+                    $etatFacture = 'Impayee';
+                    $statutFacture = 'En attente';
+                    $categorieDocument = 'Bon';
+                } else {
+                    $etatFacture = 'Impayee';
+                    $statutFacture = 'Validee';
+                    $categorieDocument = 'Facture';
+                }
+                // Le règlement du fournisseur est géré par votre interface dédiée :
+                // la facture est toujours créée Impayée, avance = 0, reste = montant total.
+                $avance = 0;
+                $reste = $montantTTC;
+
+                $titreDocument = 'Facture fournisseur';
+                $numDocument = 'FAC-FOUR-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT);
+
+                $pdo->beginTransaction();
                 try {
-                    $pdo->beginTransaction();
+                    // 1. FACTURE FOURNISSEUR
+                    $stmtDoc = $pdo->prepare("INSERT INTO facture(numero_facture, titre_facture, type_facture, categorie_facture, date_facture, montant_ht, taxe, remise, montant_ttc, avance, reste, contact_id, utilisateur_id, etat_facture, statut_facture)
+                                              VALUES (?, ?, 'Fournisseur', ?, CURDATE(), ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)");
+                    $stmtDoc->execute([$numDocument, $titreDocument . ' ' . $numDocument, $categorieDocument,
+                                        $montantHT, $montantTTC, $avance, $reste, $fournisseur_id, USER_ID,
+                                        $etatFacture, $statutFacture]);
 
-                    // Si aucune facture sélectionnée, on en crée une automatiquement
-                    if (empty($factureId)) {
-                        $numFacture = 'FAC-FOUR-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
-                        $taxe = 0;
-                        $montant_ht = $totalBon;
-                        $montant_ttc = $montant_ht * (1 + $taxe / 100);
-                        $stmtFact = $pdo->prepare("INSERT INTO facture 
-                            (numero_facture, titre_facture, type_facture, categorie_facture, 
-                             date_facture, montant_ht, taxe, remise, montant_ttc, avance, reste, 
-                             contact_id, utilisateur_id, etat_facture)
-                            VALUES (?, ?, 'Fournisseur', 'Achat', ?, ?, ?, 0, ?, ?, ?, ?, ?, 'En attente')");
-                        $stmtFact->execute([
-                            $numFacture,
-                            'Facture fournisseur ' . $numFacture,
-                            date('Y-m-d'),
-                            $montant_ht,
-                            $taxe,
-                            $montant_ttc,
-                            $montant_ttc,
-                            $montant_ttc,
-                            $fournisseurId,
-                            $user['id']
-                        ]);
-                        $factureId = $numFacture;
+                    // 2. LIGNES DE COMMANDE (statut_id 011 = Achat/ENTREE) + entrée en stock
+                    $numBase = date('dmYHis');
+                    foreach ($panier as $i => $ligne) {
+                        $code_prod = $ligne['code'] ?? '';
+                        $qte = max(1, intval($ligne['qte'] ?? 1));
+                        $prix_achat = floatval($ligne['prix_achat'] ?? 0);
+                        $montant = floatval($ligne['montant'] ?? ($prix_achat * $qte));
+                        if (!$code_prod) continue;
+
+                        $numCmd = 'BC-' . $numBase . str_pad($i, 2, '0', STR_PAD_LEFT);
+                        $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, montant_commande, utilisateur_id, boutique_id, etat_commande)
+                                      VALUES (?, ?, ?, ?, '011', CURDATE(), CURTIME(), ?, 0, ?, ?, ?, ?, ?)")
+                            ->execute([$numCmd, $code_prod, $fournisseur_id, $numDocument,
+                                       $prix_achat, $qte, $montant, USER_ID, USER_BOUTIQUE,
+                                       $is_attente ? 'EN ATTENTE' : 'VALIDEE']);
+
+                        // Entrée en stock (boutique)
+                        if (!empty(USER_BOUTIQUE)) {
+                            $pdo->prepare("INSERT INTO stock (produit_id, boutique_id, quantite, stock_alerte)
+                                          VALUES (?, ?, ?, 10)
+                                          ON DUPLICATE KEY UPDATE quantite = quantite + VALUES(quantite)")
+                                ->execute([$code_prod, USER_BOUTIQUE, $qte]);
+                        }
+
+                        // Entrée en stock (compteur global produit)
+                        $pdo->prepare("UPDATE produit SET stock_produit = CAST(CAST(COALESCE(stock_produit,0) AS SIGNED) + ? AS CHAR) WHERE code_produit = ?")
+                            ->execute([$qte, $code_prod]);
+
+                        // Mise à jour état produit (peut sortir de RUPTURE/ALERTE)
+                        $pdo->prepare("UPDATE produit SET etat_produit = CASE
+                                        WHEN CAST(stock_produit AS SIGNED) <= 0 THEN 'RUPTURE'
+                                        WHEN CAST(stock_produit AS SIGNED) <= COALESCE(stock_alerte,0) THEN 'ALERTE'
+                                        ELSE 'DISPONIBLE' END WHERE code_produit = ?")
+                            ->execute([$code_prod]);
+
+                        // Option : mettre à jour le prix d'achat de référence du produit
+                        if ($maj_prix_fournisseur) {
+                            $pdo->prepare("UPDATE produit SET prix_fournisseur = ? WHERE code_produit = ?")
+                                ->execute([$prix_achat, $code_prod]);
+                        }
                     }
 
-                    // Enregistrement des lignes de commande
-                    foreach ($lignesValides as $ligne) {
-                        $numCommandeUnique = $numBon . '-' . date('His') . rand(100, 999);
-                        $stmt = $pdo->prepare("INSERT INTO commande 
-                            (numero_commande, produit_id, contact_id, facture_id, statut_id, date_commande, heure_commande, 
-                             prix_achat, prix_commande, quantite_commande, montant_commande, utilisateur_id, 
-                             boutique_id, etat_commande, lot_produit_id, unite_affichage, facteur_conversion,
-                             reference_liee, date_livraison_recue)
-                            VALUES (?, ?, ?, ?, '011', ?, CURTIME(), ?, ?, ?, ?, ?, ?, 'En attente', ?, ?, ?, ?, ?)");
-                        $stmt->execute([
-                            $numCommandeUnique,
-                            $ligne['produit_id'],
-                            $fournisseurId,
-                            $factureId,
-                            $dateBon,
-                            $ligne['prix_unitaire'],
-                            0,
-                            $ligne['quantite_base'],
-                            $ligne['total_ligne'],
-                            $user['id'],
-                            $boutiqueId,
-                            $ligne['lot_id'],
-                            $ligne['unite_affichage'],
-                            $ligne['facteur'],
-                            $numBon,
-                            $dateLivraison
-                        ]);
+                    // 3. Mise à jour du solde fournisseur (montant qu'on lui doit).
+                    // Le règlement lui-même est pris en charge par votre interface dédiée.
+                    if ($reste > 0) {
+                        $pdo->prepare("UPDATE contact SET solde_contact = solde_contact + ? WHERE code_contact = ?")
+                            ->execute([$reste, $fournisseur_id]);
                     }
 
                     $pdo->commit();
-
-                    // Mise à jour du statut de la facture si elle vient d'être créée
-                    if (isset($numFacture)) {
-                        $pdo->prepare("UPDATE facture SET etat_facture = 'En attente' WHERE numero_facture = ?")
-                            ->execute([$numFacture]);
-                    }
-
-                    $message = "Bon de commande $numBon enregistré avec " . count($lignesValides) . " ligne(s). Facture liée : $factureId.";
-                    $messageType = 'success';
-                    $bonData = [
-                        'num' => $numBon,
-                        'date' => $dateBon,
-                        'fournisseur' => $fournisseurId,
-                        'boutique' => $boutiqueId,
-                        'date_livraison' => $dateLivraison,
-                        'facture' => $factureId,
-                        'lignes' => $lignesValides,
-                        'total' => $totalBon
-                    ];
+                    echo json_encode([
+                        'success' => true,
+                        'document' => $numDocument,
+                        'type_document' => $categorieDocument,
+                        'etat' => $etatFacture,
+                        'statut' => $statutFacture,
+                        'totaux' => ['ht' => $montantHT, 'ttc' => $montantTTC, 'reste' => $reste]
+                    ]);
                 } catch (Exception $e) {
                     $pdo->rollBack();
-                    $message = "Erreur : " . $e->getMessage();
-                    $messageType = 'error';
+                    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
                 }
-            }
+                exit;
+
+            default:
+                echo json_encode(['success' => false, 'message' => 'Action inconnue']);
+                exit;
         }
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        exit;
     }
 }
 
-// ---- TRAITEMENT RÉCEPTION / ANNULATION (sans modale, directement dans la page) ----
-$receptionMessage = '';
-$receptionMessageType = '';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action_reception'])) {
-    if (!isset($_POST['csrf_token']) || $_POST['csrf_token'] !== $csrf_token) {
-        $receptionMessage = "Token de sécurité invalide.";
-        $receptionMessageType = 'error';
-    } else {
-        $reference = $_POST['reference_liee'] ?? '';
-        $action = $_POST['action_reception'];
-
-        $stmtLignes = $pdo->prepare("SELECT * FROM commande WHERE reference_liee = ? AND statut_id = '011' AND etat_commande = 'En attente'");
-        $stmtLignes->execute([$reference]);
-        $lignes = $stmtLignes->fetchAll(PDO::FETCH_ASSOC);
-
-        if (empty($lignes)) {
-            $receptionMessage = "Ce bon n'a plus de ligne en attente.";
-            $receptionMessageType = 'error';
-        } elseif ($action === 'recevoir') {
-            try {
-                $pdo->beginTransaction();
-                $fournisseurId = null;
-                $factureId = null;
-                foreach ($lignes as $ligne) {
-                    if ($fournisseurId === null) $fournisseurId = $ligne['contact_id'];
-                    if ($factureId === null) $factureId = $ligne['facture_id'];
-                    $qte = (int) $ligne['quantite_commande'];
-                    $produitId = $ligne['produit_id'];
-                    $boutiqueId = $ligne['boutique_id'];
-
-                    $stmtLock = $pdo->prepare("SELECT quantite FROM stock_boutique WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
-                    $stmtLock->execute([$produitId, $boutiqueId]);
-                    $ligneStock = $stmtLock->fetch(PDO::FETCH_ASSOC);
-                    $stockAvant = $ligneStock ? (int) $ligneStock['quantite'] : 0;
-                    $stockApres = $stockAvant + $qte;
-
-                    if ($ligneStock === false) {
-                        $pdo->prepare("INSERT INTO stock_boutique (produit_id, boutique_id, quantite) VALUES (?, ?, 0)")
-                            ->execute([$produitId, $boutiqueId]);
-                    }
-
-                    $pdo->prepare("UPDATE stock_boutique SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
-                        ->execute([$stockApres, $produitId, $boutiqueId]);
-
-                    $pdo->prepare("UPDATE produit SET stock_produit = COALESCE(stock_produit,0) + ? WHERE code_produit = ?")
-                        ->execute([$qte, $produitId]);
-
-                    if (!empty($ligne['lot_produit_id'])) {
-                        $pdo->prepare("
-                            INSERT INTO stock_boutique (produit_id, boutique_id, lot_produit_id, quantite_lot)
-                            VALUES (?, ?, ?, ?)
-                            ON DUPLICATE KEY UPDATE
-                                lot_produit_id = VALUES(lot_produit_id),
-                                quantite_lot = quantite_lot + VALUES(quantite_lot)
-                        ")->execute([$produitId, $boutiqueId, $ligne['lot_produit_id'], $ligne['quantite_commande'] / max(1, (int)$ligne['facteur_conversion'])]);
-                    }
-
-                    $pdo->prepare("UPDATE commande SET etat_commande = 'Reçu', stock_avant = ?, stock_apres = ?,
-                            date_reception_reelle = CURDATE(), date_validation = NOW(), utilisateur_validation_id = ?
-                        WHERE numero_commande = ?")
-                        ->execute([$stockAvant, $stockApres, $user['id'], $ligne['numero_commande']]);
-                }
-
-                // Mettre à jour la facture
-                if ($factureId) {
-                    $pdo->prepare("UPDATE facture SET etat_facture = 'Validée' WHERE numero_facture = ?")
-                        ->execute([$factureId]);
-                }
-
-                $pdo->commit();
-                $receptionMessage = "Bon $reference réceptionné : stock mis à jour. Facture $factureId validée.";
-                $receptionMessageType = 'success';
-            } catch (Exception $ex) {
-                $pdo->rollBack();
-                $receptionMessage = "Erreur lors de la réception : " . $ex->getMessage();
-                $receptionMessageType = 'error';
-            }
-        } elseif ($action === 'annuler') {
-            // Récupérer la facture associée
-            $stmtFact = $pdo->prepare("SELECT facture_id FROM commande WHERE reference_liee = ? AND statut_id = '011' LIMIT 1");
-            $stmtFact->execute([$reference]);
-            $factureId = $stmtFact->fetchColumn();
-
-            $pdo->prepare("UPDATE commande SET etat_commande = 'Annulé', date_validation = NOW(), utilisateur_validation_id = ?
-                    WHERE reference_liee = ? AND statut_id = '011' AND etat_commande = 'En attente'")
-                ->execute([$user['id'], $reference]);
-
-            if ($factureId) {
-                $pdo->prepare("UPDATE facture SET etat_facture = 'Annulée' WHERE numero_facture = ?")
-                    ->execute([$factureId]);
-            }
-
-            $receptionMessage = "Bon $reference annulé. Facture $factureId annulée.";
-            $receptionMessageType = 'success';
-        }
-    }
-}
-
-// ---- RÉCUPÉRATION DES BONS EN ATTENTE (affichage direct) ----
-$bonsEnAttente = $pdo->query("
-    SELECT c.reference_liee, c.contact_id, c.boutique_id, c.date_commande, c.date_livraison_recue, c.facture_id,
-           ct.nom_prenom_contact, b.nom_boutique,
-           COUNT(*) as nb_lignes, SUM(c.montant_commande) as montant_total
-    FROM commande c
-    LEFT JOIN contact ct ON c.contact_id = ct.code_contact
-    LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
-    WHERE c.statut_id = '011' AND c.etat_commande = 'En attente'
-    GROUP BY c.reference_liee, c.contact_id, c.boutique_id, c.date_commande, c.date_livraison_recue, c.facture_id, ct.nom_prenom_contact, b.nom_boutique
-    ORDER BY c.date_commande DESC
-")->fetchAll(PDO::FETCH_ASSOC);
+// - RÉCUPÉRATION DES DONNÉES POUR LA PAGE -
+$categories = $pdo->query("SELECT DISTINCT c.titre_categorie
+                           FROM produit p
+                           JOIN categorie c ON p.categorie_id = c.code_categorie
+                           WHERE c.titre_categorie IS NOT NULL AND c.titre_categorie <> ''
+                           ORDER BY c.titre_categorie ASC")->fetchAll(PDO::FETCH_COLUMN);
 ?>
 <!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Achat fournisseur</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <title>Achat / Facture Fournisseur</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css">
     <style>
-        /* ===== STYLE DASHBOARD (identique à vente.php) ===== */
         :root {
-            --b: #2563eb;
-            --bd: #1d4ed8;
-            --bl: #eff6ff;
-            --bb: #bfdbfe;
-            --bg: #f1f5f9;
-            --w: #fff;
-            --dk: #0f172a;
-            --mt: #64748b;
-            --lt: #94a3b8;
-            --brd: #e2e8f0;
-            --dng: #ef4444;
-            --dngl: #fef2f2;
-            --dngb: #fecaca;
-            --suc: #10b981;
-            --sucl: #ecfdf5;
-            --sucb: #a7f3d0;
-            --wrn: #f59e0b;
-            --wrnl: #fffbeb;
-            --wrnb: #fde68a;
-            --prp: #8b5cf6;
-            --prpl: #f5f3ff;
-            --prpb: #e9d5ff;
-            --tl: #0891b2;
-            --tll: #ecfeff;
-            --tlb: #cffafe;
-            --R: 16px;
-            --Rs: 10px;
+            --color-primary: #4f46e5;
+            --color-primary-dark: #3730a3;
+            --color-primary-soft: #eef2ff;
+            --color-success: #10b981;
+            --color-success-soft: #d1fae5;
+            --color-warning: #f59e0b;
+            --color-warning-soft: #fef3c7;
+            --color-danger: #ef4444;
+            --color-danger-soft: #fee2e2;
+            --color-gray-50: #f8fafc;
+            --color-gray-100: #f1f5f9;
+            --color-gray-200: #e2e8f0;
+            --color-gray-500: #64748b;
+            --color-gray-800: #1e293b;
+            --bg-body: #f1f5f9;
+            --bg-surface: #ffffff;
+            --border-color: #e2e8f0;
+            --radius-sm: 10px;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Inter', -apple-system, sans-serif;
-            background: var(--bg);
-            color: var(--dk);
-            min-height: 100vh;
-            line-height: 1.5;
-            padding: 28px 20px;
+        body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg-body); color: var(--color-gray-800); min-height: 100vh; }
+        .pos-container { display: flex; height: 100vh; overflow: hidden; }
+        .pos-left { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .pos-right { width: 420px; background: var(--bg-surface); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; }
+        .pos-header { background: var(--bg-surface); border-bottom: 1px solid var(--border-color); padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; }
+        .pos-header h2 { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+        .search-box { padding: 12px 16px; border-bottom: 1px solid var(--border-color); }
+        .search-box input { width: 100%; padding: 10px 14px; border: 1.5px solid var(--border-color); border-radius: 8px; font-size: 14px; }
+        .search-box input:focus { outline: none; border-color: var(--color-primary); }
+        .category-bar { display: flex; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--border-color); overflow-x: auto; background: var(--bg-surface); }
+        .cat-btn { padding: 6px 14px; border: 1px solid var(--border-color); background: var(--bg-surface); border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .2s; }
+        .cat-btn.active { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+        .cat-btn:hover:not(.active) { background: var(--color-gray-100); }
+        .products-scroll { flex: 1; overflow-y: auto; padding: 16px; }
+        .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+        .product-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 10px; padding: 12px; cursor: pointer; transition: all .2s; position: relative; }
+        .product-card:hover { border-color: var(--color-primary); box-shadow: 0 4px 12px rgba(79,70,229,.12); transform: translateY(-2px); }
+        .product-card.in-cart { border-color: var(--color-success); background: #f0fdf4; }
+        .product-card .pc-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; line-height: 1.3; }
+        .product-card .pc-code { font-size: 10px; color: var(--color-gray-500); margin-bottom: 6px; }
+        .product-card .pc-price { font-size: 14px; font-weight: 800; color: var(--color-primary); }
+        .product-card .pc-stock { font-size: 10px; margin-top: 4px; }
+        .stock-in { color: var(--color-success); }
+        .stock-low { color: var(--color-warning); }
+        .stock-out { color: var(--color-danger); }
+        .cart-header { padding: 14px 16px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; }
+        .cart-header h2 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+        .cart-badge { background: var(--color-primary); color: #fff; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+        .client-select-zone { padding: 12px 16px; border-bottom: 1px solid var(--border-color); }
+        .client-display { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--color-primary-soft); border-radius: 8px; margin-bottom: 8px; }
+        .client-display .cl-name { font-weight: 600; font-size: 13px; }
+        .client-display .cl-code { font-size: 10px; color: var(--color-gray-500); }
+        .btn-change { background: none; border: none; color: var(--color-primary); font-size: 11px; font-weight: 600; cursor: pointer; }
+        .cart-items { flex: 1; overflow-y: auto; padding: 12px 16px; }
+        .cart-line { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--color-gray-100); }
+        .cart-line .cl-info { flex: 1; min-width: 0; }
+        .cart-line .cl-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .cart-line .cl-price { font-size: 11px; color: var(--color-gray-500); }
+        .cart-line .cl-price input { width: 80px; padding: 2px 6px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 11px; text-align: right; }
+        .cart-line .cl-price input:focus { outline: none; border-color: var(--color-primary); }
+        .cart-line .cl-qty { display: flex; align-items: center; gap: 4px; }
+        .cart-line .cl-qty button { width: 24px; height: 24px; border: 1px solid var(--border-color); background: var(--bg-surface); border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .cart-line .cl-qty button:hover { background: var(--color-gray-100); }
+        .cart-line .cl-qty span { min-width: 24px; text-align: center; font-weight: 600; font-size: 13px; }
+        .cart-line .cl-qty-input { width: 40px; height: 24px; text-align: center; font-weight: 600; font-size: 13px; border: 1px solid var(--border-color); border-radius: 4px; -moz-appearance: textfield; }
+        .cart-line .cl-qty-input::-webkit-outer-spin-button, .cart-line .cl-qty-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .cart-line .cl-montant { font-size: 13px; font-weight: 700; min-width: 70px; text-align: right; }
+        .cart-line .cl-remove { background: none; border: none; color: var(--color-danger); cursor: pointer; font-size: 14px; }
+        .cart-empty { text-align: center; padding: 40px 20px; color: var(--color-gray-500); }
+        .cart-empty i { font-size: 48px; opacity: .3; }
+        .cart-footer { padding: 16px; border-top: 1px solid var(--border-color); background: var(--bg-surface); }
+        .totals-row { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px; }
+        .totals-row .t-label { color: var(--color-gray-500); }
+        .totals-row .t-value { font-weight: 600; }
+        .total-grand { display: flex; justify-content: space-between; padding: 10px 0; border-top: 2px solid var(--color-gray-200); margin-top: 8px; font-size: 16px; font-weight: 800; }
+        .total-grand .t-value { color: var(--color-primary); }
+        .actions-row { display: flex; gap: 8px; margin-top: 12px; }
+        .btn-clear { flex: 1; padding: 10px; border: 1px solid var(--border-color); background: var(--bg-surface); border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; }
+        .btn-clear:hover { background: var(--color-gray-100); }
+        .btn-attente { flex: 1; padding: 10px; border: none; background: var(--color-warning); color: #fff; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; }
+        .btn-attente:hover { background: #d97706; }
+        .btn-attente:disabled { opacity: .5; cursor: not-allowed; }
+        .btn-pay { flex: 2; padding: 10px; border: none; background: var(--color-primary); color: #fff; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; }
+        .btn-pay:hover { background: var(--color-primary-dark); }
+        .btn-pay:disabled { opacity: .5; cursor: not-allowed; }
+        .checkbox-row { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 10px; color: var(--color-gray-500); }
+        /* Modal */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.5); z-index: 1000; align-items: center; justify-content: center; }
+        .modal-overlay.show { display: flex; }
+        .modal-box { background: var(--bg-surface); border-radius: 16px; width: 480px; max-width: 90%; max-height: 90vh; overflow-y: auto; }
+        .modal-head { padding: 18px 24px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; }
+        .modal-head h3 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+        .modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--color-gray-500); }
+        .modal-body { padding: 24px; }
+        .modal-foot { padding: 16px 24px; border-top: 1px solid var(--border-color); display: flex; gap: 10px; justify-content: flex-end; }
+        .form-group { margin-bottom: 14px; }
+        .form-group label { display: block; font-size: 12px; font-weight: 600; color: var(--color-gray-500); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+        .form-group input, .form-group select { width: 100%; padding: 10px 12px; border: 1.5px solid var(--border-color); border-radius: 8px; font-size: 14px; }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--color-primary); }
+        /* Toast */
+        .toast-msg { position: fixed; top: 20px; right: 20px; background: var(--color-success); color: #fff; padding: 12px 20px; border-radius: 10px; font-weight: 600; z-index: 2000; display: none; box-shadow: 0 4px 12px rgba(0,0,0,.15); }
+        .toast-msg.error { background: var(--color-danger); }
+        .toast-msg.show { display: block; animation: slideIn .3s ease; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        /* Bootstrap select custom */
+        .bootstrap-select .dropdown-toggle { background: #fff !important; border: 1.5px solid var(--border-color) !important; border-radius: 8px !important; }
+        .bootstrap-select .dropdown-toggle:focus { border-color: var(--color-primary) !important; box-shadow: 0 0 0 3px var(--color-primary-soft) !important; }
+        @media (max-width: 900px) {
+            .pos-container { flex-direction: column; height: auto; }
+            .pos-right { width: 100%; border-left: none; border-top: 1px solid var(--border-color); }
         }
-        ::-webkit-scrollbar { width: 5px; }
-        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-
-        .W { max-width: 1400px; margin: 0 auto; }
-        .hdr {
-            display: flex;
-            align-items: flex-end;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        .hdr-l h1 { font-size: 26px; font-weight: 800; color: var(--dk); letter-spacing: -0.02em; }
-        .hdr-l p { font-size: 13px; color: var(--mt); margin-top: 2px; font-weight: 500; }
-        .hdr-r {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        .hdr-badge {
-            background: var(--bl);
-            border: 1px solid var(--bb);
-            color: var(--b);
-            padding: 8px 14px;
-            border-radius: var(--Rs);
-            font-size: 12px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .btn-go {
-            background: var(--b);
-            color: #fff;
-            padding: 7px 16px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            box-shadow: 0 2px 4px rgba(37,99,235,.2);
-            transition: background .15s;
-            border: none;
-            cursor: pointer;
-        }
-        .btn-go:hover { background: var(--bd); }
-        .btn-go-outline {
-            background: transparent;
-            color: var(--mt);
-            border: 1.5px solid var(--brd);
-            padding: 7px 14px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 600;
-            transition: all .2s;
-            cursor: pointer;
-        }
-        .btn-go-outline:hover {
-            background: var(--bg);
-            border-color: var(--lt);
-        }
-
-        .data-table-wrap {
-            background: var(--w);
-            border: 1px solid var(--brd);
-            border-radius: var(--R);
-            overflow: hidden;
-            box-shadow: 0 1px 3px rgba(0,0,0,.04);
-        }
-        .table>:not(caption)>*>* { padding: 12px 18px; }
-        .table thead th {
-            font-size: 0.7rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-            color: var(--lt);
-            background: var(--bg);
-            border-bottom: 1px solid var(--brd);
-        }
-        .table tbody tr {
-            border-bottom: 1px solid var(--brd);
-            transition: background .2s;
-        }
-        .table tbody tr:hover { background: var(--bl); }
-        .table tbody td {
-            vertical-align: middle;
-            color: var(--dk);
-            font-size: 0.85rem;
-        }
-        .td-bold { color: var(--dk) !important; font-weight: 700; }
-        .td-semi { color: var(--dk) !important; font-weight: 500; }
-
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 14px;
-            border-radius: 999px;
-            font-size: 0.73rem;
-            font-weight: 700;
-            text-transform: capitalize;
-        }
-        .status-badge .sdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-        .status-badge.on { background: var(--sucl); color: #059669; }
-        .status-badge.off { background: var(--dngl); color: #dc2626; }
-
-        .act-btn {
-            width: 34px;
-            height: 34px;
-            border-radius: 6px;
-            border: 1px solid transparent;
-            background: transparent;
-            color: var(--lt);
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            transition: all .2s;
-        }
-        .act-btn:hover { transform: scale(1.1); }
-        .act-btn.v:hover { color: var(--b); background: var(--bl); border-color: rgba(37,99,235,.15); }
-        .act-btn.e:hover { color: var(--wrn); background: var(--wrnl); border-color: rgba(245,158,11,.15); }
-        .act-btn.d:hover { color: var(--dng); background: var(--dngl); border-color: rgba(239,68,68,.15); }
-
-        .pagination .page-link {
-            color: var(--b);
-            border: 1px solid var(--brd);
-            border-radius: 6px;
-            margin: 0 2px;
-            padding: 6px 14px;
-            font-weight: 500;
-        }
-        .pagination .page-link:hover { background: var(--bl); border-color: var(--b); }
-        .pagination .page-item.active .page-link { background: var(--b); border-color: var(--b); color: #fff; }
-        .pagination .page-item.disabled .page-link { color: var(--lt); border-color: var(--brd); }
-
-        .modal-content {
-            border-radius: var(--R);
-            border: none;
-            box-shadow: 0 12px 40px rgba(15,23,42,.08);
-        }
-        .modal-header { border-bottom: 1px solid var(--brd); background: var(--bg); }
-        .modal-footer { border-top: 1px solid var(--brd); background: var(--bg); }
-
-        @keyframes fadeUp {
-            from { opacity: 0; transform: translateY(12px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .data-table-wrap { animation: fadeUp .4s ease both; }
-
-        @media (max-width:700px) {
-            body { padding: 14px; }
-            .hdr { flex-direction: column; align-items: flex-start; }
-            .prow { flex-direction: column; align-items: stretch; }
-            .prow .btn-go { width: 100%; justify-content: center; }
-        }
-        .bootstrap-select .dropdown-toggle .filter-option { color: var(--dk); }
-        .bootstrap-select .dropdown-menu { border-radius: var(--Rs); border-color: var(--brd); }
-        .bootstrap-select .dropdown-menu .bs-searchbox input {
-            border-radius: 6px; border: 1px solid var(--brd); padding: 8px 12px;
-        }
-        .bootstrap-select .dropdown-menu .bs-searchbox input:focus {
-            border-color: var(--b); box-shadow: 0 0 0 3px var(--bl);
-        }
-
-        .btn-sm {
-            padding: 4px 10px;
-            font-size: 12px;
-            border-radius: 6px;
-            border: none;
-            cursor: pointer;
-        }
-        .btn-success { background: var(--suc); color: white; }
-        .btn-success:hover { background: #059669; }
-        .btn-outline-danger {
-            background: transparent;
-            color: var(--dng);
-            border: 1px solid var(--dng);
-        }
-        .btn-outline-danger:hover { background: var(--dngl); }
     </style>
 </head>
 <body>
-<div class="W">
-    <!-- En-tête -->
-    <div class="hdr">
-        <div class="hdr-l">
-            <h1>Achat fournisseur</h1>
-            <p>Création de bons de commande et réception des marchandises</p>
+<div class="pos-container">
+    <!-- GAUCHE : PRODUITS -->
+    <div class="pos-left">
+        <div class="pos-header">
+            <h2><i class="bi bi-box-arrow-in-down"></i> Achat Fournisseur</h2>
+            <div class="d-flex align-items-center gap-3">
+                <span class="text-muted small"><i class="bi bi-person"></i> <?= htmlspecialchars($userInfo['nom_prenom'] ?? '') ?></span>
+            </div>
         </div>
-        <div class="hdr-r">
-            <div class="hdr-badge"><i class="bi bi-file-earmark-plus"></i> Nouveau bon</div>
-            <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouveau bon</button>
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="Rechercher un produit (code, titre)...">
         </div>
-    </div>
-
-    <!-- Messages -->
-    <?php if ($message): ?>
-        <div class="alert alert-<?= $messageType === 'error' ? 'danger' : 'success' ?> alert-dismissible fade show" role="alert">
-            <?= e($message) ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        <div class="category-bar" id="categoryBar">
+            <button class="cat-btn active" data-cat="Tous" onclick="filterCategory('Tous', this)">Tous</button>
+            <?php foreach ($categories as $cat): ?>
+                <button class="cat-btn" data-cat="<?= htmlspecialchars($cat) ?>" onclick="filterCategory('<?= htmlspecialchars($cat) ?>', this)"><?= htmlspecialchars($cat) ?></button>
+            <?php endforeach; ?>
         </div>
-    <?php endif; ?>
-    <?php if ($receptionMessage): ?>
-        <div class="alert alert-<?= $receptionMessageType === 'success' ? 'success' : 'danger' ?> alert-dismissible fade show" role="alert">
-            <?= e($receptionMessage) ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
-    <?php endif; ?>
-
-    <!-- ===== LISTE DES BONS EN ATTENTE ===== -->
-    <div class="data-table-wrap mb-4">
-        <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
-            <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;"><i class="bi bi-clock-history me-2"></i> Bons en attente de réception</h5>
-            <span class="text-muted small"><?= count($bonsEnAttente) ?> bon(s) en attente</span>
-        </div>
-        <div class="table-responsive">
-            <table class="table table-hover align-middle mb-0">
-                <thead>
-                    <tr>
-                        <th>Référence</th>
-                        <th>Fournisseur</th>
-                        <th>Boutique</th>
-                        <th>Date commande</th>
-                        <th>Livraison prévue</th>
-                        <th>Facture</th>
-                        <th>Lignes</th>
-                        <th>Montant</th>
-                        <th class="text-end">Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if (empty($bonsEnAttente)): ?>
-                        <tr>
-                            <td colspan="9" class="text-center text-muted py-4">
-                                <i class="bi bi-check-circle fs-1 d-block mb-2 opacity-50"></i>
-                                Aucun bon en attente de réception.
-                            </td>
-                        </tr>
-                    <?php else: foreach ($bonsEnAttente as $bon): ?>
-                        <tr>
-                            <td class="td-bold"><?= e($bon['reference_liee']) ?></td>
-                            <td><?= e($bon['nom_prenom_contact']) ?></td>
-                            <td><?= e($bon['nom_boutique']) ?></td>
-                            <td><?= e($bon['date_commande']) ?></td>
-                            <td><?= e($bon['date_livraison_recue']) ?></td>
-                            <td><?= e($bon['facture_id']) ?></td>
-                            <td><?= (int)$bon['nb_lignes'] ?></td>
-                            <td><strong><?= fmt($bon['montant_total']) ?> F</strong></td>
-                            <td class="text-end" style="white-space:nowrap;">
-                                <form method="post" class="d-inline" onsubmit="return confirm('Confirmer la réception de ce bon ? Le stock sera mis à jour.');">
-                                    <input type="hidden" name="csrf_token" value="<?= e($csrf_token) ?>">
-                                    <input type="hidden" name="reference_liee" value="<?= e($bon['reference_liee']) ?>">
-                                    <input type="hidden" name="action_reception" value="recevoir">
-                                    <button class="btn-sm btn-success"><i class="bi-check2"></i> Reçu</button>
-                                </form>
-                                <form method="post" class="d-inline" onsubmit="return confirm('Annuler ce bon ? Aucun stock n\'a été impacté.');">
-                                    <input type="hidden" name="csrf_token" value="<?= e($csrf_token) ?>">
-                                    <input type="hidden" name="reference_liee" value="<?= e($bon['reference_liee']) ?>">
-                                    <input type="hidden" name="action_reception" value="annuler">
-                                    <button class="btn-sm btn-outline-danger"><i class="bi-x-lg"></i> Annuler</button>
-                                </form>
-                            </td>
-                        </tr>
-                    <?php endforeach; endif; ?>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- ===== MODAL NOUVEAU BON ===== -->
-    <div class="modal fade" id="bonModal" tabindex="-1" aria-labelledby="bonModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-xl modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title fw-bold" id="bonModalLabel"><i class="bi bi-file-earmark-text text-primary me-2"></i> Nouveau bon de commande fournisseur</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        <div class="products-scroll">
+            <div class="product-grid" id="productGrid">
+                <div class="empty-state" style="text-align:center;padding:40px;color:var(--color-gray-500);">
+                    <i class="bi bi-arrow-repeat" style="font-size:48px;opacity:.3;"></i>
+                    <h3>Chargement...</h3>
                 </div>
-                <form method="POST" id="bonForm">
-                    <input type="hidden" name="action" value="valider_bon">
-                    <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
-                    <div class="modal-body">
-                        <div class="row g-3">
-                            <div class="col-md-4">
-                                <label class="form-label fw-semibold">Fournisseur <span class="text-danger">*</span></label>
-                                <select name="fournisseur_id" class="form-select" required>
-                                    <option value="">-- Sélectionner --</option>
-                                    <?php foreach ($fournisseurs as $f): ?>
-                                        <option value="<?= e($f['code_contact']) ?>"><?= e($f['nom_prenom_contact']) ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label fw-semibold">Boutique destinataire <span class="text-danger">*</span></label>
-                                <select name="boutique_id" id="boutiqueSelect" class="form-select" required>
-                                    <option value="">-- Sélectionner --</option>
-                                    <?php foreach ($boutiques as $b): ?>
-                                        <option value="<?= e($b['code_boutique']) ?>" data-adresse="<?= e($b['adresse_boutique']) ?>"><?= e($b['nom_boutique']) ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label fw-semibold">Date du bon</label>
-                                <input type="date" name="date_bon" class="form-control" value="<?= date('Y-m-d') ?>" required>
-                            </div>
-                            <div class="col-md-2">
-                                <label class="form-label fw-semibold">N° (auto)</label>
-                                <input type="text" class="form-control" value="BC-<?= date('Y') ?>-XXXX" disabled>
-                            </div>
-                        </div>
-                        <div class="row g-3 mt-2">
-                            <div class="col-md-6">
-                                <label class="form-label fw-semibold">Lieu de livraison (adresse boutique)</label>
-                                <input type="text" name="lieu_livraison" id="lieuLivraison" class="form-control" readonly>
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label fw-semibold">Date de livraison souhaitée</label>
-                                <input type="date" name="date_livraison" class="form-control" min="<?= date('Y-m-d') ?>" required>
-                            </div>
-                        </div>
-                        <div class="row g-3 mt-2">
-                            <div class="col-md-12">
-                                <label class="form-label fw-semibold">Facture associée (optionnel)</label>
-                                <select name="facture_id" class="form-select">
-                                    <option value="">-- Aucune (création automatique) --</option>
-                                    <?php foreach ($facturesFournisseur as $f): ?>
-                                        <option value="<?= e($f['numero_facture']) ?>">
-                                            <?= e($f['numero_facture']) ?> - <?= e($f['titre_facture']) ?> (<?= e($f['date_facture']) ?>) - <?= fmt($f['montant_ttc']) ?> F
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <div class="form-text small">Si vous sélectionnez une facture, elle sera liée à ce bon.</div>
-                            </div>
-                        </div>
-
-                        <hr>
-
-                        <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-box me-1"></i> Lignes de commande</h6>
-                        <div id="lignesContainer">
-                            <div class="ligne-produit" data-index="0">
-                                <div class="row g-2">
-                                    <div class="col-md-3">
-                                        <label class="form-label fw-semibold">Produit <span class="text-danger">*</span></label>
-                                        <select name="produit_id[]" class="form-select select-produit" required>
-                                            <option value="">-- Choisir --</option>
-                                            <?php foreach ($produits as $p): ?>
-                                                <option value="<?= e($p['code_produit']) ?>" data-prix="<?= $p['prix_fournisseur'] ?>"><?= e($p['titre_produit']) ?></option>
-                                            <?php endforeach; ?>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label fw-semibold">Lot/unité</label>
-                                        <select name="lot_id[]" class="form-select select-lot">
-                                            <option value="">Unité</option>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label fw-semibold">Unité affichée</label>
-                                        <input type="text" name="unite_affichage[]" class="form-control unite-affichage" readonly placeholder="Auto">
-                                    </div>
-                                    <div class="col-md-1">
-                                        <label class="form-label fw-semibold">Qté (lots)</label>
-                                        <input type="number" name="quantite[]" class="form-control quantite" min="1" value="1" required oninput="calculerLigne(this)">
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label fw-semibold">Prix unitaire (base) <span class="text-danger">*</span></label>
-                                        <input type="number" step="0.01" name="prix_unitaire[]" class="form-control prix-unitaire" min="0" required oninput="calculerLigne(this)">
-                                    </div>
-                                    <div class="col-md-2">
-                                        <label class="form-label fw-semibold">Total ligne</label>
-                                        <input type="text" name="total_ligne[]" class="form-control total-ligne" readonly value="0">
-                                    </div>
-                                    <div class="col-md-auto d-flex align-items-end">
-                                        <button type="button" class="btn btn-danger btn-sm supprimer-ligne" onclick="supprimerLigne(this)" style="display:none;"><i class="bi bi-trash3"></i></button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <button type="button" class="btn btn-secondary btn-ajouter" onclick="ajouterLigne()"><i class="bi bi-plus"></i> Ajouter une ligne</button>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
-                        <button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Valider le bon</button>
-                    </div>
-                </form>
             </div>
         </div>
     </div>
 
-    <!-- Formulaires cachés pour actions -->
-    <form method="post" id="actionForm" style="display:none;">
-        <input type="hidden" name="action" id="actionField">
-        <input type="hidden" name="edit_numero" id="editNumeroField">
-        <input type="hidden" name="view_numero" id="viewNumeroField">
-        <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
-    </form>
+    <!-- DROITE : LIGNES D'ACHAT -->
+    <div class="pos-right">
+        <div class="cart-header">
+            <h2><i class="bi bi-receipt"></i> Achat <span class="cart-badge" id="cartCount">0</span></h2>
+        </div>
+        <div class="client-select-zone">
+            <div id="fournisseurDisplay" style="display:none;">
+                <div class="client-display">
+                    <div>
+                        <div class="cl-name" id="fournisseurName"></div>
+                        <div class="cl-code" id="fournisseurCode"></div>
+                    </div>
+                    <button class="btn-change" onclick="resetFournisseur()">Changer</button>
+                </div>
+            </div>
+            <div id="fournisseurSelectWrapper">
+                <label class="form-label" style="font-size:11px;font-weight:600;color:var(--color-gray-500);text-transform:uppercase;">Fournisseur</label>
+                <select id="fournisseurSelect" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un fournisseur...">
+                    <option value="">-- Sélectionner un fournisseur --</option>
+                </select>
+                <button class="btn btn-sm btn-outline-primary mt-2 w-100" onclick="openModal('fournisseurModal')">
+                    <i class="bi bi-plus"></i> Nouveau fournisseur
+                </button>
+            </div>
+        </div>
+        <div class="cart-items" id="cartItems">
+            <div class="cart-empty"><i class="bi bi-cart-x"></i><p>Aucun produit ajouté</p></div>
+        </div>
+        <div class="cart-footer">
+            <div class="total-grand">
+                <span>TOTAL ACHAT</span>
+                <span class="t-value" id="totalTTC">0 FCFA</span>
+            </div>
+            <div class="checkbox-row">
+                <input type="checkbox" id="majPrixFournisseur">
+                <label for="majPrixFournisseur">Mettre à jour le prix d'achat de référence des produits</label>
+            </div>
+            <div class="actions-row">
+                <button class="btn-clear" id="btnClear"><i class="bi bi-trash3"></i> Vider</button>
+                <button class="btn-attente" id="btnAttente" disabled><i class="bi bi-clock"></i> En attente</button>
+                <button class="btn-pay" id="btnValider" disabled><i class="bi bi-check-circle"></i> Valider l'achat</button>
+            </div>
+            <p style="font-size:11px; color:var(--color-gray-500); margin-top:8px;">Le règlement du fournisseur se fait ensuite depuis votre interface de règlement fournisseur.</p>
+        </div>
+    </div>
 </div>
 
+<!-- Modal Nouveau Fournisseur -->
+<div class="modal-overlay" id="fournisseurModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <h3><i class="bi bi-person-plus"></i> Nouveau fournisseur</h3>
+            <button class="modal-close" onclick="closeModal('fournisseurModal')"><i class="bi bi-x"></i></button>
+        </div>
+        <div class="modal-body">
+            <form id="fournisseurForm">
+                <div class="form-group">
+                    <label>Nom / Raison sociale *</label>
+                    <input type="text" id="fournisseurNom" required>
+                </div>
+                <div class="form-group">
+                    <label>Téléphone</label>
+                    <input type="text" id="fournisseurTel">
+                </div>
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="fournisseurEmail">
+                </div>
+                <div class="form-group">
+                    <label>Adresse</label>
+                    <input type="text" id="fournisseurAdresse">
+                </div>
+                <div class="form-group">
+                    <label>Type</label>
+                    <select id="fournisseurStatut">
+                        <option value="Société">Société</option>
+                        <option value="Particulier">Particulier</option>
+                    </select>
+                </div>
+            </form>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-secondary" onclick="closeModal('fournisseurModal')">Annuler</button>
+            <button class="btn btn-primary" onclick="createFournisseur()"><i class="bi bi-check-lg"></i> Créer</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="toast-msg" id="toastMsg"></div>
+
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
-
 <script>
-$(document).ready(function() {
-    $('.selectpicker').selectpicker('destroy');
-    $('.selectpicker').selectpicker();
+const BASE_URL = window.location.pathname;
+const CSRF_TOKEN = '<?= $csrf_token ?>';
+let cart = [];
+let selectedFournisseur = null;
+let currentProducts = [];
+let currentCategory = 'Tous';
+let searchTimer = null;
 
-    // ---- Données injectées par PHP ----
-    const lotsParProduit = <?= json_encode($lotsParProduit) ?>;
-    const prixFournisseur = <?= json_encode($prixFournisseur) ?>;
+const gid = id => document.getElementById(id);
+const fmt = n => new Intl.NumberFormat('fr-FR').format(Math.round(n || 0)) + ' FCFA';
+const esc = s => (s || '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-    // ---- Mise à jour des lots, prix unitaire, unité affichée ----
-    function mettreAJourLotsEtPrix(selectProduit) {
-        const ligne = selectProduit.closest('.ligne-produit');
-        const lotSelect = ligne.querySelector('.select-lot');
-        const uniteAff = ligne.querySelector('.unite-affichage');
-        const prixInput = ligne.querySelector('.prix-unitaire');
-        const produitId = selectProduit.value;
+function toast(msg, type = 'success') {
+    const t = gid('toastMsg');
+    t.textContent = msg;
+    t.className = 'toast-msg show' + (type === 'error' ? ' error' : '');
+    setTimeout(() => t.classList.remove('show'), 2500);
+}
 
-        const lots = lotsParProduit[produitId] || [];
-        let options = '<option value="">Unité</option>';
-        lots.forEach(lot => {
-            options += `<option value="${lot.code_lot_produit}" data-unite="${lot.titre_lot}" data-facteur="${lot.unites_par_lot}">${lot.titre_lot}</option>`;
+function openModal(id) { gid(id).classList.add('show'); }
+function closeModal(id) { gid(id).classList.remove('show'); }
+
+// ===== TOUT EN POST =====
+function api(action, data) {
+    return fetch(BASE_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: new URLSearchParams({ ...data, action })
+    }).then(r => r.json()).catch(err => { throw new Error('Erreur connexion'); });
+}
+
+// ===== FOURNISSEURS (selectpicker) =====
+async function loadFournisseurs() {
+    try {
+        const res = await api('get_fournisseurs', { q: '' });
+        if (res.success) {
+            const select = gid('fournisseurSelect');
+            select.innerHTML = '<option value="">-- Sélectionner un fournisseur --</option>';
+            res.fournisseurs.forEach(f => {
+                const opt = document.createElement('option');
+                opt.value = f.code_contact;
+                opt.textContent = f.nom_prenom_contact + (f.telephone_contact ? ' (' + f.telephone_contact + ')' : '');
+                opt.dataset.name = f.nom_prenom_contact;
+                opt.dataset.code = f.code_contact;
+                select.appendChild(opt);
+            });
+            jQuery('.selectpicker').selectpicker('refresh');
+        }
+    } catch (e) { console.error(e); }
+}
+
+jQuery(document).on('changed.bs.select', '#fournisseurSelect', function(e, clickedIndex) {
+    const opt = this.options[clickedIndex];
+    if (opt && opt.value) {
+        selectedFournisseur = { code: opt.value, name: opt.dataset.name };
+        gid('fournisseurDisplay').style.display = 'block';
+        gid('fournisseurSelectWrapper').style.display = 'none';
+        gid('fournisseurName').textContent = selectedFournisseur.name;
+        gid('fournisseurCode').textContent = selectedFournisseur.code;
+        updateButtons();
+    }
+});
+
+function resetFournisseur() {
+    selectedFournisseur = null;
+    gid('fournisseurDisplay').style.display = 'none';
+    gid('fournisseurSelectWrapper').style.display = 'block';
+    gid('fournisseurSelect').selectedIndex = 0;
+    jQuery('.selectpicker').selectpicker('refresh');
+    updateButtons();
+}
+
+async function createFournisseur() {
+    const nom = gid('fournisseurNom').value.trim();
+    if (!nom) { toast('Nom requis', 'error'); return; }
+    try {
+        const res = await api('create_fournisseur', {
+            nom,
+            tel: gid('fournisseurTel').value,
+            email: gid('fournisseurEmail').value,
+            adresse: gid('fournisseurAdresse').value,
+            statut: gid('fournisseurStatut').value,
+            csrf_token: CSRF_TOKEN
         });
-        lotSelect.innerHTML = options;
-
-        if (produitId && prixFournisseur[produitId] !== undefined) {
-            prixInput.value = prixFournisseur[produitId];
+        if (res.success) {
+            closeModal('fournisseurModal');
+            gid('fournisseurForm').reset();
+            await loadFournisseurs();
+            setTimeout(() => {
+                const select = gid('fournisseurSelect');
+                for (let i = 0; i < select.options.length; i++) {
+                    if (select.options[i].value === res.code) {
+                        select.selectedIndex = i;
+                        jQuery('.selectpicker').selectpicker('refresh');
+                        selectedFournisseur = { code: res.code, name: res.nom };
+                        gid('fournisseurDisplay').style.display = 'block';
+                        gid('fournisseurSelectWrapper').style.display = 'none';
+                        gid('fournisseurName').textContent = res.nom;
+                        gid('fournisseurCode').textContent = res.code;
+                        updateButtons();
+                        break;
+                    }
+                }
+            }, 300);
+            toast('Fournisseur créé');
         } else {
-            prixInput.value = '';
+            toast(res.message || 'Erreur', 'error');
         }
+    } catch (e) { toast('Erreur connexion', 'error'); }
+}
 
-        const selectedLot = lotSelect.options[lotSelect.selectedIndex];
-        uniteAff.value = selectedLot ? (selectedLot.text || 'Unité') : 'Unité';
-        calculerLigne(prixInput);
-    }
-
-    function calculerLigne(element) {
-        const ligne = element.closest('.ligne-produit');
-        const quantite = parseFloat(ligne.querySelector('.quantite').value) || 0;
-        const prix = parseFloat(ligne.querySelector('.prix-unitaire').value) || 0;
-        const lotSelect = ligne.querySelector('.select-lot');
-        const selectedOption = lotSelect.options[lotSelect.selectedIndex];
-        let facteur = 1;
-        if (selectedOption && selectedOption.dataset.facteur) {
-            facteur = parseFloat(selectedOption.dataset.facteur) || 1;
+// ===== PRODUITS =====
+async function loadProducts(q = '') {
+    try {
+        const res = await api('get_products', { q, categorie: currentCategory });
+        if (res.success) {
+            currentProducts = res.products;
+            renderProducts(currentProducts, q);
         }
-        const quantiteBase = quantite * facteur;
-        const total = quantiteBase * prix;
-        ligne.querySelector('.total-ligne').value = total.toFixed(0);
+    } catch (e) { toast('Erreur chargement', 'error'); }
+}
+
+function renderProducts(products, q = '') {
+    if (products.length === 0) {
+        gid('productGrid').innerHTML = '<div style="text-align:center;padding:40px;color:var(--color-gray-500);"><i class="bi bi-box-seam" style="font-size:48px;opacity:.3;"></i><h3>Aucun produit</h3></div>';
+        return;
     }
+    gid('productGrid').innerHTML = products.map((p, i) => {
+        const stock = parseInt(p.stock) || 0;
+        let stockClass = 'stock-out', stockText = 'Rupture';
+        if (stock > 5) { stockClass = 'stock-in'; stockText = 'Stock: ' + stock; }
+        else if (stock > 0) { stockClass = 'stock-low'; stockText = 'Stock: ' + stock + ' ⚠'; }
+        const inCart = cart.some(item => item.code === p.code_produit);
+        const cardClass = inCart ? 'product-card in-cart' : 'product-card';
+        const titleHTML = q ? p.titre_produit.replace(new RegExp(q, 'gi'), m => `<mark>${m}</mark>`) : esc(p.titre_produit);
+        return `<div class="${cardClass}" onclick="addProduct(${i})">
+            <div class="pc-title">${titleHTML}</div>
+            <div class="pc-code">${esc(p.code_produit)}</div>
+            <div class="pc-price">${fmt(p.prix_fournisseur || 0)}</div>
+            <div class="pc-stock ${stockClass}">${stockText}</div>
+        </div>`;
+    }).join('');
+}
 
-    $(document).on('change', '.select-produit', function() {
-        mettreAJourLotsEtPrix(this);
-    });
+function filterCategory(cat, btn) {
+    currentCategory = cat;
+    document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    loadProducts(gid('searchInput').value.trim());
+}
 
-    $(document).on('change', '.select-lot', function() {
-        const ligne = this.closest('.ligne-produit');
-        const uniteAff = ligne.querySelector('.unite-affichage');
-        const selected = this.options[this.selectedIndex];
-        uniteAff.value = selected ? (selected.text || 'Unité') : 'Unité';
-        const prixInput = ligne.querySelector('.prix-unitaire');
-        calculerLigne(prixInput);
-    });
+gid('searchInput').addEventListener('input', function() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadProducts(this.value.trim()), 300);
+});
 
-    $(document).on('input', '.quantite, .prix-unitaire', function() {
-        calculerLigne(this);
-    });
-
-    // ---- Ajouter une ligne ----
-    function ajouterLigne() {
-        const container = document.getElementById('lignesContainer');
-        const original = container.querySelector('.ligne-produit');
-        const clone = original.cloneNode(true);
-        clone.querySelector('.select-produit').value = '';
-        clone.querySelector('.select-lot').innerHTML = '<option value="">Unité</option>';
-        clone.querySelector('.unite-affichage').value = '';
-        clone.querySelector('.quantite').value = 1;
-        clone.querySelector('.prix-unitaire').value = '';
-        clone.querySelector('.total-ligne').value = '0';
-        clone.querySelector('.supprimer-ligne').style.display = 'inline-block';
-        container.appendChild(clone);
+// Achat : pas de blocage sur la rupture — c'est précisément ce qu'on réapprovisionne,
+// et pas de plafond de quantité lié au stock existant.
+function addProduct(idx) {
+    const p = currentProducts[idx];
+    if (!p) return;
+    const existing = cart.find(item => item.code === p.code_produit);
+    if (existing) {
+        existing.qte += 1;
+        existing.montant = existing.qte * existing.prix_achat;
+    } else {
+        const prix = parseFloat(p.prix_fournisseur) || 0;
+        cart.push({
+            code: p.code_produit,
+            nom: p.titre_produit,
+            prix_achat: prix,
+            qte: 1,
+            montant: prix
+        });
     }
-    window.ajouterLigne = ajouterLigne;
+    renderCart();
+    renderProducts(currentProducts, gid('searchInput').value.trim());
+    toast('Produit ajouté');
+}
 
-    function supprimerLigne(btn) {
-        const ligne = btn.closest('.ligne-produit');
-        if (document.querySelectorAll('.ligne-produit').length > 1) {
-            ligne.remove();
+window.updateQty = function(code, delta) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    const newQty = item.qte + delta;
+    if (newQty <= 0) { window.removeProduct(code); return; }
+    item.qte = newQty;
+    item.montant = item.qte * item.prix_achat;
+    renderCart();
+};
+
+window.setQty = function(code, value) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    let newQty = parseInt(value, 10);
+    if (isNaN(newQty) || newQty <= 0) { renderCart(); return; }
+    item.qte = newQty;
+    item.montant = item.qte * item.prix_achat;
+    renderCart();
+};
+
+window.updatePrice = function(code, newPrice) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    item.prix_achat = Math.max(0, parseFloat(newPrice) || 0);
+    item.montant = item.qte * item.prix_achat;
+    renderCart();
+};
+
+window.removeProduct = function(code) {
+    cart = cart.filter(p => p.code !== code);
+    renderCart();
+    renderProducts(currentProducts, gid('searchInput').value.trim());
+    toast('Retiré');
+};
+
+function renderCart() {
+    if (cart.length === 0) {
+        gid('cartItems').innerHTML = '<div class="cart-empty"><i class="bi bi-cart-x"></i><p>Aucun produit ajouté</p></div>';
+        gid('cartCount').textContent = '0';
+    } else {
+        let html = '';
+        cart.forEach(p => {
+            html += `<div class="cart-line">
+                <div class="cl-info">
+                    <div class="cl-name">${esc(p.nom)}</div>
+                    <div class="cl-price">P.A: <input type="number" value="${p.prix_achat}" onchange="updatePrice('${p.code}', this.value)" onclick="event.stopPropagation()"> FCFA</div>
+                </div>
+                <div class="cl-qty">
+                    <button onclick="updateQty('${p.code}', -1)">-</button>
+                    <input type="number" class="cl-qty-input" min="1" step="1"
+                           value="${p.qte}"
+                           onclick="event.stopPropagation()"
+                           onchange="setQty('${p.code}', this.value)">
+                    <button onclick="updateQty('${p.code}', 1)">+</button>
+                </div>
+                <div class="cl-montant">${fmt(p.montant)}</div>
+                <button class="cl-remove" onclick="removeProduct('${p.code}')"><i class="bi bi-x-circle"></i></button>
+            </div>`;
+        });
+        gid('cartItems').innerHTML = html;
+        gid('cartCount').textContent = cart.reduce((s, p) => s + p.qte, 0);
+    }
+    gid('totalTTC').textContent = fmt(cartTotal());
+    updateButtons();
+}
+
+function cartTotal() {
+    return cart.reduce((s, p) => s + p.montant, 0);
+}
+
+function updateButtons() {
+    const ok = cart.length > 0 && selectedFournisseur;
+    gid('btnAttente').disabled = !ok;
+    gid('btnValider').disabled = !ok;
+}
+
+gid('btnClear').addEventListener('click', function() {
+    if (cart.length === 0) return;
+    if (confirm('Vider le panier ?')) {
+        cart = [];
+        renderCart();
+        renderProducts(currentProducts, gid('searchInput').value.trim());
+        toast('Panier vidé');
+    }
+});
+
+// ===== ENREGISTRER EN ATTENTE (Bon fournisseur) =====
+gid('btnAttente').addEventListener('click', function() {
+    if (!confirm('Enregistrer cet achat en attente (Bon fournisseur) ?')) return;
+    validerAchat(true);
+});
+
+// ===== VALIDER L'ACHAT (Facture, impayée — le règlement se fait ailleurs) =====
+gid('btnValider').addEventListener('click', function() {
+    if (!confirm(`Valider cet achat de ${fmt(cartTotal())} auprès de ${selectedFournisseur.name} ?`)) return;
+    validerAchat(false);
+});
+
+async function validerAchat(enAttente) {
+    try {
+        const res = await api('valider_achat', {
+            panier: JSON.stringify(cart.map(c => ({ code: c.code, prix_achat: c.prix_achat, qte: c.qte, montant: c.montant }))),
+            fournisseur_id: selectedFournisseur.code,
+            en_attente: enAttente,
+            maj_prix_fournisseur: gid('majPrixFournisseur').checked,
+            csrf_token: CSRF_TOKEN
+        });
+        if (res.success) {
+            toast('Achat enregistré : ' + res.document);
+            cart = [];
+            renderCart();
+            loadProducts(gid('searchInput').value.trim());
         } else {
-            alert('Il faut au moins une ligne.');
+            toast(res.message || 'Erreur', 'error');
         }
-    }
-    window.supprimerLigne = supprimerLigne;
+    } catch (e) { toast('Erreur connexion', 'error'); }
+}
 
-    // ---- Initialisation première ligne ----
-    $('.select-produit').each(function() {
-        if ($(this).val()) {
-            mettreAJourLotsEtPrix(this);
-        }
-    });
-
-    // ---- Modal Nouveau bon ----
-    const bonModal = new bootstrap.Modal(document.getElementById('bonModal'));
-    $('#addBtn').on('click', function() {
-        $('#bonForm')[0].reset();
-        $('#bonForm input[name="date_bon"]').val(new Date().toISOString().split('T')[0]);
-        $('#lignesContainer .ligne-produit:not(:first)').remove();
-        const first = $('#lignesContainer .ligne-produit:first');
-        first.find('.select-produit').val('');
-        first.find('.select-lot').html('<option value="">Unité</option>');
-        first.find('.unite-affichage').val('');
-        first.find('.quantite').val(1);
-        first.find('.prix-unitaire').val('');
-        first.find('.total-ligne').val('0');
-        first.find('.supprimer-ligne').hide();
-        bonModal.show();
-    });
-
-    $('#boutiqueSelect').on('change', function() {
-        const adresse = $(this).find(':selected').data('adresse') || '';
-        $('#lieuLivraison').val(adresse);
-    });
-
-    // Auto-fermeture des alertes
-    setTimeout(function() { $('.alert').alert('close'); }, 5000);
+// Initialisation
+jQuery(document).ready(function() {
+    loadFournisseurs();
+    loadProducts();
 });
 </script>
 </body>

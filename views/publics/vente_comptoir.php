@@ -1,30 +1,45 @@
 <?php
-// vente_comptoir.php – Caisse - Vente Comptoir (refonte complète avec ticket PDF)
-// CORRIGÉ : gestion d'erreur AJAX améliorée, URL absolue robuste, redirections évitées pour AJAX
-
+// vente_comptoir.php – Caisse - Vente Comptoir
 while (ob_get_level()) ob_end_clean();
 ob_start();
 
-// ---- DÉTECTION PRÉCOCE DES REQUÊTES AJAX ----
+// - DÉTECTION PRÉCOCE DES REQUÊTES AJAX -
 $isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
-$isAjax = $isAjax || (isset($_REQUEST['ajax']) && $_REQUEST['ajax'] == '1');
+$isAjax = $isAjax || (isset($_POST['ajax']) && $_POST['ajax'] == '1');
 
-// Si requête AJAX et session expirée, on répond en JSON sans rediriger
-if ($isAjax && !isset($_SESSION['user_id'])) {
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['success' => false, 'message' => 'Session expirée. Veuillez vous reconnecter.']);
-    exit;
+// - SESSION : protection si déjà démarrée -
+// if (session_status() === PHP_SESSION_NONE) {
+// session_start();
+// }
+// if ($isAjax && !isset($_SESSION['user_id'])) {
+// header('Content-Type: application/json; charset=utf-8');
+// echo json_encode(['success' => false, 'message' => 'Session expirée']);
+// exit;
+// }
+
+// if (!isset($_SESSION['user_id'])) {
+// if ($isAjax) {
+// header('Content-Type: application/json; charset=utf-8');
+// echo json_encode(['success' => false, 'message' => 'Session expirée']);
+// exit;
+// }
+// header('Location: ../utilisateur/login');
+// exit;
+// }
+
+$host = 'localhost';
+$dbname = 'gescommercial';
+$user = 'root';
+$pass = '';
+
+try {
+    $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8", $user, $pass);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+} catch (PDOException $e) {
+    die("Erreur de connexion : " . $e->getMessage());
 }
-// Sinon, redirection classique si session expirée
-if (!$isAjax && !isset($_SESSION['user_id'])) {
-    header('Location: utilisateur/login');
-    exit;
-}
 
-require 'databases/database.php';
-require 'librairies/fpdf/fpdf.php';
-
-// Vérification de l'utilisateur (pour toutes les requêtes)
+// Récupération utilisateur et boutique
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
 $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -35,35 +50,144 @@ if (!$user) {
         echo json_encode(['success' => false, 'message' => 'Utilisateur inactif']);
         exit;
     }
-    header('Location: utilisateur/login');
+    header('Location: ../utilisateur/login');
     exit;
 }
 
 define('USER_ID', $_SESSION['user_id']);
-define('USER_BOUTIQUE', $user['boutique_id'] ?? null);
+$role = $user['role'] ?? '';
 
-// Récupération de la caisse active (table `caisses` uniquement).
-// La vente au comptoir exige qu'une journée de caisse soit ouverte
-// (voir /caisse/journee) : c'est la seule source de vérité pour
-// savoir si un poste peut encaisser.
-$sqlCaisse = "SELECT cs.* FROM caisses cs WHERE cs.statut = 'ouverte'";
-$paramsCaisse = [];
-if (!empty(USER_BOUTIQUE)) {
-    $sqlCaisse .= " AND (cs.boutique_id = ? OR cs.boutique_id IS NULL)";
-    $paramsCaisse[] = USER_BOUTIQUE;
+// - BOUTIQUE ACTIVE -
+// Le superviseur peut superviser plusieurs boutiques : par défaut on prend la
+// dernière choisie (ou la première active), et un selectpicker dans l'en-tête
+// lui permet de changer à tout moment. Les autres rôles restent sur leur
+// boutique assignée.
+$boutiques = [];
+if ($role === 'Superviseur') {
+    $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
+    $validBoutiqueIds = array_column($boutiques, 'code_boutique');
+
+    if (!empty($_GET['choisir_boutique']) && in_array($_GET['choisir_boutique'], $validBoutiqueIds)) {
+        $_SESSION['boutique_choisie_superviseur'] = $_GET['choisir_boutique'];
+    }
+
+    $boutiqueChoisie = $_SESSION['boutique_choisie_superviseur'] ?? null;
+    if ($boutiqueChoisie && in_array($boutiqueChoisie, $validBoutiqueIds)) {
+        $boutiqueActive = $boutiqueChoisie;
+    } elseif (!empty($boutiques)) {
+        $boutiqueActive = $boutiques[0]['code_boutique'];
+    } else {
+        $boutiqueActive = $user['boutique_id'] ?? null;
+    }
+    $_SESSION['boutique_choisie_superviseur'] = $boutiqueActive;
+
+    define('USER_BOUTIQUE', $boutiqueActive);
+} else {
+    define('USER_BOUTIQUE', $user['boutique_id'] ?? null);
 }
-$sqlCaisse .= " ORDER BY cs.boutique_id IS NULL LIMIT 1";
-$stmt = $pdo->prepare($sqlCaisse);
-$stmt->execute($paramsCaisse);
-$caisseActive = $stmt->fetch(PDO::FETCH_ASSOC);
+$caisseActive = null;
+$needCaisseChoice = false;
+$caissesDisponibles = [];
+
+if ($role === 'Superviseur') {
+    // Le superviseur voit toutes les caisses ouvertes de sa boutique (ou de tout le système à défaut) :
+    // une caisse ne compte comme "ouverte" que si elle a réellement une journée en cours (jc.statut = 'OUVERTE'),
+    // pas seulement d'après le statut statique de la caisse (qui ne reflète pas toujours la fermeture du jour).
+    if (!empty(USER_BOUTIQUE)) {
+        $stmt = $pdo->prepare("SELECT DISTINCT c.caisse_id, c.nom_caisse
+                               FROM caisse c
+                               INNER JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
+                               WHERE c.statut = 'Actif' AND c.boutique_id = ? ORDER BY c.nom_caisse");
+        $stmt->execute([USER_BOUTIQUE]);
+        $caissesDisponibles = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    if (empty($caissesDisponibles)) {
+        $caissesDisponibles = $pdo->query("SELECT DISTINCT c.caisse_id, c.nom_caisse
+                                           FROM caisse c
+                                           INNER JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
+                                           WHERE c.statut = 'Actif' ORDER BY c.nom_caisse")->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    if (count($caissesDisponibles) === 1) {
+        $caisseActive = $caissesDisponibles[0];
+        $_SESSION['caisse_choisie_superviseur'] = $caisseActive['caisse_id'];
+    } elseif (count($caissesDisponibles) > 1) {
+        // Prise en compte d'un choix explicite envoyé par le superviseur
+        if (!empty($_GET['choisir_caisse'])) {
+            $_SESSION['caisse_choisie_superviseur'] = $_GET['choisir_caisse'];
+        }
+        $chosen = $_SESSION['caisse_choisie_superviseur'] ?? null;
+        $validIds = array_column($caissesDisponibles, 'caisse_id');
+        if ($chosen && in_array($chosen, $validIds)) {
+            foreach ($caissesDisponibles as $c) { if ($c['caisse_id'] === $chosen) { $caisseActive = $c; break; } }
+        } else {
+            $needCaisseChoice = true;
+        }
+    }
+} else {
+    // Tous les autres rôles (caissier, etc.) : uniquement la caisse qui leur a été autorisée,
+    // c'est-à-dire la caisse dont ils ont eux-mêmes ouvert la journée en cours.
+    $stmt = $pdo->prepare("SELECT c.caisse_id, c.nom_caisse
+                           FROM caisse c
+                           INNER JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
+                           WHERE c.statut = 'Actif' AND jc.id_utilisateur_ouverture = ?
+                           ORDER BY jc.date_ouverture DESC LIMIT 1");
+    $stmt->execute([USER_ID]);
+    $caisseActive = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$caisseActive) {
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => "Aucune caisse ne vous a été autorisée. Ouvrez d'abord votre caisse."]);
+            exit;
+        }
+        echo '<script>alert("Aucune caisse ne vous a été autorisée. Veuillez ouvrir votre caisse avant de vendre.");document.location.replace("../caisse/journee");</script>';
+        exit;
+    }
+}
+
+// Si le superviseur doit choisir parmi plusieurs caisses ouvertes
+if ($needCaisseChoice) {
+    if ($isAjax) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'need_caisse_choice' => true, 'caisses' => $caissesDisponibles]);
+        exit;
+    }
+    ?>
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head>
+        <meta charset="UTF-8">
+        <title>Choix de la caisse</title>
+        <style>
+            body { font-family: Arial, sans-serif; background:#f1f5f9; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+            .box { background:#fff; padding:32px; border-radius:10px; box-shadow:0 2px 12px rgba(0,0,0,.08); width:360px; }
+            .box h3 { margin-top:0; }
+            .box a { display:block; padding:12px 16px; margin-bottom:10px; border:1px solid #cbd5e1; border-radius:8px; text-decoration:none; color:#0f172a; font-weight:600; }
+            .box a:hover { background:#e2e8f0; }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h3>Plusieurs caisses sont ouvertes</h3>
+            <p>Choisissez la caisse sur laquelle enregistrer vos ventes :</p>
+            <?php foreach ($caissesDisponibles as $c): ?>
+                <a href="?choisir_caisse=<?= urlencode($c['caisse_id']) ?>"><?= htmlspecialchars($c['nom_caisse']) ?></a>
+            <?php endforeach; ?>
+        </div>
+    </body>
+    </html>
+    <?php
+    exit;
+}
 
 if (!$caisseActive) {
     if ($isAjax) {
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['success' => false, 'message' => "Aucune caisse ouverte. Merci d'ouvrir une caisse (menu Ouverture / Fermeture de caisse) avant d'encaisser une vente."]);
+        echo json_encode(['success' => false, 'message' => "Aucune caisse ouverte."]);
         exit;
     }
-    echo '<script>alert("Aucune caisse ouverte. Merci d\'ouvrir une caisse avant de vendre.");document.location.replace("caisse/journee");</script>';
+    echo '<script>alert("Aucune caisse ouverte.");document.location.replace("../caisse/journee");</script>';
     exit;
 }
 define('CAISSE_ID', $caisseActive['caisse_id']);
@@ -74,257 +198,177 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-// ---- FONCTIONS UTILITAIRES ----
-function e($str)
-{
-    return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
-}
-function fmt($n)
-{
-    return number_format(floatval($n), 0, ',', ' ');
-}
-function safeText($str)
-{
-    return iconv('UTF-8', 'ISO-8859-1//TRANSLIT', $str);
-}
-function columnExists($pdo, $table, $col)
-{
-    try {
-        $stmt = $pdo->query("SHOW COLUMNS FROM `$table` LIKE '$col'");
-        return $stmt && $stmt->rowCount() > 0;
-    } catch (Exception $e) {
-        return false;
-    }
-}
-
-// Vérification des colonnes
-$produit_has_categorie = columnExists($pdo, 'produit', 'categorie_produit');
-$contact_has_email = columnExists($pdo, 'contact', 'email_contact');
-$contact_has_type = columnExists($pdo, 'contact', 'type_contact');
-$contact_has_statut = columnExists($pdo, 'contact', 'statut_contact');
-
-// Ajout colonne quantite dans lot_produit si absente
-try {
-    $pdo->exec("ALTER TABLE lot_produit ADD COLUMN quantite INT NOT NULL DEFAULT 0");
-} catch (PDOException $e) {
-    // déjà présente ou autre
-}
-
-// ---- TRAITEMENT DES ACTIONS AJAX ----
-$input = json_decode(file_get_contents('php://input'), true);
-if ($input) {
-    $_REQUEST = array_merge($_REQUEST, $input);
-    $isAjax = true;
-    $action = $input['action'] ?? '';
-} else {
-    $isAjax = isset($_REQUEST['ajax']) && $_REQUEST['ajax'] == '1';
-    $action = $_REQUEST['action'] ?? '';
-}
-
-if ($isAjax && $action) {
-    if (ob_get_level()) ob_clean();
-    header('Content-Type: application/json; charset=utf-8');
-
+// - TRAITEMENT AJAX - TOUT EN POST
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $action = $_POST['action'];
     try {
         switch ($action) {
-            case 'load_products':
-            case 'search_products':
-                $q = trim($_REQUEST['q'] ?? '');
-                $categorie = trim($_REQUEST['categorie'] ?? '');
-                $isSearch = ($action === 'search_products');
 
-                $catSelect = $produit_has_categorie ? ", COALESCE(p.categorie_produit, 'Autre') as categorie" : ", 'Autre' as categorie";
+            // ===== CHARGER LES CATÉGORIES =====
+            case 'load_categories':
+                $cats = $pdo->query("SELECT titre_categorie FROM categorie WHERE etat_categorie = 'ACTIF' ORDER BY titre_categorie ASC")->fetchAll(PDO::FETCH_COLUMN);
+                echo json_encode(['success' => true, 'data' => $cats, 'has_categorie' => count($cats) > 0]);
+                exit;
+
+            // ===== CHARGER TOUS LES CLIENTS =====
+            case 'load_all_clients':
+                $sql = "SELECT c.code_contact, c.nom_prenom_contact, c.telephone_contact,
+                        COALESCE(c.type_contact, 'Client') as type_contact,
+                        COALESCE(c.statut_contact, 'Particulier') as statut_contact
+                        FROM contact c
+                        WHERE c.type_contact = 'Client' AND c.etat_contact = 'Actif'
+                        ORDER BY c.nom_prenom_contact ASC";
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute();
+                $clients = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                echo json_encode(['success' => true, 'data' => $clients]);
+                exit;
+
+            // ===== CLIENTS POUR LE SELECTPICKER =====
+            case 'get_clients':
+                $q = trim($_POST['q'] ?? '');
+                $sql = "SELECT c.code_contact, c.nom_prenom_contact, c.telephone_contact,
+                        COALESCE(c.type_contact, 'Client') as type_contact,
+                        COALESCE(c.statut_contact, 'Particulier') as statut_contact
+                        FROM contact c
+                        WHERE c.type_contact = 'Client' AND c.etat_contact = 'Actif'";
                 $params = [];
-                $sql = "SELECT p.code_produit, p.titre_produit, 
-                               COALESCE(p.stock_produit, 0) as stock,
-                               CAST(p.prix_produit AS DECIMAL(10,2)) as prix,
-                               CAST(p.prix_fournisseur AS DECIMAL(10,2)) as prix_fournisseur
-                               $catSelect
+                if ($q) {
+                    $sql .= " AND (c.nom_prenom_contact LIKE ? OR c.telephone_contact LIKE ? OR c.code_contact LIKE ?)";
+                    $params[] = "%$q%";
+                    $params[] = "%$q%";
+                    $params[] = "%$q%";
+                }
+                $sql .= " ORDER BY c.nom_prenom_contact ASC LIMIT 500";
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($params);
+                echo json_encode(['success' => true, 'clients' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
+                exit;
+
+            // ===== RECHERCHER CLIENTS =====
+            case 'search_customers':
+                $q = trim($_POST['q'] ?? '');
+                $sql = "SELECT c.code_contact, c.nom_prenom_contact, c.telephone_contact,
+                        COALESCE(c.type_contact, 'Client') as type_contact,
+                        COALESCE(c.statut_contact, 'Particulier') as statut_contact
+                        FROM contact c
+                        WHERE c.type_contact = 'Client' AND c.etat_contact = 'Actif'";
+                $params = [];
+                if ($q) {
+                    $sql .= " AND (c.nom_prenom_contact LIKE ? OR c.telephone_contact LIKE ? OR c.code_contact LIKE ?)";
+                    $params[] = "%$q%";
+                    $params[] = "%$q%";
+                    $params[] = "%$q%";
+                }
+                $sql .= " ORDER BY c.nom_prenom_contact ASC LIMIT 20";
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($params);
+                $clients = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                echo json_encode(['success' => true, 'data' => $clients]);
+                exit;
+
+            // ===== CHARGER PRODUITS =====
+            case 'get_products':
+            case 'search_products':
+                $q = trim($_POST['q'] ?? '');
+                $cat = $_POST['categorie'] ?? 'Tous';
+                $sql = "SELECT p.code_produit, p.titre_produit, p.stock_produit, p.prix_fournisseur,
+                        p.categorie_id, p.etat_produit,
+                        COALESCE(sb.quantite, CAST(p.stock_produit AS SIGNED)) as stock,
+                        COALESCE(c.titre_categorie, 'Autre') as categorie
                         FROM produit p
-                        WHERE p.etat_produit = 'Actif'";
-                if ($isSearch && $q !== '') {
+                        LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
+                        LEFT JOIN stock sb ON sb.produit_id = p.code_produit AND sb.boutique_id = ?
+                        WHERE p.etat_produit != 'RUPTURE'";
+                $params = [USER_BOUTIQUE];
+                if ($cat !== 'Tous') {
+                    $sql .= " AND c.titre_categorie = ?";
+                    $params[] = $cat;
+                }
+                if ($q) {
                     $sql .= " AND (p.titre_produit LIKE ? OR p.code_produit LIKE ?)";
                     $params[] = "%$q%";
                     $params[] = "%$q%";
                 }
-                if ($categorie && $categorie !== 'Tous' && $produit_has_categorie) {
-                    $sql .= " AND p.categorie_produit = ?";
-                    $params[] = $categorie;
-                }
                 $sql .= " ORDER BY p.titre_produit ASC LIMIT 80";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute($params);
-                $produits = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-                foreach ($produits as &$prod) {
-                    $stmtLots = $pdo->prepare("SELECT code_lot_produit, titre_lot, unites_par_lot, quantite 
-                                               FROM lot_produit 
+                // Chargement des lots pour chaque produit (table `lot`)
+                foreach ($products as &$p) {
+                    $stmtLots = $pdo->prepare("SELECT code_lot, libelle, quantite, unites_par_lot
+                                               FROM lot
                                                WHERE produit_id = ? AND etat_lot = 'Actif' AND quantite > 0");
-                    $stmtLots->execute([$prod['code_produit']]);
-                    $prod['lots'] = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
+                    $stmtLots->execute([$p['code_produit']]);
+                    $lots = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
+
+                    // Transformation pour correspondre à l'attente du JS
+                    $p['lots'] = array_map(function($lot) {
+                        return [
+                            'code_lot_produit' => $lot['code_lot'],
+                            'titre_lot' => $lot['libelle'],
+                            'quantite' => $lot['quantite'],
+                            'unites_par_lot' => max(1, intval($lot['unites_par_lot'] ?? 1))
+                        ];
+                    }, $lots);
                 }
-                echo json_encode(['success' => true, 'data' => $produits]);
+                echo json_encode(['success' => true, 'products' => $products]);
                 exit;
 
-            case 'load_categories':
-                if ($produit_has_categorie) {
-                    $cats = $pdo->query("SELECT DISTINCT COALESCE(categorie_produit,'Autre') as cat 
-                                         FROM produit WHERE etat_produit='Actif' 
-                                         ORDER BY cat ASC")->fetchAll(PDO::FETCH_COLUMN);
-                } else {
-                    $cats = [];
-                }
-                echo json_encode(['success' => true, 'data' => $cats, 'has_categorie' => $produit_has_categorie]);
-                exit;
-
-            case 'search_customers':
-                $q = trim($_REQUEST['q'] ?? '');
-                if ($q === '') {
-                    echo json_encode(['success' => true, 'data' => []]);
-                    exit;
-                }
-                $emailSelect = $contact_has_email ? ", c.email_contact" : ", '' as email_contact";
-                $typeSelect = $contact_has_type ? ", COALESCE(c.type_contact,'Client') as type_contact" : ", 'Client' as type_contact";
-                $statutSelect = $contact_has_statut ? ", COALESCE(c.statut_contact,'Particulier') as statut_contact" : ", 'Particulier' as statut_contact";
-                $emailSearch = $contact_has_email ? " OR c.email_contact LIKE ?" : "";
-                $emailParams = $contact_has_email ? ['%' . $q . '%'] : [];
-
-                $sql = "SELECT c.code_contact, c.nom_prenom_contact, 
-                               c.telephone_contact
-                               $emailSelect $typeSelect $statutSelect
-                        FROM contact c 
-                        WHERE c.etat_contact = 'Actif' 
-                          AND (c.nom_prenom_contact LIKE ? 
-                               OR c.code_contact LIKE ? 
-                               OR c.telephone_contact LIKE ?
-                               $emailSearch)
-                        ORDER BY 
-                          CASE WHEN c.code_contact = ? THEN 0
-                               WHEN c.nom_prenom_contact LIKE ? THEN 1
-                               ELSE 2 END,
-                          c.nom_prenom_contact ASC LIMIT 15";
-
-                $params = array_merge(['%' . $q . '%', '%' . $q . '%', '%' . $q . '%'], $emailParams, [$q, "$q%"]);
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute($params);
-                echo json_encode(['success' => true, 'data' => $stmt->fetchAll()]);
-                exit;
-
-            case 'load_recent_customers':
-                $emailSelect = $contact_has_email ? ", c.email_contact" : ", '' as email_contact";
-                $typeSelect = $contact_has_type ? ", COALESCE(c.type_contact,'Client') as type_contact" : ", 'Client' as type_contact";
-                $statutSelect = $contact_has_statut ? ", COALESCE(c.statut_contact,'Particulier') as statut_contact" : ", 'Particulier' as statut_contact";
-                $typeWhere = $contact_has_type ? " AND c.type_contact = 'Client'" : "";
-                try {
-                    $sql = "SELECT c.code_contact, c.nom_prenom_contact, 
-                                   c.telephone_contact
-                                   $emailSelect $typeSelect $statutSelect,
-                                   COUNT(f.numero_facture) as nb_factures
-                            FROM contact c
-                            LEFT JOIN facture f ON f.contact_id = c.code_contact
-                            WHERE c.etat_contact = 'Actif' $typeWhere
-                            GROUP BY c.code_contact
-                            ORDER BY nb_factures DESC, c.nom_prenom_contact ASC LIMIT 8";
-                    $stmt = $pdo->prepare($sql);
-                    $stmt->execute();
-                    echo json_encode(['success' => true, 'data' => $stmt->fetchAll()]);
-                } catch (Exception $e) {
-                    $sql2 = "SELECT c.code_contact, c.nom_prenom_contact, 
-                                    c.telephone_contact
-                                    $emailSelect $typeSelect $statutSelect, 0 as nb_factures
-                             FROM contact c
-                             WHERE c.etat_contact = 'Actif' $typeWhere
-                             ORDER BY c.nom_prenom_contact ASC LIMIT 8";
-                    $stmt2 = $pdo->prepare($sql2);
-                    $stmt2->execute();
-                    echo json_encode(['success' => true, 'data' => $stmt2->fetchAll()]);
-                }
-                exit;
-
-            case 'get_product_price':
-                $produit_id = trim($_REQUEST['produit_id'] ?? '');
-                $quantite = max(1, intval($_REQUEST['quantite'] ?? 1));
-                if (!$produit_id) throw new Exception('Produit requis');
-                $boutique_id = USER_BOUTIQUE;
-                $sql = "SELECT prix_unitaire
-                        FROM prix
-                        WHERE produit_id = ?
-                          AND etat_prix = 'Actif'
-                          AND quantite_min <= ?
-                          AND (quantite_max >= ? OR quantite_max IS NULL)
-                        ORDER BY CASE WHEN boutique_id = ? THEN 0 ELSE 1 END,
-                                 quantite_min DESC
-                        LIMIT 1";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute([$produit_id, $quantite, $quantite, $boutique_id]);
-                $prix = $stmt->fetchColumn();
-                if ($prix === false) {
-                    $stmt = $pdo->prepare("SELECT CAST(prix_produit AS DECIMAL(12,2)) FROM produit WHERE code_produit = ?");
-                    $stmt->execute([$produit_id]);
-                    $prix = $stmt->fetchColumn();
-                    if ($prix === false) $prix = 0;
-                }
-                echo json_encode(['success' => true, 'prix' => floatval($prix)]);
-                exit;
-
+            // ===== CRÉER CLIENT =====
             case 'create_customer':
                 $data = json_decode(file_get_contents('php://input'), true) ?: $_POST;
                 $token = $data['csrf_token'] ?? '';
                 if ($token !== $csrf_token) {
-                    echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
+                    echo json_encode(['success' => false, 'message' => 'Token invalide']);
                     exit;
                 }
                 $nom = trim($data['nom'] ?? '');
                 if (!$nom) {
-                    echo json_encode(['success' => false, 'message' => 'Le nom est obligatoire.']);
+                    echo json_encode(['success' => false, 'message' => 'Nom requis']);
                     exit;
                 }
-                $code = 'CLT-' . date('YmdHis') . rand(100, 999);
-                $emailVal = $contact_has_email ? ($data['email'] ?? '') : '';
-                $emailCol = $contact_has_email ? ", email_contact" : "";
-                $emailParam = $contact_has_email ? [$emailVal] : [];
-                $typeVal = $contact_has_type ? 'Client' : '';
-                $statutVal = $contact_has_statut ? 'Particulier' : '';
-                $typeCol = $contact_has_type ? ", type_contact" : "";
-                $statutCol = $contact_has_statut ? ", statut_contact" : "";
-
-                $sql = "INSERT INTO contact (code_contact, nom_prenom_contact, telephone_contact $emailCol $typeCol $statutCol, adresse_contact, etat_contact) 
-                        VALUES (?, ?, ? $emailCol $typeCol $statutCol, ?, 'Actif')";
-                $params = array_merge(
-                    [$code, $nom, $data['tel'] ?? ''],
-                    $emailParam,
-                    $contact_has_type ? [$typeVal] : [],
-                    $contact_has_statut ? [$statutVal] : [],
-                    [$data['adresse'] ?? '']
-                );
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute($params);
-                echo json_encode(['success' => true, 'customer' => [
-                    'code_contact' => $code,
-                    'nom_prenom_contact' => $nom,
-                    'telephone_contact' => $data['tel'] ?? '',
-                    'email_contact' => $emailVal,
-                    'type_contact' => 'Client',
-                    'statut_contact' => 'Particulier'
-                ]]);
+                $numClient = 'CT-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
+                $stmt = $pdo->prepare("INSERT INTO contact (code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, etat_contact) VALUES (?, ?, ?, ?, 'Client', 'Particulier', 'Actif')");
+                $stmt->execute([$numClient, $nom, $data['tel'] ?? '', $data['email'] ?? '']);
+                echo json_encode(['success' => true, 'code' => $numClient, 'nom' => $nom]);
                 exit;
 
+            // ===== VALIDER VENTE =====
             case 'valider_vente':
-                $data = json_decode(file_get_contents('php://input'), true) ?: $_POST;
+                $data = $_POST;
                 $token = $data['csrf_token'] ?? '';
                 if ($token !== $csrf_token) {
                     echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
                     exit;
                 }
-                $panier = $data['panier'] ?? [];
+
+                $panier = json_decode($data['panier'] ?? '[]', true) ?: [];
                 if (empty($panier)) throw new Exception('Le panier est vide.');
+
                 $client_id = $data['client_id'] ?? null;
                 if (empty($client_id)) throw new Exception('Veuillez sélectionner un client.');
 
                 $payment_mode = $data['mode_reglement'] ?? 'Espece';
+                // Mapper les modes de paiement
+                $modeMap = [
+                    'Espece' => 'Espèce',
+                    'Mobile' => 'Mobile money',
+                    'Cheque' => 'Chèque',
+                    'Carte' => 'Carte',
+                    'Virement' => 'Virement',
+                    'Autres' => 'Autres'
+                ];
+                $mode_reglement = $modeMap[$payment_mode] ?? 'Espèce';
+
                 $amount_paid = floatval($data['avance'] ?? 0);
                 $tax_rate = floatval($data['taux_tva'] ?? 0);
                 $discount_rate = floatval($data['taux_remise'] ?? 0);
+                $is_attente = filter_var($data['en_attente'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+                // Récupération des données de lots
+                $lotsData = json_decode($data['lots'] ?? '[]', true) ?: [];
 
                 $montantHT = 0;
                 foreach ($panier as $item) {
@@ -333,19 +377,55 @@ if ($isAjax && $action) {
                 $taxe = round($montantHT * $tax_rate / 100, 2);
                 $remise = round($montantHT * $discount_rate / 100, 2);
                 $montantTTC = round($montantHT + $taxe - $remise, 2);
-                $avance = min($amount_paid, $montantTTC);
-                $reste = round($montantTTC - $avance, 2);
-                if ($reste < 0) $reste = 0;
-                $etatFacture = ($reste <= 0) ? 'Payer cash' : 'Credit';
 
-                $numFacture = 'FAC-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT);
+                // ===== LOGIQUE DE STATUT ET TYPE DE DOCUMENT =====
+                if ($is_attente) {
+                    $avance = 0;
+                    $reste = $montantTTC;
+                    $etatFacture = 'Impayee';
+                    $statutFacture = 'En attente';
+                    $categorieDocument = 'Bon';
+                } else {
+                    $avance = min($amount_paid, $montantTTC);
+                    $reste = round($montantTTC - $avance, 2);
+                    if ($reste < 0) $reste = 0;
+                    
+                    if ($avance > 0) {
+                        // Paiement (partiel ou intégral) → Facture validée
+                        $categorieDocument = 'Facture';
+                        $statutFacture = 'Validee';
+                        $etatFacture = ($reste > 0) ? 'Partielle' : 'Payee';
+                    } else {
+                        // Aucun paiement → Bon en attente
+                        $categorieDocument = 'Bon';
+                        $etatFacture = 'Impayee';
+                        $statutFacture = 'En attente';
+                    }
+                }
+
+                $titreDocument = ($categorieDocument === 'Facture') ? 'Facture client' : 'Bon';
+
+                // Numéros uniques pour chaque document
+                $numDocument = ($categorieDocument === 'Facture')
+                    ? 'FAC-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT)
+                    : 'BON-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT);
+                $numBL = 'BL-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT);
 
                 $pdo->beginTransaction();
                 try {
-                    $stmt = $pdo->prepare("INSERT INTO facture (numero_facture, titre_facture, type_facture, categorie_facture, date_facture, montant_ht, taxe, remise, montant_ttc, avance, reste, contact_id, utilisateur_id, etat_facture) 
-                                           VALUES (?, 'Vente comptoir', 'Client', 'Facture', CURDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmt->execute([$numFacture, $montantHT, $taxe, $remise, $montantTTC, $avance, $reste, $client_id, USER_ID, $etatFacture]);
+                    // 1. DOCUMENT PRINCIPAL (Facture ou Bon)
+                    $stmtDoc = $pdo->prepare("INSERT INTO facture(numero_facture, titre_facture, type_facture, categorie_facture, date_facture, montant_ht, taxe, remise, montant_ttc, avance, reste, contact_id, utilisateur_id, etat_facture, statut_facture)
+                                           VALUES (?, ?, 'Client', ?, CURDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                    $stmtDoc->execute([$numDocument, $titreDocument, $categorieDocument,
+                                    $montantHT, $taxe, $remise, $montantTTC, $avance, $reste,
+                                    $client_id, USER_ID, $etatFacture, $statutFacture]);
 
+                    // 2. BON DE LIVRAISON (table dédiée `bon_livraison`, toujours en attente)
+                    $stmtBL = $pdo->prepare("INSERT INTO bon_livraison(code_bon, date_livraison, facture_id, adresse_livraison, transporteur, statut, commentaire)
+                                             VALUES (?, CURDATE(), ?, NULL, NULL, 'En attente', NULL)");
+                    $stmtBL->execute([$numBL, $numDocument]);
+
+                    // 3. LIGNES DE COMMANDE pour le document principal ET le bon de livraison
                     $numBase = date('dmYHis');
                     foreach ($panier as $i => $ligne) {
                         $numCmd = $numBase . str_pad($i, 2, '0', STR_PAD_LEFT);
@@ -355,64 +435,100 @@ if ($isAjax && $action) {
                         $prix_achat = floatval($ligne['prix_achat'] ?? $prix);
                         $code_prod = $ligne['code'] ?? $ligne['product_id'];
                         $lot_id = $ligne['lot_id'] ?? null;
+                        $produits_par_lot = max(0, intval($ligne['produits_par_lot'] ?? 0));
 
-                        $stmtCmd = $pdo->prepare("INSERT INTO commande (numero_commande, produit_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, montant_commande, utilisateur_id, boutique_id, etat_commande) 
-                                                  VALUES (?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, NULL, 'Valider')");
-                        $stmtCmd->execute([$numCmd, $code_prod, $client_id, $numFacture, $prix_achat, $prix, $qte, $montant, USER_ID]);
+                        // Ligne pour le document principal
+                        $stmtCmd = $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
+                                                  VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, 'VALIDEE')");
+                        $stmtCmd->execute([$numCmd . '-DOC', $code_prod, $lot_id, $client_id, $numDocument,
+                                           $prix_achat, $prix, $qte, $produits_par_lot, $montant, USER_ID, USER_BOUTIQUE]);
 
-                        // Mise à jour du stock global
+                        // Ligne pour le bon de livraison (toujours en attente)
+                        $stmtCmdBL = $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
+                                                  VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, 'EN ATTENTE')");
+                        $stmtCmdBL->execute([$numCmd . '-BL', $code_prod, $lot_id, $client_id, $numBL,
+                                           $prix_achat, $prix, $qte, $produits_par_lot, $montant, USER_ID, USER_BOUTIQUE]);
+
+                        // Mise à jour stock boutique
+                        if (!empty(USER_BOUTIQUE)) {
+                            $pdo->prepare("UPDATE stock SET quantite = GREATEST(0, quantite - ?) WHERE produit_id = ? AND boutique_id = ?")
+                                ->execute([$qte, $code_prod, USER_BOUTIQUE]);
+                        }
+
+                        // Mise à jour stock produit
                         $pdo->prepare("UPDATE produit SET stock_produit = CAST(CAST(COALESCE(stock_produit,0) AS SIGNED) - ? AS CHAR) WHERE code_produit = ?")
                             ->execute([$qte, $code_prod]);
 
-                        // Gestion des lots
+                        // Mise à jour état produit
+                        $pdo->prepare("UPDATE produit SET etat_produit = CASE
+                                        WHEN CAST(stock_produit AS SIGNED) <= 0 THEN 'RUPTURE'
+                                        WHEN CAST(stock_produit AS SIGNED) <= COALESCE(stock_alerte,0) THEN 'ALERTE'
+                                        ELSE 'DISPONIBLE' END WHERE code_produit = ?")
+                            ->execute([$code_prod]);
+
+                        // Gestion des lots (table `lot`)
                         if ($lot_id) {
-                            $pdo->prepare("UPDATE lot_produit SET quantite = quantite - ? WHERE code_lot_produit = ? AND quantite >= ?")
+                            $pdo->prepare("UPDATE lot SET quantite = quantite - ? WHERE code_lot = ? AND quantite >= ?")
                                 ->execute([$qte, $lot_id, $qte]);
-                            $pdo->prepare("UPDATE lot_produit SET etat_lot = 'Inactif' WHERE code_lot_produit = ? AND quantite <= 0")
+                            $pdo->prepare("UPDATE lot SET etat_lot = 'Inactif' WHERE code_lot = ? AND quantite <= 0")
                                 ->execute([$lot_id]);
-                        } else {
-                            $lots = $pdo->prepare("SELECT code_lot_produit, quantite FROM lot_produit WHERE produit_id = ? AND etat_lot = 'Actif' AND quantite > 0 ORDER BY code_lot_produit");
-                            $lots->execute([$code_prod]);
-                            $qteRestante = $qte;
-                            while ($lot = $lots->fetch(PDO::FETCH_ASSOC)) {
-                                if ($qteRestante <= 0) break;
-                                $qteLot = min($qteRestante, $lot['quantite']);
-                                $pdo->prepare("UPDATE lot_produit SET quantite = quantite - ? WHERE code_lot_produit = ?")
-                                    ->execute([$qteLot, $lot['code_lot_produit']]);
-                                if ($lot['quantite'] - $qteLot <= 0) {
-                                    $pdo->prepare("UPDATE lot_produit SET etat_lot = 'Inactif' WHERE code_lot_produit = ?")
-                                        ->execute([$lot['code_lot_produit']]);
-                                }
-                                $qteRestante -= $qteLot;
-                            }
                         }
                     }
 
-                    if ($avance > 0) {
-                        // Solde de la caisse AVANT encaissement (pour la traçabilité de la transaction)
-                        $stmtSolde = $pdo->prepare("SELECT solde_actuel FROM caisses WHERE caisse_id = ? FOR UPDATE");
+                    // 4. TRANSACTION CAISSE (si paiement effectué)
+                    if (!$is_attente && $avance > 0) {
+                        $stmtSolde = $pdo->prepare("SELECT solde, statut FROM caisse WHERE caisse_id = ? FOR UPDATE");
                         $stmtSolde->execute([CAISSE_ID]);
-                        $soldeAvant = floatval($stmtSolde->fetchColumn());
+                        $caisseRow = $stmtSolde->fetch(PDO::FETCH_ASSOC);
+                        if ($caisseRow === false) {
+                            throw new Exception("Caisse introuvable (caisse_id='" . CAISSE_ID . "') : le paiement n'a pas pu être lié à une caisse.");
+                        }
+                        if ($caisseRow['statut'] !== 'Actif') {
+                            throw new Exception("Cette caisse est inactive : impossible d'enregistrer un paiement dessus. Réactivez la caisse avant de continuer.");
+                        }
+                        // Le statut de la caisse ne suffit pas : on vérifie qu'une journée est
+                        // réellement en cours (la fermeture de journée ne modifie pas ce statut).
+                        $stmtJC = $pdo->prepare("SELECT COUNT(*) FROM journees_caisse WHERE caisse_id = ? AND statut = 'OUVERTE'");
+                        $stmtJC->execute([CAISSE_ID]);
+                        if ($stmtJC->fetchColumn() == 0) {
+                            throw new Exception("Aucune journée de caisse n'est ouverte pour cette caisse : impossible d'enregistrer un paiement. Ouvrez la caisse avant de continuer.");
+                        }
+                        $soldeAvant = floatval($caisseRow['solde']);
                         $soldeApres = $soldeAvant + $avance;
-
                         $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
-                        $stmtTr = $pdo->prepare("INSERT INTO transaction
-                                (numero_transaction, date_transaction, heure_transaction, montant_transaction, frais_transaction, montant_total,
-                                 type_transaction, objet_transaction, contact_id, utilisateur_id, caisse_id, facture_id, reference_commande,
-                                 mode_reglement, valider_par, solde_avant_caisse, solde_apres_caisse, etat_transaction)
-                            VALUES (?, CURDATE(), CURTIME(), ?, 0, ?, 'Entree', 'Vente comptoir', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Succes')");
-                        $stmtTr->execute([
-                            $numTrans, $avance, $avance,
-                            $client_id, USER_ID, CAISSE_ID, $numFacture, $numFacture,
-                            $payment_mode, USER_ID, $soldeAvant, $soldeApres
-                        ]);
 
-                        $pdo->prepare("UPDATE caisses SET solde_actuel = ? WHERE caisse_id = ?")
-                            ->execute([$soldeApres, CAISSE_ID]);
+                        $stmtTr = $pdo->prepare("INSERT INTO transaction
+                            (numero_transaction, date_transaction, heure_transaction, montant_transaction, frais_transaction, montant_total, type_transaction, objet_transaction, caisse_id, facture_id, mode_reglement, utilisateur_id, etat_transaction)
+                            VALUES (?, CURDATE(), CURTIME(), ?, 0, ?, 'Entree', 'Vente comptoir', ?, ?, ?, ?, 'Succes')");
+                        $stmtTr->execute([$numTrans, $avance, $avance, CAISSE_ID, $numDocument, $mode_reglement, USER_ID]);
+
+                        $stmtMaj = $pdo->prepare("UPDATE caisse SET solde = ? WHERE caisse_id = ? AND statut = 'Actif'");
+                        $stmtMaj->execute([$soldeApres, CAISSE_ID]);
+                        if ($stmtMaj->rowCount() === 0) {
+                            throw new Exception("La mise à jour du solde de la caisse (caisse_id='" . CAISSE_ID . "') n'a affecté aucune ligne (caisse fermée entre-temps ?).");
+                        }
                     }
 
                     $pdo->commit();
-                    echo json_encode(['success' => true, 'facture' => $numFacture, 'reste' => $reste, 'totaux' => ['ht' => $montantHT, 'taxe' => $taxe, 'remise' => $remise, 'ttc' => $montantTTC, 'reste' => $reste]]);
+                    echo json_encode([
+                        'success' => true,
+                        'document' => $numDocument,
+                        'type_document' => $categorieDocument,
+                        'bon_livraison' => $numBL,
+                        'reste' => $reste,
+                        'etat' => $etatFacture,
+                        'statut' => $statutFacture,
+                        'en_attente' => $is_attente,
+                        'lots' => $lotsData,
+                        'totaux' => [
+                            'ht' => $montantHT,
+                            'taxe' => $taxe,
+                            'remise' => $remise,
+                            'ttc' => $montantTTC,
+                            'reste' => $reste,
+                            'avance' => $avance
+                        ]
+                    ]);
                 } catch (Exception $e) {
                     $pdo->rollBack();
                     throw $e;
@@ -428,390 +544,31 @@ if ($isAjax && $action) {
     }
 }
 
-// ---- EXPORT PDF : TICKET ou FACTURE COMPLÈTE ----
-if (isset($_POST['export_pdf']) && $_POST['export_pdf'] == '1' && !empty($_POST['numero'])) {
-    error_reporting(0);
-    while (ob_get_level()) ob_end_clean();
+// - RÉCUPÉRATION DES DONNÉES POUR LA PAGE -
+$taxes = $pdo->query("SELECT * FROM taxe WHERE etat_taxe = 'ACTIF' ORDER BY type_taxe, taux_taxe")->fetchAll();
 
-    $numero = $_POST['numero'];
-    $format = $_POST['format'] ?? 'facture'; // 'ticket' ou 'facture'
+$categories = $pdo->query("SELECT DISTINCT c.titre_categorie
+                           FROM produit p
+                           JOIN categorie c ON p.categorie_id = c.code_categorie
+                           WHERE c.titre_categorie IS NOT NULL AND c.titre_categorie <> ''
+                           ORDER BY c.titre_categorie ASC")->fetchAll(PDO::FETCH_COLUMN);
 
-    // Récupération des données de la facture
-    $stmt = $pdo->prepare("SELECT f.*, c.nom_prenom_contact, c.adresse_contact, c.telephone_contact, c.email_contact,
-        u.nom_prenom AS vendeur_nom
-        FROM facture f
-        LEFT JOIN contact c ON f.contact_id = c.code_contact
-        LEFT JOIN utilisateur u ON f.utilisateur_id = u.id
-        WHERE f.numero_facture = ?");
-    $stmt->execute([$numero]);
-    $facture = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (!$facture) die('Facture introuvable');
-
-    // Lignes de commande
-    $stmt = $pdo->prepare("SELECT c.*, p.titre_produit
-        FROM commande c
-        LEFT JOIN produit p ON c.produit_id = p.code_produit
-        WHERE c.facture_id = ?");
-    $stmt->execute([$numero]);
-    $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    // --- SI FORMAT TICKET ---
-    if ($format === 'ticket') {
-        $pdf = new FPDF('P', 'mm', array(80, 200)); // format ticket 80mm large
-        $pdf->AddPage();
-        $pdf->SetFont('Courier', '', 10);
-        $pdf->SetMargins(5, 5, 5);
-        $pdf->SetAutoPageBreak(true, 5);
-
-        // En-tête
-        $pdf->SetFont('Courier', 'B', 14);
-        $pdf->Cell(70, 8, 'CAISSE COMPTOIR', 0, 1, 'C');
-        $pdf->SetFont('Courier', '', 10);
-        $date = date('d/m/Y H:i:s');
-        $pdf->Cell(70, 5, $date, 0, 1, 'C');
-        $pdf->Ln(2);
-
-        // Client et facture
-        $client = $facture['nom_prenom_contact'] ?? 'Client inconnu';
-        $code = $facture['contact_id'] ?? '';
-        $pdf->Cell(70, 5, 'Client: ' . $client . ' (' . $code . ')', 0, 1, 'L');
-        $pdf->Cell(70, 5, 'Facture: ' . $facture['numero_facture'], 0, 1, 'L');
-        $pdf->Ln(2);
-
-        $pdf->SetDrawColor(0);
-        $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
-        $pdf->Ln(2);
-
-        $pdf->SetFont('Courier', 'B', 9);
-        $pdf->Cell(30, 5, 'Produit', 0, 0, 'L');
-        $pdf->Cell(12, 5, 'Qte', 0, 0, 'C');
-        $pdf->Cell(15, 5, 'Prix', 0, 0, 'R');
-        $pdf->Cell(13, 5, 'Montant', 0, 1, 'R');
-        $pdf->SetFont('Courier', '', 9);
-
-        foreach ($lignes as $l) {
-            $nom = substr($l['titre_produit'] ?? $l['produit_id'], 0, 20);
-            $qte = (int)$l['quantite_commande'];
-            $pu = (float)$l['prix_commande'];
-            $total = (float)$l['montant_commande'];
-            $pdf->Cell(30, 5, $nom, 0, 0, 'L');
-            $pdf->Cell(12, 5, $qte, 0, 0, 'C');
-            $pdf->Cell(15, 5, number_format($pu, 0, ',', ' ') . ' FCFA', 0, 0, 'R');
-            $pdf->Cell(13, 5, number_format($total, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
-        }
-
-        $pdf->Ln(2);
-        $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
-        $pdf->Ln(2);
-
-        $ht = (float)$facture['montant_ht'];
-        $ttc = (float)$facture['montant_ttc'];
-        $avance = (float)$facture['avance'];
-        $pdf->SetFont('Courier', 'B', 10);
-        $pdf->Cell(50, 6, 'HT', 0, 0, 'L');
-        $pdf->Cell(20, 6, number_format($ht, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
-        $pdf->Cell(50, 6, 'TTC', 0, 0, 'L');
-        $pdf->Cell(20, 6, number_format($ttc, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
-        $pdf->Cell(50, 6, 'Avance', 0, 0, 'L');
-        $pdf->Cell(20, 6, number_format($avance, 0, ',', ' ') . ' FCFA', 0, 1, 'R');
-
-        $pdf->Ln(2);
-        $pdf->Line(5, $pdf->GetY(), 75, $pdf->GetY());
-        $pdf->Ln(3);
-        $pdf->SetFont('Courier', 'B', 12);
-        $pdf->Cell(70, 8, 'Merci !', 0, 1, 'C');
-
-        while (ob_get_level()) ob_end_clean();
-        $pdf->Output('I', 'Ticket_' . $facture['numero_facture'] . '.pdf');
-        exit;
-    }
-
-    // --- SINON : FACTURE COMPLÈTE (paysage) ---
-    $boutique = $pdo->query("SELECT * FROM boutique WHERE etat_boutique = 'Actif' LIMIT 1")->fetch(PDO::FETCH_ASSOC);
-    if (!$boutique) {
-        $boutique = [
-            'nom_boutique' => 'ABC DISTRIBUTION SARL',
-            'adresse_boutique' => '01 BP 1234 Bouaké 01',
-            'ville_boutique' => 'Bouaké',
-            'pays_boutique' => 'Côte d\'Ivoire',
-            'telephone_boutique' => '+225 07 08 09 10 11',
-            'email_boutique' => 'contact@abcdistribution.ci'
-        ];
-    }
-
-    $pdf = new FPDF('L', 'mm', 'A4');
-    $pdf->AddPage();
-    $pdf->SetFont('Arial', '', 10);
-
-    $blueDark = [0, 51, 102];
-    $blueLight = [240, 245, 255];
-    $grayBg = [245, 245, 245];
-
-    $toLatin = function ($chaine) {
-        return safeText($chaine);
-    };
-
-    $yStart = 10;
-    $pdf->SetFont('Arial', 'B', 14);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text(10, $yStart + 6, $toLatin(strtoupper($boutique['nom_boutique'])));
-
-    $pdf->SetFont('Arial', '', 8);
-    $pdf->SetTextColor(80, 80, 80);
-    $pdf->Text(10, $yStart + 11, $toLatin("Commerce Général - Distribution de Produits"));
-    $pdf->Text(10, $yStart + 15, $toLatin($boutique['adresse_boutique'] . ', ' . $boutique['ville_boutique'] . ', ' . $boutique['pays_boutique']));
-    $pdf->Text(10, $yStart + 19, $toLatin("Tél. : " . $boutique['telephone_boutique']));
-    $pdf->Text(10, $yStart + 23, $toLatin("Email : " . $boutique['email_boutique']));
-    $pdf->Text(10, $yStart + 27, $toLatin("N° CC : CI-BOUA-2020-B-12345   N° Contribuable : 1949444F"));
-
-    $pdf->SetFont('Arial', 'B', 24);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text(125, $yStart + 10, $toLatin('FACTURE'));
-
-    $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Rect(115, $yStart + 13, 50, 10, 'F');
-    $pdf->SetTextColor(255, 255, 255);
-    $pdf->SetFont('Arial', 'B', 12);
-    $pdf->Text(122, $yStart + 20, $toLatin('N° ' . $facture['numero_facture']));
-
-    $pdf->SetFont('Arial', '', 9);
-    $pdf->SetTextColor(0, 0, 0);
-    $xRight = 200;
-    $yInfo = $yStart;
-    $pdf->Text($xRight, $yInfo + 5, $toLatin('Date de facture'));
-    $pdf->Text($xRight + 40, $yInfo + 5, ': ' . date('d/m/Y', strtotime($facture['date_facture'])));
-    $echeance = date('d/m/Y', strtotime($facture['date_facture'] . ' + 30 days'));
-    $pdf->Text($xRight, $yInfo + 10, $toLatin("Date d'échéance"));
-    $pdf->Text($xRight + 40, $yInfo + 10, ': ' . $echeance);
-    $pdf->Text($xRight, $yInfo + 15, $toLatin("Mode de paiement"));
-    $pdf->Text($xRight + 40, $yInfo + 15, ': ' . ($facture['mode_reglement'] ?? 'Virement bancaire'));
-
-    $pdf->SetDrawColor(200, 200, 200);
-    $pdf->Line(10, 42, 287, 42);
-
-    $yBlocks = 48;
-    $wBlock = (277 - 10) / 2;
-    $drawAddressBlock = function ($pdf, $x, $y, $w, $title, $name, $address, $phone, $email) use ($toLatin, $blueDark, $grayBg) {
-        $h = 30;
-        $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
-        $pdf->Rect($x, $y, 40, 6, 'F');
-        $pdf->SetTextColor(255, 255, 255);
-        $pdf->SetFont('Arial', 'B', 8);
-        $pdf->Text($x + 3, $y + 4.5, $toLatin(strtoupper($title)));
-        $pdf->SetFillColor($grayBg[0], $grayBg[1], $grayBg[2]);
-        $pdf->Rect($x, $y + 6, $w, $h - 6, 'F');
-        $pdf->SetDrawColor(200, 200, 200);
-        $pdf->Rect($x, $y + 6, $w, $h - 6, 'D');
-        $pdf->SetTextColor(0, 0, 0);
-        $pdf->SetFont('Arial', 'B', 9);
-        $pdf->Text($x + 3, $y + 13, $toLatin($name));
-        $pdf->SetFont('Arial', '', 8);
-        $pdf->Text($x + 3, $y + 18, $toLatin($address));
-        $pdf->Text($x + 3, $y + 23, $toLatin('Tél. : ' . $phone));
-        $pdf->Text($x + 3, $y + 28, $toLatin('Email : ' . $email));
-    };
-
-    $drawAddressBlock(
-        $pdf,
-        10,
-        $yBlocks,
-        $wBlock,
-        'VENDEUR',
-        $boutique['nom_boutique'],
-        $boutique['ville_boutique'] . ', ' . $boutique['pays_boutique'],
-        $boutique['telephone_boutique'],
-        $boutique['email_boutique']
-    );
-
-    $drawAddressBlock(
-        $pdf,
-        10 + $wBlock + 10,
-        $yBlocks,
-        $wBlock,
-        'CLIENT',
-        $facture['nom_prenom_contact'],
-        $facture['adresse_contact'] ?? '',
-        $facture['telephone_contact'] ?? '',
-        $facture['email_contact'] ?? ''
-    );
-
-    $yTable = 80;
-    $pageBottom = 195;
-    $colWidths = [25, 100, 28, 22, 27, 35, 40];
-    $headers = ['RÉFÉRENCE', 'DÉSIGNATION', 'NB UNITÉ/CARTON', 'CARTON', 'QTÉ (UNITÉ)', 'P.U. (FCFA)', 'MONTANT (FCFA)'];
-    $headerH = 7;
-    $rowH = 7;
-
-    $drawTableHeader = function () use ($pdf, $colWidths, $headers, $headerH, $toLatin, $blueDark, &$yTable) {
-        $pdf->SetFillColor($blueDark[0], $blueDark[1], $blueDark[2]);
-        $pdf->SetTextColor(255, 255, 255);
-        $pdf->SetFont('Arial', 'B', 7);
-        $x = 10;
-        foreach ($headers as $i => $h) {
-            $label = $toLatin($h);
-            $pdf->Rect($x, $yTable, $colWidths[$i], $headerH, 'F');
-            $pdf->Text($x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2), $yTable + 5.5, $label);
-            $x += $colWidths[$i];
-        }
-    };
-    $drawTableHeader();
-
-    $pdf->SetTextColor(0, 0, 0);
-    $pdf->SetFont('Arial', '', 8);
-    $yCurrent = $yTable + $headerH;
-    $totalHT = 0;
-
-    foreach ($lignes as $ligne) {
-        if ($yCurrent + $rowH > $pageBottom) {
-            $pdf->AddPage();
-            $yTable = 15;
-            $yCurrent = $yTable + $headerH;
-            $drawTableHeader();
-            $pdf->SetTextColor(0, 0, 0);
-            $pdf->SetFont('Arial', '', 8);
-        }
-
-        $ref = $ligne['produit_id'];
-        $des = substr($ligne['titre_produit'] ?? $ligne['produit_id'], 0, 45);
-        $unites_par_carton = (int)($ligne['facteur_conversion'] ?? 1);
-        $qte_commande = (int)$ligne['quantite_commande'];
-        $nb_cartons = ($unites_par_carton > 0) ? ceil($qte_commande / $unites_par_carton) : 0;
-        $pu = (float)$ligne['prix_commande'];
-        $total_ligne = (float)$ligne['montant_commande'];
-        $totalHT += $total_ligne;
-
-        $data = [
-            $ref,
-            $des,
-            $unites_par_carton,
-            $nb_cartons,
-            $qte_commande,
-            number_format($pu, 0, ',', ' '),
-            number_format($total_ligne, 0, ',', ' ')
-        ];
-
-        $x = 10;
-        foreach ($data as $i => $val) {
-            $align = ($i >= 2 && $i != 3) ? 'C' : (($i >= 5) ? 'R' : 'L');
-            $label = $toLatin((string)$val);
-            $txtX = ($align == 'R')
-                ? $x + $colWidths[$i] - 2 - $pdf->GetStringWidth($label)
-                : (($align == 'C') ? $x + ($colWidths[$i] / 2) - ($pdf->GetStringWidth($label) / 2) : $x + 1);
-
-            $pdf->Rect($x, $yCurrent, $colWidths[$i], $rowH, 'D');
-            $pdf->Text($txtX, $yCurrent + 5, $label);
-            $x += $colWidths[$i];
-        }
-        $yCurrent += $rowH;
-    }
-
-    $yTotals = $yCurrent + 6;
-    $wObs = 170;
-    $hObs = 28;
-    $pdf->SetDrawColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->SetLineWidth(0.3);
-    $pdf->Rect(10, $yTotals, $wObs, $hObs, 'D');
-    $pdf->SetFont('Arial', 'B', 9);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text(12, $yTotals + 6, $toLatin('Observations :'));
-    $pdf->SetFont('Arial', '', 8);
-    $pdf->SetTextColor(0, 0, 0);
-    $pdf->SetXY(12, $yTotals + 9);
-    $pdf->MultiCell($wObs - 4, 5, $toLatin($facture['titre_facture'] ?? "Merci de votre confiance.\nVeuillez effectuer le paiement avant la date d'échéance."), 0, 'L');
-
-    $xTot = 10 + $wObs + 10;
-    $wTot = 287 - $xTot;
-    $hTot = 7;
-    $pdf->SetFont('Arial', '', 9);
-    $pdf->SetTextColor(0, 0, 0);
-
-    $taxe = (float)($facture['taxe'] ?? 0);
-    $remise = (float)($facture['remise'] ?? 0);
-    $montantTtcSaisi = (float)($facture['montant_ttc'] ?? 0);
-    $totalTTC = $montantTtcSaisi > 0 ? $montantTtcSaisi : ($totalHT * (1 + $taxe / 100) - $remise);
-
-    $pdf->Rect($xTot, $yTotals, $wTot, $hTot, 'D');
-    $pdf->Text($xTot + 2, $yTotals + 5, $toLatin('TOTAL HORS TAXES (HT)'));
-    $pdf->SetXY($xTot, $yTotals + 5);
-    $pdf->Cell($wTot - 2, 0, number_format($totalHT, 0, ',', ' '), 0, 0, 'R');
-
-    $pdf->Rect($xTot, $yTotals + $hTot, $wTot, $hTot, 'D');
-    $pdf->Text($xTot + 2, $yTotals + $hTot + 5, $toLatin('TVA (' . $taxe . '%)'));
-    $pdf->SetXY($xTot, $yTotals + $hTot + 5);
-    $pdf->Cell($wTot - 2, 0, number_format($totalHT * $taxe / 100, 0, ',', ' '), 0, 0, 'R');
-
-    $pdf->Rect($xTot, $yTotals + ($hTot * 2), $wTot, $hTot, 'D');
-    $pdf->Text($xTot + 2, $yTotals + ($hTot * 2) + 5, $toLatin('REMISE'));
-    $pdf->SetXY($xTot, $yTotals + ($hTot * 2) + 5);
-    $pdf->Cell($wTot - 2, 0, number_format($remise, 0, ',', ' '), 0, 0, 'R');
-
-    $pdf->SetFillColor($blueLight[0], $blueLight[1], $blueLight[2]);
-    $pdf->Rect($xTot, $yTotals + ($hTot * 3), $wTot, $hTot + 2, 'FD');
-    $pdf->SetFont('Arial', 'B', 10);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text($xTot + 2, $yTotals + ($hTot * 3) + 5.5, $toLatin('NET À PAYER (TTC)'));
-    $pdf->SetXY($xTot, $yTotals + ($hTot * 3) + 5.5);
-    $pdf->Cell($wTot - 2, 0, number_format($totalTTC, 0, ',', ' '), 0, 0, 'R');
-
-    $hSig = 26;
-    $ySig = $yTotals + $hObs + 8;
-    if ($ySig + $hSig > $pageBottom + 15) {
-        $pdf->AddPage();
-        $ySig = 20;
-    }
-    $wSig = 133;
-
-    $pdf->SetDrawColor(200, 200, 200);
-    $pdf->Rect(10, $ySig, $wSig, $hSig, 'D');
-    $pdf->SetFont('Arial', 'B', 9);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text(12, $ySig + 5, $toLatin('Le vendeur'));
-    $pdf->SetFont('Arial', '', 8);
-    $pdf->SetTextColor(0, 0, 0);
-    $pdf->Text(12, $ySig + 10, $toLatin('Nom et Signature'));
-    $pdf->SetDrawColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Rect(60, $ySig + 5, 70, $hSig - 6, 'D');
-    $pdf->SetFont('Arial', 'B', 7);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text(63, $ySig + 9, $toLatin($boutique['nom_boutique']));
-    $pdf->SetFont('Arial', '', 6);
-    $pdf->Text(63, $ySig + 13, $toLatin($boutique['adresse_boutique']));
-    $pdf->Text(63, $ySig + 17, $toLatin('Tél. : ' . $boutique['telephone_boutique']));
-
-    $xClient = 10 + $wSig + 21;
-    $pdf->SetDrawColor(200, 200, 200);
-    $pdf->Rect($xClient, $ySig, $wSig, $hSig, 'D');
-    $pdf->SetFont('Arial', 'B', 9);
-    $pdf->SetTextColor($blueDark[0], $blueDark[1], $blueDark[2]);
-    $pdf->Text($xClient + 2, $ySig + 5, $toLatin('Le client'));
-    $pdf->SetFont('Arial', '', 8);
-    $pdf->SetTextColor(0, 0, 0);
-    $pdf->Text($xClient + 2, $ySig + 10, $toLatin('Nom et Signature'));
-
-    while (ob_get_level()) ob_end_clean();
-    $pdf->Output('I', 'Facture_' . $facture['numero_facture'] . '.pdf');
-    exit;
-}
-
-// ---- RÉCUPÉRATION DES DONNÉES POUR LA PAGE ----
-$taxes = $pdo->query("SELECT * FROM taxe WHERE etat_taxe = 'Actif' ORDER BY type_taxe, taux_taxe")->fetchAll();
-$stmtCaisseInfo = $pdo->prepare("SELECT * FROM caisses WHERE caisse_id = ?");
+$stmtCaisseInfo = $pdo->prepare("SELECT * FROM caisse WHERE caisse_id = ?");
 $stmtCaisseInfo->execute([CAISSE_ID]);
 $caisse = $stmtCaisseInfo->fetch();
+
 $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->fetch();
 ?>
 <!DOCTYPE html>
 <html lang="fr">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Caisse - Vente Comptoir</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css">
     <style>
-        /* Styles identiques à la version précédente (inchangés) */
         :root {
             --color-primary: #4f46e5;
             --color-primary-dark: #3730a3;
@@ -825,2225 +582,951 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             --color-gray-50: #f8fafc;
             --color-gray-100: #f1f5f9;
             --color-gray-200: #e2e8f0;
-            --color-gray-300: #cbd5e1;
-            --color-gray-400: #94a3b8;
             --color-gray-500: #64748b;
-            --color-gray-600: #475569;
-            --color-gray-700: #334155;
             --color-gray-800: #1e293b;
-            --color-gray-900: #0f172a;
             --bg-body: #f1f5f9;
             --bg-surface: #ffffff;
-            --bg-muted: #f8fafc;
             --border-color: #e2e8f0;
-            --text-primary: #0f172a;
-            --text-secondary: #334155;
-            --text-tertiary: #64748b;
-            --text-quaternary: #94a3b8;
-            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
-            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
-            --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.08);
             --radius-sm: 10px;
-            --radius-md: 14px;
-            --radius-lg: 20px;
-            --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
         }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            font-family: 'Inter', sans-serif;
-            background: var(--bg-body);
-            color: var(--text-primary);
-            height: 100vh;
-            overflow: hidden;
-            font-size: 14px;
-            display: flex;
-            flex-direction: column;
-        }
-
-        h1,
-        h2,
-        h3,
-        h4,
-        h5,
-        h6 {
-            font-family: 'Outfit', sans-serif;
-            font-weight: 700;
-            letter-spacing: -0.02em;
-        }
-
-        button {
-            cursor: pointer;
-            font-family: inherit;
-            border: none;
-        }
-
-        input,
-        select {
-            font-family: inherit;
-            outline: none;
-        }
-
-        ::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: #cbd5e1;
-            border-radius: 3px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: transparent;
-        }
-
-        .pos-layout {
-            display: flex;
-            flex: 1;
-            overflow: hidden;
-        }
-
-        .pos-left {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            padding: 16px 20px;
-            overflow: hidden;
-        }
-
-        .pos-right {
-            width: 480px;
-            background: var(--bg-surface);
-            border-left: 1px solid var(--border-color);
-            display: flex;
-            flex-direction: column;
-            flex-shrink: 0;
-            min-height: 0;
-        }
-
-        .search-box {
-            display: flex;
-            align-items: center;
-            background: var(--bg-surface);
-            border: 2px solid var(--border-color);
-            border-radius: var(--radius-sm);
-            padding: 0 16px;
-            height: 52px;
-            transition: all var(--transition-base);
-            position: relative;
-        }
-
-        .search-box:focus-within {
-            border-color: var(--color-primary);
-            box-shadow: 0 0 0 4px var(--color-primary-soft);
-        }
-
-        .search-box.is-loading {
-            border-color: var(--color-warning);
-            opacity: .8;
-        }
-
-        .search-box i.bi-search {
-            font-size: 20px;
-            color: var(--color-primary);
-            margin-right: 12px;
-        }
-
-        .search-box input {
-            flex: 1;
-            border: none;
-            background: transparent;
-            font-size: 15px;
-            font-weight: 500;
-            color: var(--text-primary);
-        }
-
-        .search-box input::placeholder {
-            color: var(--text-tertiary);
-        }
-
-        .search-box .clear-btn {
-            color: #94a3b8;
-            font-size: 16px;
-            display: none;
-            background: none;
-            padding: 4px;
-        }
-
-        .search-box .clear-btn:hover {
-            color: var(--color-danger);
-        }
-
-        .search-box .result-count {
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--text-tertiary);
-            background: var(--bg-muted);
-            padding: 4px 10px;
-            border-radius: 6px;
-            white-space: nowrap;
-            margin-left: 8px;
-        }
-
-        .search-box .result-count.has-results {
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-        }
-
-        .search-box .spinner-inline {
-            width: 18px;
-            height: 18px;
-            border: 2.5px solid var(--border-color);
-            border-top-color: var(--color-primary);
-            border-radius: 50%;
-            animation: spin .6s linear infinite;
-            margin-right: 10px;
-            flex-shrink: 0;
-        }
-
-        @keyframes spin {
-            to {
-                transform: rotate(360deg);
-            }
-        }
-
-        .kbd-hint {
-            font-size: 10px;
-            color: var(--text-tertiary);
-            margin-top: 4px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .kbd {
-            background: #f1f5f9;
-            border: 1px solid var(--border-color);
-            padding: 1px 5px;
-            border-radius: 3px;
-            font-family: monospace;
-            font-size: 10px;
-            font-weight: 600;
-        }
-
-        .category-bar {
-            display: flex;
-            gap: 6px;
-            margin-bottom: 14px;
-            overflow-x: auto;
-            padding-bottom: 4px;
-        }
-
-        .category-bar.hidden {
-            display: none;
-        }
-
-        .cat-btn {
-            padding: 7px 14px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 600;
-            background: var(--bg-surface);
-            color: var(--text-tertiary);
-            border: 1.5px solid var(--border-color);
-            transition: all .15s;
-            white-space: nowrap;
-        }
-
-        .cat-btn:hover {
-            border-color: #bfdbfe;
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-        }
-
-        .cat-btn.active {
-            background: var(--color-primary);
-            color: #fff;
-            border-color: var(--color-primary);
-        }
-
-        .products-scroll {
-            flex: 1;
-            overflow-y: auto;
-            padding-right: 4px;
-        }
-
-        .product-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 12px;
-        }
-
-        .empty-state {
-            grid-column: 1/-1;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            color: var(--text-tertiary);
-            text-align: center;
-            padding-top: 40px;
-        }
-
-        .empty-state i {
-            font-size: 48px;
-            margin-bottom: 12px;
-            opacity: .15;
-            color: var(--color-primary);
-        }
-
-        .empty-state h3 {
-            font-size: 15px;
-            font-weight: 600;
-            color: var(--text-primary);
-            margin-bottom: 4px;
-        }
-
-        .empty-state p {
-            font-size: 13px;
-        }
-
-        .product-card {
-            background: var(--bg-surface);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius-sm);
-            padding: 14px;
-            cursor: pointer;
-            transition: all .15s ease;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            min-height: 145px;
-            position: relative;
-        }
-
-        .product-card:hover {
-            border-color: var(--color-primary);
-            box-shadow: 0 4px 12px rgba(79, 70, 229, .12);
-            transform: translateY(-2px);
-        }
-
-        .product-card.in-cart {
-            border-color: var(--color-success);
-            background: #f0fdf4;
-        }
-
-        .product-card.in-cart::after {
-            content: '✓';
-            position: absolute;
-            top: 8px;
-            right: 8px;
-            background: var(--color-success);
-            color: #fff;
-            width: 22px;
-            height: 22px;
-            border-radius: 50%;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
-        }
-
-        .pc-top {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 8px;
-        }
-
-        .pc-title {
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-primary);
-            line-height: 1.4;
-            flex: 1;
-            padding-right: 6px;
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-        }
-
-        .pc-cat {
-            font-size: 10px;
-            font-weight: 600;
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-            padding: 2px 8px;
-            border-radius: 4px;
-            margin-bottom: 6px;
-            display: inline-block;
-        }
-
-        .pc-stock {
-            font-size: 10px;
-            font-weight: 700;
-            padding: 4px 8px;
-            border-radius: 4px;
-            text-transform: uppercase;
-        }
-
-        .stock-in {
-            background: #dcfce7;
-            color: #15803d;
-        }
-
-        .stock-low {
-            background: #fef9c3;
-            color: #a16207;
-        }
-
-        .stock-out {
-            background: #fee2e2;
-            color: #b91c1c;
-        }
-
-        .pc-bottom {
-            border-top: 1px dashed var(--border-color);
-            padding-top: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-end;
-        }
-
-        .pc-price {
-            font-size: 17px;
-            font-weight: 700;
-            color: var(--color-primary);
-        }
-
-        .pc-code {
-            font-size: 10px;
-            color: var(--text-tertiary);
-            font-family: monospace;
-        }
-
-        .cart-header {
-            padding: 10px 16px;
-            border-bottom: 1px solid var(--border-color);
-            background: var(--bg-surface);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .cart-header h2 {
-            font-size: 15px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            color: var(--text-primary);
-        }
-
-        .cart-badge {
-            background: var(--color-primary);
-            color: #fff;
-            font-size: 11px;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-weight: 600;
-        }
-
-        .client-zone {
-            padding: 6px 12px;
-            border-bottom: 1px solid var(--border-color);
-            background: var(--color-primary-soft);
-        }
-
-        .client-search-wrapper {
-            display: flex;
-            gap: 6px;
-            position: relative;
-        }
-
-        .client-search-wrapper input {
-            flex: 1;
-            border: 1px solid #bfdbfe;
-            border-radius: 6px;
-            padding: 6px 10px;
-            font-size: 12px;
-            background: #fff;
-            transition: all .2s;
-            height: 34px;
-        }
-
-        .client-search-wrapper input:focus {
-            border-color: var(--color-primary);
-            box-shadow: 0 0 0 3px rgba(79, 70, 229, .1);
-        }
-
-        .client-search-wrapper .btn-add {
-            background: var(--color-primary);
-            color: #fff;
-            width: 34px;
-            height: 34px;
-            border-radius: 6px;
-            font-size: 16px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: background .2s;
-        }
-
-        .client-search-wrapper .btn-add:hover {
-            background: var(--color-primary-dark);
-        }
-
-        .client-selected {
-            display: none;
-            align-items: center;
-            justify-content: space-between;
-            background: #fff;
-            border: 1px solid var(--color-primary);
-            border-radius: 6px;
-            padding: 6px 10px;
-        }
-
-        .client-selected .info h5 {
-            font-size: 13px;
-            font-weight: 700;
-            color: var(--color-primary-dark);
-            margin: 0;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .client-selected .info p {
-            font-size: 10px;
-            color: var(--text-tertiary);
-            margin: 0;
-        }
-
-        .client-selected .btn-change {
-            font-size: 10px;
-            color: var(--text-tertiary);
-            text-decoration: underline;
-            background: none;
-        }
-
-        .customer-dropdown {
-            position: absolute;
-            top: 38px;
-            left: 0;
-            right: 40px;
-            background: #fff;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            margin-top: 2px;
-            box-shadow: 0 6px 20px rgba(0, 0, 0, .12);
-            z-index: 100;
-            display: none;
-            max-height: 240px;
-            overflow-y: auto;
-        }
-
-        .customer-dropdown .dd-header {
-            padding: 6px 12px;
-            background: var(--color-primary-soft);
-            border-radius: 8px 8px 0 0;
-            font-size: 10px;
-            font-weight: 600;
-            color: var(--color-primary-dark);
-            display: flex;
-            justify-content: space-between;
-        }
-
-        .customer-item {
-            padding: 8px 12px;
-            border-bottom: 1px solid #f1f5f9;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            transition: background .1s;
-        }
-
-        .customer-item:hover {
-            background: var(--color-primary-soft);
-        }
-
-        .customer-item .ci-avatar {
-            width: 30px;
-            height: 30px;
-            border-radius: 6px;
-            background: var(--color-primary-soft);
-            color: var(--color-primary);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 14px;
-            font-weight: 700;
-            flex-shrink: 0;
-        }
-
-        .customer-item .ci-body strong {
-            display: block;
-            font-size: 12px;
-            color: var(--text-primary);
-            font-weight: 600;
-        }
-
-        .customer-item .ci-body small {
-            font-size: 10px;
-            color: var(--text-tertiary);
-            display: block;
-            margin-top: 1px;
-        }
-
-        .customer-item .ci-tags {
-            display: flex;
-            gap: 3px;
-            margin-top: 2px;
-        }
-
-        .customer-item .ci-tag {
-            font-size: 8px;
-            font-weight: 600;
-            padding: 1px 5px;
-            border-radius: 3px;
-        }
-
-        .ci-tag.tag-client {
-            background: #dcfce7;
-            color: #15803d;
-        }
-
-        .ci-tag.tag-particulier {
-            background: #fef9c3;
-            color: #a16207;
-        }
-
-        .customer-item .ci-arrow {
-            color: #cbd5e1;
-            font-size: 12px;
-        }
-
-        .customer-item:hover .ci-arrow {
-            color: var(--color-primary);
-        }
-
-        .dd-empty {
-            padding: 16px;
-            text-align: center;
-            color: var(--text-tertiary);
-            font-size: 12px;
-        }
-
-        .dd-empty i {
-            font-size: 28px;
-            opacity: .15;
-            display: block;
-            margin-bottom: 6px;
-        }
-
-        .recent-clients {
-            margin-top: 4px;
-        }
-
-        .recent-clients.hidden {
-            display: none;
-        }
-
-        .recent-clients .rc-title {
-            font-size: 10px;
-            font-weight: 600;
-            color: var(--text-tertiary);
-            margin-bottom: 3px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .recent-clients .rc-grid {
-            display: flex;
-            gap: 4px;
-            flex-wrap: wrap;
-        }
-
-        .rc-chip {
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-size: 10px;
-            font-weight: 600;
-            background: #fff;
-            color: var(--text-primary);
-            border: 1px solid var(--border-color);
-            cursor: pointer;
-            transition: all .15s;
-            display: flex;
-            align-items: center;
-            gap: 3px;
-        }
-
-        .rc-chip:hover {
-            border-color: var(--color-primary);
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-        }
-
-        .rc-chip i {
-            font-size: 9px;
-            color: var(--color-primary);
-        }
-
-        .cart-items {
-            flex: 1;
-            overflow-y: auto;
-            padding: 6px 10px;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 8px;
-            align-content: start;
-        }
-
-        .cart-empty {
-            grid-column: 1 / -1;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            color: var(--text-tertiary);
-        }
-
-        .cart-empty i {
-            font-size: 40px;
-            opacity: .15;
-            margin-bottom: 8px;
-            color: var(--color-primary);
-        }
-
-        .cart-empty p {
-            font-size: 13px;
-        }
-
-        .cart-line {
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 8px 10px;
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-            background: #fff;
-            box-shadow: 0 1px 2px rgba(0, 0, 0, .02);
-            transition: all .2s;
-            height: fit-content;
-        }
-
-        .cart-line:hover {
-            border-color: var(--color-primary);
-            box-shadow: 0 2px 8px rgba(79, 70, 229, .1);
-        }
-
-        .cl-header {
-            display: flex;
-            justify-content: space-between;
-            gap: 4px;
-            align-items: center;
-        }
-
-        .cl-name {
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--text-primary);
-            flex: 1;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .cl-lot {
-            font-size: 9px;
-            color: var(--text-tertiary);
-            background: var(--bg-muted);
-            padding: 0 6px;
-            border-radius: 3px;
-            white-space: nowrap;
-        }
-
-        .cl-remove {
-            color: #cbd5e1;
-            background: none;
-            font-size: 12px;
-            transition: color .2s;
-            flex-shrink: 0;
-        }
-
-        .cl-remove:hover {
-            color: var(--color-danger);
-        }
-
-        .cl-footer {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-        }
-
-        .qty-selector {
-            display: flex;
-            align-items: center;
-            background: var(--bg-muted);
-            border: 1px solid var(--border-color);
-            border-radius: 4px;
-            width: fit-content;
-        }
-
-        .qty-selector button {
-            width: 24px;
-            height: 24px;
-            background: none;
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--color-primary);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .qty-selector button:hover {
-            background: var(--color-primary-soft);
-        }
-
-        .qty-selector span {
-            min-width: 24px;
-            text-align: center;
-            font-weight: 600;
-            font-size: 12px;
-            color: var(--text-primary);
-        }
-
-        .cl-total {
-            font-size: 14px;
-            font-weight: 700;
-            color: var(--color-primary-dark);
-        }
-
-        .cl-unit {
-            font-size: 10px;
-            color: var(--text-tertiary);
-            text-align: right;
-        }
-
-        .cart-footer {
-            padding: 8px 12px;
-            border-top: 1px solid var(--border-color);
-            background: #fff;
-        }
-
-        .totals-split-row {
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 6px;
-        }
-
-        .split-item {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-        }
-
-        .split-label {
-            font-size: 10px;
-            color: var(--text-tertiary);
-            font-weight: 500;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .split-label select {
-            border: 1px solid var(--border-color);
-            border-radius: 3px;
-            padding: 1px 4px;
-            font-size: 10px;
-            background: #fff;
-            color: var(--text-primary);
-            width: auto;
-        }
-
-        .split-value {
-            font-size: 13px;
-            font-weight: 700;
-            color: var(--text-primary);
-        }
-
-        .total-grand {
-            display: flex;
-            justify-content: space-between;
-            padding-top: 6px;
-            margin-top: 4px;
-            border-top: 2px solid var(--border-color);
-            margin-bottom: 8px;
-        }
-
-        .total-grand span:first-child {
-            font-size: 13px;
-            font-weight: 700;
-            color: var(--text-primary);
-            align-self: center;
-        }
-
-        .total-grand span:last-child {
-            font-size: 22px;
-            font-weight: 800;
-            color: var(--color-primary);
-        }
-
-        .actions-row {
-            display: flex;
-            gap: 8px;
-        }
-
-        .btn-pay {
-            flex: 2;
-            background: var(--color-primary);
-            color: #fff;
-            padding: 10px;
-            border-radius: var(--radius-sm);
-            font-size: 13px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            transition: background .2s;
-            box-shadow: 0 4px 6px rgba(79, 70, 229, .2);
-        }
-
-        .btn-pay:hover:not(:disabled) {
-            background: var(--color-primary-dark);
-        }
-
-        .btn-pay:disabled {
-            background: #cbd5e1;
-            cursor: not-allowed;
-            box-shadow: none;
-        }
-
-        .btn-clear {
-            flex: 1;
-            background: #fff;
-            color: var(--color-danger);
-            border: 1.5px solid #fecaca;
-            padding: 8px;
-            border-radius: var(--radius-sm);
-            font-size: 12px;
-            font-weight: 600;
-            transition: all .2s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 4px;
-        }
-
-        .btn-clear:hover {
-            background: #fee2e2;
-            border-color: var(--color-danger);
-        }
-
-        /* Modales */
-        .modal-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(15, 23, 42, .5);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-        }
-
-        .modal-overlay.show {
-            display: flex;
-        }
-
-        .modal-box {
-            background: #fff;
-            border-radius: 16px;
-            width: 420px;
-            max-width: 90%;
-            box-shadow: 0 20px 25px rgba(0, 0, 0, .1);
-            max-height: 90vh;
-            overflow-y: auto;
-        }
-
-        .modal-head {
-            padding: 16px 20px;
-            border-bottom: 1px solid var(--border-color);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .modal-head h3 {
-            font-size: 16px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            color: var(--text-primary);
-        }
-
-        .modal-close {
-            background: #f1f5f9;
-            font-size: 18px;
-            color: var(--text-tertiary);
-            width: 32px;
-            height: 32px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: all .2s;
-        }
-
-        .modal-close:hover {
-            background: #fee2e2;
-            color: var(--color-danger);
-        }
-
-        .modal-body {
-            padding: 20px;
-        }
-
-        .modal-foot {
-            padding: 16px 20px;
-            border-top: 1px solid var(--border-color);
-            display: flex;
-            justify-content: flex-end;
-            gap: 12px;
-        }
-
-        .form-group {
-            margin-bottom: 16px;
-        }
-
-        .form-group label {
-            display: block;
-            font-size: 12px;
-            font-weight: 600;
-            margin-bottom: 6px;
-            color: var(--text-tertiary);
-        }
-
-        .form-group input,
-        .form-group select {
-            width: 100%;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 10px 12px;
-            font-size: 14px;
-            background: #f8fafc;
-            transition: all .2s;
-        }
-
-        .form-group input:focus,
-        .form-group select:focus {
-            border-color: var(--color-primary);
-            background: #fff;
-            box-shadow: 0 0 0 3px var(--color-primary-soft);
-        }
-
-        .btn-secondary {
-            background: #f1f5f9;
-            color: var(--text-primary);
-            padding: 10px 16px;
-            border-radius: 8px;
-            font-weight: 600;
-            font-size: 14px;
-            border: 1px solid var(--border-color);
-        }
-
-        .btn-secondary:hover {
-            background: #e2e8f0;
-        }
-
-        .btn-primary {
-            background: var(--color-primary);
-            color: #fff;
-            padding: 10px 16px;
-            border-radius: 8px;
-            font-weight: 600;
-            font-size: 14px;
-            transition: background .2s;
-        }
-
-        .btn-primary:hover {
-            background: var(--color-primary-dark);
-        }
-
-        .pay-modes {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 16px;
-        }
-
-        .pay-mode {
-            flex: 1;
-            padding: 12px;
-            border: 2px solid var(--border-color);
-            border-radius: 10px;
-            text-align: center;
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-tertiary);
-            background: #f8fafc;
-            transition: all .2s;
-        }
-
-        .pay-mode.active {
-            border-color: var(--color-primary);
-            color: var(--color-primary);
-            background: var(--color-primary-soft);
-        }
-
-        .pay-mode i {
-            display: block;
-            font-size: 20px;
-            margin-bottom: 4px;
-        }
-
-        .change-box {
-            background: var(--color-primary-soft);
-            border: 1px solid #bfdbfe;
-            padding: 16px;
-            border-radius: 10px;
-            text-align: center;
-            margin-top: 16px;
-        }
-
-        .change-box .lbl {
-            font-size: 13px;
-            color: var(--color-primary-dark);
-            font-weight: 600;
-            margin-bottom: 4px;
-        }
-
-        .change-box .val {
-            font-size: 28px;
-            font-weight: 800;
-            color: var(--color-primary);
-        }
-
-        .lot-select-modal .modal-box {
-            width: 480px;
-        }
-
-        .lot-option {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 10px 14px;
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            margin-bottom: 8px;
-            cursor: pointer;
-            transition: all .15s;
-        }
-
-        .lot-option:hover {
-            border-color: var(--color-primary);
-            background: var(--color-primary-soft);
-        }
-
-        .lot-option.selected {
-            border-color: var(--color-primary);
-            background: var(--color-primary-soft);
-        }
-
-        .lot-option .lot-info {
-            flex: 1;
-        }
-
-        .lot-option .lot-info strong {
-            display: block;
-            font-size: 14px;
-            color: var(--text-primary);
-        }
-
-        .lot-option .lot-info small {
-            font-size: 11px;
-            color: var(--text-tertiary);
-        }
-
-        .lot-option .lot-stock {
-            font-weight: 700;
-            color: var(--color-primary);
-        }
-
-        .toast-notif {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            background: var(--text-primary);
-            color: #fff;
-            padding: 12px 20px;
-            border-radius: 8px;
-            font-size: 13px;
-            font-weight: 600;
-            z-index: 2000;
-            display: none;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, .15);
-            align-items: center;
-            gap: 8px;
-        }
-
-        .toast-notif.error {
-            background: var(--color-danger);
-        }
-
-        .toast-notif.success {
-            background: var(--color-primary);
-        }
-
-        @media print {
-            body * {
-                visibility: hidden;
-            }
-
-            #printZone,
-            #printZone * {
-                visibility: visible;
-            }
-
-            #printZone {
-                position: absolute;
-                left: 0;
-                top: 0;
-                width: 100%;
-                padding: 20px;
-            }
-        }
-
-        @media (max-width:768px) {
-            .pos-right {
-                width: 100%;
-                border-left: none;
-            }
-
-            .pos-left {
-                display: none;
-            }
-
-            .pos-layout {
-                flex-direction: column;
-            }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg-body); color: var(--color-gray-800); min-height: 100vh; }
+        .pos-container { display: flex; height: 100vh; overflow: hidden; }
+        .pos-left { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .pos-right { width: 420px; background: var(--bg-surface); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; }
+        .pos-header { background: var(--bg-surface); border-bottom: 1px solid var(--border-color); padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; }
+        .pos-header h2 { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+        .search-box { padding: 12px 16px; border-bottom: 1px solid var(--border-color); }
+        .search-box input { width: 100%; padding: 10px 14px; border: 1.5px solid var(--border-color); border-radius: 8px; font-size: 14px; }
+        .search-box input:focus { outline: none; border-color: var(--color-primary); }
+        .category-bar { display: flex; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--border-color); overflow-x: auto; background: var(--bg-surface); }
+        .cat-btn { padding: 6px 14px; border: 1px solid var(--border-color); background: var(--bg-surface); border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .2s; }
+        .cat-btn.active { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+        .cat-btn:hover:not(.active) { background: var(--color-gray-100); }
+        .products-scroll { flex: 1; overflow-y: auto; padding: 16px; }
+        .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+        .product-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 10px; padding: 12px; cursor: pointer; transition: all .2s; position: relative; }
+        .product-card:hover { border-color: var(--color-primary); box-shadow: 0 4px 12px rgba(79,70,229,.12); transform: translateY(-2px); }
+        .product-card.in-cart { border-color: var(--color-success); background: #f0fdf4; }
+        .product-card .pc-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; line-height: 1.3; }
+        .product-card .pc-code { font-size: 10px; color: var(--color-gray-500); margin-bottom: 6px; }
+        .product-card .pc-price { font-size: 14px; font-weight: 800; color: var(--color-primary); }
+        .product-card .pc-stock { font-size: 10px; margin-top: 4px; }
+        .stock-in { color: var(--color-success); }
+        .stock-low { color: var(--color-warning); }
+        .stock-out { color: var(--color-danger); }
+        .cart-header { padding: 14px 16px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; }
+        .cart-header h2 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+        .cart-badge { background: var(--color-primary); color: #fff; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+        .client-select-zone { padding: 12px 16px; border-bottom: 1px solid var(--border-color); }
+        .client-display { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--color-primary-soft); border-radius: 8px; margin-bottom: 8px; }
+        .client-display .cl-name { font-weight: 600; font-size: 13px; }
+        .client-display .cl-code { font-size: 10px; color: var(--color-gray-500); }
+        .btn-change { background: none; border: none; color: var(--color-primary); font-size: 11px; font-weight: 600; cursor: pointer; }
+        .cart-items { flex: 1; overflow-y: auto; padding: 12px 16px; }
+        .cart-line { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--color-gray-100); }
+        .cart-line .cl-info { flex: 1; min-width: 0; }
+        .cart-line .cl-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .cart-line .cl-price { font-size: 11px; color: var(--color-gray-500); }
+        .cart-line .cl-price input { width: 80px; padding: 2px 6px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 11px; text-align: right; }
+        .cart-line .cl-price input:focus { outline: none; border-color: var(--color-primary); }
+        .cart-line .cl-qty { display: flex; align-items: center; gap: 4px; }
+        .cart-line .cl-qty button { width: 24px; height: 24px; border: 1px solid var(--border-color); background: var(--bg-surface); border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .cart-line .cl-qty button:hover { background: var(--color-gray-100); }
+        .cart-line .cl-qty span { min-width: 24px; text-align: center; font-weight: 600; font-size: 13px; }
+        .cart-line .cl-qty-input { width: 40px; height: 24px; text-align: center; font-weight: 600; font-size: 13px; border: 1px solid var(--border-color); border-radius: 4px; -moz-appearance: textfield; }
+        .cart-line .cl-qty-input::-webkit-outer-spin-button, .cart-line .cl-qty-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .cart-line .cl-montant { font-size: 13px; font-weight: 700; min-width: 70px; text-align: right; }
+        .cart-line .cl-remove { background: none; border: none; color: var(--color-danger); cursor: pointer; font-size: 14px; }
+        .cart-empty { text-align: center; padding: 40px 20px; color: var(--color-gray-500); }
+        .cart-empty i { font-size: 48px; opacity: .3; }
+        .cart-footer { padding: 16px; border-top: 1px solid var(--border-color); background: var(--bg-surface); }
+        .totals-row { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px; }
+        .totals-row .t-label { color: var(--color-gray-500); }
+        .totals-row .t-value { font-weight: 600; }
+        .total-grand { display: flex; justify-content: space-between; padding: 10px 0; border-top: 2px solid var(--color-gray-200); margin-top: 8px; font-size: 16px; font-weight: 800; }
+        .total-grand .t-value { color: var(--color-primary); }
+        .actions-row { display: flex; gap: 8px; margin-top: 12px; }
+        .btn-clear { flex: 1; padding: 10px; border: 1px solid var(--border-color); background: var(--bg-surface); border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; }
+        .btn-clear:hover { background: var(--color-gray-100); }
+        .btn-attente { flex: 1; padding: 10px; border: none; background: var(--color-warning); color: #fff; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; }
+        .btn-attente:hover { background: #d97706; }
+        .btn-attente:disabled { opacity: .5; cursor: not-allowed; }
+        .btn-pay { flex: 2; padding: 10px; border: none; background: var(--color-primary); color: #fff; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 13px; }
+        .btn-pay:hover { background: var(--color-primary-dark); }
+        .btn-pay:disabled { opacity: .5; cursor: not-allowed; }
+        /* Modal */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.5); z-index: 1000; align-items: center; justify-content: center; }
+        .modal-overlay.show { display: flex; }
+        .modal-box { background: var(--bg-surface); border-radius: 16px; width: 480px; max-width: 90%; max-height: 90vh; overflow-y: auto; }
+        .modal-head { padding: 18px 24px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; }
+        .modal-head h3 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+        .modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--color-gray-500); }
+        .modal-body { padding: 24px; }
+        .modal-foot { padding: 16px 24px; border-top: 1px solid var(--border-color); display: flex; gap: 10px; justify-content: flex-end; }
+        .form-group { margin-bottom: 14px; }
+        .form-group label { display: block; font-size: 12px; font-weight: 600; color: var(--color-gray-500); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .5px; }
+        .form-group input, .form-group select { width: 100%; padding: 10px 12px; border: 1.5px solid var(--border-color); border-radius: 8px; font-size: 14px; }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--color-primary); }
+        .pay-modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+        .pay-mode { padding: 14px; border: 1.5px solid var(--border-color); background: var(--bg-surface); border-radius: 10px; cursor: pointer; text-align: center; transition: all .2s; }
+        .pay-mode i { display: block; font-size: 22px; margin-bottom: 4px; }
+        .pay-mode span { font-size: 12px; font-weight: 600; }
+        .pay-mode.active { border-color: var(--color-primary); background: var(--color-primary-soft); color: var(--color-primary); }
+        .change-box { background: var(--color-primary-soft); border: 1px solid #bfdbfe; padding: 16px; border-radius: 10px; text-align: center; margin-top: 16px; }
+        .change-box .lbl { font-size: 13px; color: var(--color-primary-dark); font-weight: 600; margin-bottom: 4px; }
+        .change-box .val { font-size: 28px; font-weight: 800; color: var(--color-primary); }
+        .change-box.insufficient { background: #fee2e2; border-color: #fecaca; }
+        .change-box.insufficient .lbl { color: #991b1b; }
+        .change-box.insufficient .val { color: var(--color-danger); }
+        .pay-amount-display { font-size: 20px; font-weight: 800; color: var(--color-primary); text-align: center; padding: 12px; background: var(--color-primary-soft); border-radius: 10px; margin-bottom: 16px; }
+        /* Toast */
+        .toast-msg { position: fixed; top: 20px; right: 20px; background: var(--color-success); color: #fff; padding: 12px 20px; border-radius: 10px; font-weight: 600; z-index: 2000; display: none; box-shadow: 0 4px 12px rgba(0,0,0,.15); }
+        .toast-msg.error { background: var(--color-danger); }
+        .toast-msg.show { display: block; animation: slideIn .3s ease; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        /* Bootstrap select custom */
+        .bootstrap-select .dropdown-toggle { background: #fff !important; border: 1.5px solid var(--border-color) !important; border-radius: 8px !important; }
+        .bootstrap-select .dropdown-toggle:focus { border-color: var(--color-primary) !important; box-shadow: 0 0 0 3px var(--color-primary-soft) !important; }
+        /* Lots section */
+        .lots-section { margin-top: 16px; padding: 12px; background: #f8fafc; border-radius: 8px; border: 1px solid var(--border-color); }
+        .lots-section .lots-title { font-weight: 700; margin-bottom: 12px; color: #1e293b; display: flex; align-items: center; gap: 6px; }
+        .lot-item { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 8px; background: white; border-radius: 6px; border: 1px solid var(--border-color); }
+        .lot-item .lot-info { flex: 1; min-width: 0; }
+        .lot-item .lot-name { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .lot-item .lot-qty { font-size: 11px; color: #64748b; }
+        .lot-item .lot-input-group { display: flex; align-items: center; gap: 4px; }
+        .lot-item .lot-input-group label { font-size: 11px; color: #64748b; white-space: nowrap; }
+        .lot-item .lot-input-group input { width: 60px; padding: 4px; border: 1px solid var(--border-color); border-radius: 4px; font-size: 12px; text-align: center; }
+        .lot-item .lot-result { min-width: 70px; text-align: right; font-size: 12px; font-weight: 700; color: #0369a1; }
+        .lots-total { margin-top: 12px; padding: 10px; background: #e0f2fe; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; }
+        .lots-total .label { font-weight: 600; color: #0c4a6e; }
+        .lots-total .value { font-size: 18px; font-weight: 800; color: #0369a1; }
+        @media (max-width: 900px) {
+            .pos-container { flex-direction: column; height: auto; }
+            .pos-right { width: 100%; border-left: none; border-top: 1px solid var(--border-color); }
         }
     </style>
 </head>
-
 <body>
-    <input type="hidden" id="csrfToken" value="<?= $csrf_token ?>">
-
-    <div class="pos-layout">
-        <!-- GAUCHE -->
-        <div class="pos-left">
-            <div class="search-zone">
-                <div class="search-box" id="searchBox">
-                    <i class="bi bi-search"></i>
-                    <input type="text" id="searchInput" placeholder="Rechercher un produit (nom, code)..." autofocus>
-                    <span class="result-count" id="resultCount" style="display:none;"></span>
-                    <button class="clear-btn" id="clearBtn"><i class="bi bi-x-circle-fill"></i></button>
-                </div>
-                <div class="kbd-hint"><span class="kbd">Entrée</span> ajouter le 1er &nbsp; <span class="kbd">Esc</span> effacer</div>
+<div class="pos-container">
+    <!-- GAUCHE : PRODUITS -->
+    <div class="pos-left">
+        <div class="pos-header">
+            <h2><i class="bi bi-shop"></i> Vente Comptoir</h2>
+            <div class="d-flex align-items-center gap-3">
+                <?php if ($role === 'Superviseur' && count($boutiques) > 1): ?>
+                    <select id="boutiqueSelect" class="form-select form-select-sm" style="width:auto;display:inline-block;" onchange="window.location.href='?choisir_boutique='+encodeURIComponent(this.value)">
+                        <?php foreach ($boutiques as $b): ?>
+                            <option value="<?= htmlspecialchars($b['code_boutique']) ?>" <?= $b['code_boutique'] === USER_BOUTIQUE ? 'selected' : '' ?>><?= htmlspecialchars($b['nom_boutique']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                <?php endif; ?>
+                <span class="text-muted small"><i class="bi bi-person"></i> <?= htmlspecialchars($userInfo['nom_prenom'] ?? '') ?></span>
+                <span class="badge bg-success-subtle text-success"><i class="bi bi-cash-stack"></i> Caisse ouverte</span>
             </div>
-            <div class="category-bar hidden" id="categoryBar">
-                <button class="cat-btn active" data-cat="Tous" onclick="filterCategory('Tous',this)">Tous</button>
-            </div>
-            <div class="products-scroll">
-                <div class="product-grid" id="productGrid">
-                    <div class="empty-state"><i class="bi bi-arrow-repeat"></i>
-                        <h3>Chargement...</h3>
-                        <p>Veuillez patienter.</p>
-                    </div>
+        </div>
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="Rechercher un produit (code, titre)...">
+        </div>
+        <div class="category-bar" id="categoryBar">
+            <button class="cat-btn active" data-cat="Tous" onclick="filterCategory('Tous', this)">Tous</button>
+            <?php foreach ($categories as $cat): ?>
+                <button class="cat-btn" data-cat="<?= htmlspecialchars($cat) ?>" onclick="filterCategory('<?= htmlspecialchars($cat) ?>', this)"><?= htmlspecialchars($cat) ?></button>
+            <?php endforeach; ?>
+        </div>
+        <div class="products-scroll">
+            <div class="product-grid" id="productGrid">
+                <div class="empty-state" style="text-align:center;padding:40px;color:var(--color-gray-500);">
+                    <i class="bi bi-arrow-repeat" style="font-size:48px;opacity:.3;"></i>
+                    <h3>Chargement...</h3>
                 </div>
             </div>
         </div>
+    </div>
 
-        <!-- DROITE : PANIER -->
-        <div class="pos-right">
-            <div class="cart-header">
-                <h2><i class="bi bi-receipt"></i> Ticket <span class="cart-badge" id="cartCount">0</span></h2>
-                <!-- Bouton PDF Facture complète (paysage) -->
-                <form method="post" target="_blank" style="margin:0;">
-                    <input type="hidden" name="export_pdf" value="1">
-                    <input type="hidden" name="numero" id="pdfFactureNum" value="">
-                    <input type="hidden" name="format" value="facture">
-                    <button type="submit" class="btn btn-sm btn-outline-danger" id="pdfExportBtn" disabled title="Exporter la facture complète (PDF)">
-                        <i class="bi bi-file-pdf"></i>
-                    </button>
-                </form>
-            </div>
-            <div class="client-zone">
-                <div class="client-search-wrapper" id="clientSearchWrapper">
-                    <input type="text" id="clientSearch" placeholder="Chercher un client...">
-                    <button class="btn-add" data-bs-toggle="modal" data-bs-target="#clientModal"><i class="bi bi-plus-lg"></i></button>
-                    <div class="customer-dropdown" id="clientDropdown"></div>
-                </div>
-                <div class="client-selected" id="clientSelectedBox">
-                    <div class="info">
-                        <h5><i class="bi bi-person-check"></i> <span id="selectedClientName"></span></h5>
-                        <p id="selectedClientInfo"></p>
+    <!-- DROITE : PANIER -->
+    <div class="pos-right">
+        <div class="cart-header">
+            <h2><i class="bi bi-receipt"></i> Ticket <span class="cart-badge" id="cartCount">0</span></h2>
+        </div>
+        <div class="client-select-zone">
+            <div id="clientDisplay" style="display:none;">
+                <div class="client-display">
+                    <div>
+                        <div class="cl-name" id="clientName"></div>
+                        <div class="cl-code" id="clientCode"></div>
                     </div>
                     <button class="btn-change" onclick="resetClient()">Changer</button>
                 </div>
-                <div class="recent-clients" id="recentClientsZone">
-                    <div class="rc-title"><i class="bi bi-clock-history"></i> Clients fréquents</div>
-                    <div class="rc-grid" id="recentClientsGrid"></div>
-                </div>
             </div>
-            <div class="cart-items" id="cartItems">
-                <div class="cart-empty"><i class="bi bi-cart-x"></i>
-                    <p>Panier vide</p>
-                </div>
+            <div id="clientSelectWrapper">
+                <label class="form-label" style="font-size:11px;font-weight:600;color:var(--color-gray-500);text-transform:uppercase;">Client</label>
+                <select id="clientSelect" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un client...">
+                    <option value="">-- Sélectionner un client --</option>
+                </select>
+                <button class="btn btn-sm btn-outline-primary mt-2 w-100" onclick="openModal('clientModal')">
+                    <i class="bi bi-plus"></i> Nouveau client
+                </button>
             </div>
-            <div class="cart-footer">
-                <div class="totals-split-row">
-                    <div class="split-item">
-                        <div class="split-label">Sous-total HT <select id="taxRate">
-                                <option value="0">0%</option>
-                                <?php foreach ($taxes as $t): if ($t['type_taxe'] == 'TVA'): ?>
-                                        <option value="<?= floatval($t['taux_taxe']) ?>">TVA <?= floatval($t['taux_taxe']) ?>%</option>
-                                <?php endif;
-                                endforeach; ?>
-                            </select></div>
-                        <div class="split-value" id="totalHT">0 FCFA</div>
-                    </div>
-                    <div class="split-item">
-                        <div class="split-label">Remise <select id="discountRate">
-                                <option value="0">0%</option>
-                                <?php foreach ($taxes as $t): if ($t['type_taxe'] == 'Remise'): ?>
-                                        <option value="<?= floatval($t['taux_taxe']) ?>"><?= floatval($t['taux_taxe']) ?>%</option>
-                                <?php endif;
-                                endforeach; ?>
-                            </select></div>
-                        <div class="split-value" id="totalRemise">0 FCFA</div>
-                    </div>
-                </div>
-                <div class="total-grand"><span>TOTAL TTC</span><span id="totalTTC">0 FCFA</span></div>
-                <div class="actions-row">
-                    <button class="btn-clear" id="btnClear"><i class="bi bi-trash3"></i> Vider</button>
-                    <button class="btn-pay" id="btnCheckout" disabled><i class="bi bi-credit-card-fill"></i> Encaisser</button>
-                </div>
+        </div>
+        <div class="cart-items" id="cartItems">
+            <div class="cart-empty"><i class="bi bi-cart-x"></i><p>Panier vide</p></div>
+        </div>
+        <div class="cart-footer">
+            <div class="totals-row">
+                <span class="t-label">Sous-total HT</span>
+                <select id="taxRate" style="width:auto;padding:2px 6px;border:1px solid var(--border-color);border-radius:4px;font-size:11px;">
+                    <option value="0">0%</option>
+                    <?php foreach ($taxes as $t): ?>
+                        <option value="<?= floatval($t['taux_taxe']) ?>"><?= floatval($t['taux_taxe']) ?>%</option>
+                    <?php endforeach; ?>
+                </select>
+                <span class="t-value" id="totalHT">0 FCFA</span>
+            </div>
+            <div class="totals-row">
+                <span class="t-label">Remise</span>
+                <select id="discountRate" style="width:auto;padding:2px 6px;border:1px solid var(--border-color);border-radius:4px;font-size:11px;">
+                    <option value="0">0%</option>
+                    <option value="5">5%</option>
+                    <option value="10">10%</option>
+                </select>
+                <span class="t-value" id="totalRemise">0 FCFA</span>
+            </div>
+            <div class="total-grand">
+                <span>TOTAL TTC</span>
+                <span class="t-value" id="totalTTC">0 FCFA</span>
+            </div>
+            <div class="actions-row">
+                <button class="btn-clear" id="btnClear"><i class="bi bi-trash3"></i> Vider</button>
+                <button class="btn-attente" id="btnAttente" disabled><i class="bi bi-clock"></i> En attente</button>
+                <button class="btn-pay" id="btnCheckout" disabled><i class="bi bi-credit-card-fill"></i> Encaisser</button>
             </div>
         </div>
     </div>
+</div>
 
-    <!-- MODALES -->
-    <div class="modal-overlay" id="payModal">
-        <div class="modal-box">
-            <div class="modal-head">
-                <h3><i class="bi bi-credit-card-2-front"></i> Encaissement</h3>
-                <button class="modal-close" onclick="closeModal('payModal')"><i class="bi bi-x"></i></button>
+<!-- Modal Paiement -->
+<div class="modal-overlay" id="payModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <h3><i class="bi bi-credit-card-2-front"></i> Encaissement</h3>
+            <button class="modal-close" onclick="closeModal('payModal')"><i class="bi bi-x"></i></button>
+        </div>
+        <div class="modal-body">
+            <div class="pay-amount-display">
+                <div style="font-size:12px;color:var(--color-gray-500);font-weight:600;">MONTANT À PAYER</div>
+                <div id="payAmount">0 FCFA</div>
             </div>
-            <div class="modal-body">
+            <div class="form-group">
+                <label>Mode de paiement</label>
                 <div class="pay-modes">
-                    <button class="pay-mode active" data-mode="Espece"><i class="bi bi-cash"></i>Espèces</button>
-                    <button class="pay-mode" data-mode="Mobile"><i class="bi bi-phone"></i>Mobile</button>
-                    <button class="pay-mode" data-mode="Cheque"><i class="bi bi-receipt"></i>Chèque</button>
-                </div>
-                <div style="font-size:16px;font-weight:700;margin-bottom:16px;display:flex;justify-content:space-between;"><span>Montant à payer</span><span id="payAmount" style="color:var(--color-primary);">0 FCFA</span></div>
-                <div class="form-group"><label>Montant reçu</label><input type="number" id="receivedAmount" style="font-size:18px;font-weight:700;" placeholder="0"></div>
-                <div class="change-box" id="changeBox">
-                    <div class="lbl" id="changeLbl">Monnaie à rendre</div>
-                    <div class="val" id="changeAmount">0 FCFA</div>
+                    <button class="pay-mode active" data-mode="Espece" onclick="selectPayMode(this)">
+                        <i class="bi bi-cash"></i><span>Espèces</span>
+                    </button>
+                    <button class="pay-mode" data-mode="Mobile" onclick="selectPayMode(this)">
+                        <i class="bi bi-phone"></i><span>Mobile</span>
+                    </button>
+                    <button class="pay-mode" data-mode="Cheque" onclick="selectPayMode(this)">
+                        <i class="bi bi-receipt"></i><span>Chèque</span>
+                    </button>
                 </div>
             </div>
-            <div class="modal-foot">
-                <button class="btn-secondary" onclick="closeModal('payModal')">Annuler</button>
-                <button class="btn-primary" id="btnValidatePay"><i class="bi bi-check-lg"></i> Valider</button>
+            <div class="form-group">
+                <label>Montant reçu</label>
+                <input type="number" id="receivedAmount" style="font-size:20px;font-weight:700;text-align:center;" placeholder="0" oninput="calculateChange()">
+            </div>
+            <div class="change-box" id="changeBox">
+                <div class="lbl" id="changeLbl">Monnaie à rendre</div>
+                <div class="val" id="changeAmount">0 FCFA</div>
+            </div>
+
+            <!-- SECTION LOTS -->
+            <div class="lots-section">
+                <div class="lots-title">
+                    <i class="bi bi-box-seam"></i> Configuration des lots (Bon de livraison)
+                </div>
+                <div id="lotsContainer"></div>
+                <div class="lots-total">
+                    <span class="label">Nombre total de lots :</span>
+                    <span class="value" id="totalLots">0</span>
+                </div>
+            </div>
+
+            <div class="mt-3 p-3 rounded" style="background:var(--color-gray-50);font-size:12px;">
+                <div class="d-flex justify-content-between mb-1">
+                    <span>État de la facture :</span>
+                    <strong id="etatPreview">-</strong>
+                </div>
+                <div class="d-flex justify-content-between">
+                    <span>Reste à payer :</span>
+                    <strong id="restePreview" class="text-danger">0 FCFA</strong>
+                </div>
             </div>
         </div>
+        <div class="modal-foot">
+            <button class="btn btn-secondary" onclick="closeModal('payModal')">Annuler</button>
+            <button class="btn btn-primary" id="btnValidatePay" onclick="validatePayment()"><i class="bi bi-check-lg"></i> Valider</button>
+        </div>
     </div>
+</div>
 
-    <div class="modal fade" id="clientModal" tabindex="-1">
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content" style="border-radius:16px;border:none;">
-                <div class="modal-head">
-                    <h3><i class="bi bi-person-plus"></i> Nouveau Client</h3>
-                    <button type="button" class="modal-close" data-bs-dismiss="modal"><i class="bi bi-x"></i></button>
+<!-- Modal En attente (avec configuration des lots) -->
+<div class="modal-overlay" id="attenteModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <h3><i class="bi bi-clock"></i> Mise en attente</h3>
+            <button class="modal-close" onclick="closeModal('attenteModal')"><i class="bi bi-x"></i></button>
+        </div>
+        <div class="modal-body">
+            <div class="mt-3 p-3 rounded" style="background:var(--color-gray-50);font-size:12px;">
+                Vérifiez le nombre de produits par lot avant de mettre la commande en attente : c'est cette valeur qui déterminera le nombre de cartons à préparer pour la livraison.
+            </div>
+
+            <!-- SECTION LOTS -->
+            <div class="lots-section">
+                <div class="lots-title">
+                    <i class="bi bi-box-seam"></i> Configuration des lots (Bon de livraison)
                 </div>
-                <div class="modal-body">
-                    <form id="clientForm">
-                        <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
-                        <div class="form-group"><label>Nom complet *</label><input type="text" id="newClientName" required></div>
-                        <div class="form-group"><label>Téléphone</label><input type="text" id="newClientPhone"></div>
-                        <div class="form-group" style="margin-bottom:0;"><label>Adresse</label><input type="text" id="newClientAddress"></div>
-                    </form>
-                </div>
-                <div class="modal-foot">
-                    <button class="btn-secondary" data-bs-dismiss="modal">Fermer</button>
-                    <button class="btn-primary" id="btnSaveClient">Créer</button>
+                <div id="lotsContainerAttente"></div>
+                <div class="lots-total">
+                    <span class="label">Nombre total de lots :</span>
+                    <span class="value" id="totalLotsAttente">0</span>
                 </div>
             </div>
         </div>
-    </div>
-
-    <div class="modal-overlay lot-select-modal" id="lotModal">
-        <div class="modal-box">
-            <div class="modal-head">
-                <h3><i class="bi bi-boxes"></i> Choisir un lot</h3>
-                <button class="modal-close" onclick="closeModal('lotModal')"><i class="bi bi-x"></i></button>
-            </div>
-            <div class="modal-body">
-                <div id="lotSelectionList"></div>
-                <div class="form-group" style="margin-top:12px;"><label>Quantité (en unités de base)</label><input type="number" id="lotQtyInput" value="1" min="1"></div>
-            </div>
-            <div class="modal-foot">
-                <button class="btn-secondary" onclick="closeModal('lotModal')">Annuler</button>
-                <button class="btn-primary" id="btnConfirmLot"><i class="bi bi-check"></i> Ajouter au panier</button>
-            </div>
+        <div class="modal-foot">
+            <button class="btn btn-secondary" onclick="closeModal('attenteModal')">Annuler</button>
+            <button class="btn btn-primary" id="btnConfirmerAttente" onclick="confirmerAttente()"><i class="bi bi-check-lg"></i> Confirmer la mise en attente</button>
         </div>
     </div>
+</div>
 
-    <div class="modal-overlay" id="ticketModal">
-        <div class="modal-box" style="width:480px;">
-            <div class="modal-head">
-                <h3><i class="bi bi-receipt"></i> Ticket</h3>
-                <button class="modal-close" onclick="closeModal('ticketModal')"><i class="bi bi-x"></i></button>
-            </div>
-            <div class="modal-body" id="printZone"></div>
-            <div class="modal-foot">
-                <button class="btn-secondary" onclick="closeModal('ticketModal');resetSale();">Nouvelle vente</button>
-                <button class="btn-primary" onclick="window.print()"><i class="bi bi-printer"></i> Imprimer</button>
-                <!-- Bouton PDF du ticket (format ticket) -->
-                <form method="post" target="_blank" style="margin:0;">
-                    <input type="hidden" name="export_pdf" value="1">
-                    <input type="hidden" name="numero" id="pdfFactureNumTicket" value="">
-                    <input type="hidden" name="format" value="ticket">
-                    <button type="submit" class="btn btn-primary" id="pdfExportTicketBtn"><i class="bi bi-file-pdf"></i> PDF</button>
-                </form>
-            </div>
+<!-- Modal Nouveau Client -->
+<div class="modal-overlay" id="clientModal">
+    <div class="modal-box">
+        <div class="modal-head">
+            <h3><i class="bi bi-person-plus"></i> Nouveau client</h3>
+            <button class="modal-close" onclick="closeModal('clientModal')"><i class="bi bi-x"></i></button>
+        </div>
+        <div class="modal-body">
+            <form id="clientForm">
+                <div class="form-group">
+                    <label>Nom complet *</label>
+                    <input type="text" id="clientNom" required>
+                </div>
+                <div class="form-group">
+                    <label>Téléphone</label>
+                    <input type="text" id="clientTel">
+                </div>
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="clientEmail">
+                </div>
+            </form>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-secondary" onclick="closeModal('clientModal')">Annuler</button>
+            <button class="btn btn-primary" onclick="createClient()"><i class="bi bi-check-lg"></i> Créer</button>
         </div>
     </div>
+</div>
 
-    <div class="toast-notif" id="toastMsg"></div>
+<!-- Modal Ticket -->
+<div class="modal-overlay" id="ticketModal">
+    <div class="modal-box" style="width:400px;">
+        <div class="modal-head">
+            <h3><i class="bi bi-receipt"></i> Ticket</h3>
+            <button class="modal-close" onclick="closeModal('ticketModal')"><i class="bi bi-x"></i></button>
+        </div>
+        <div class="modal-body" id="printZone"></div>
+        <div class="modal-foot">
+            <button class="btn btn-secondary" onclick="closeModal('ticketModal');resetSale();">Nouvelle vente</button>
+            <button class="btn btn-primary" onclick="window.print()"><i class="bi bi-printer"></i> Imprimer</button>
+        </div>
+    </div>
+</div>
 
-    <script>
-        // ===== CONFIG =====
-        // Utilisation de l'URL absolue de la page avec ajout de ajax=1 pour forcer la détection AJAX
-        const BASE_URL = window.location.href.split('?')[0] + (window.location.href.includes('?') ? '&' : '?') + 'ajax=1';
-        // On ajoute aussi l'en-tête X-Requested-With pour être sûr
-        const CSRF_TOKEN = document.getElementById('csrfToken').value;
+<!-- Toast -->
+<div class="toast-msg" id="toastMsg"></div>
 
-        function api(action, data = {}) {
-            const payload = {
-                action,
-                ...data
-            };
-            if (['create_customer', 'valider_vente'].includes(action)) {
-                payload.csrf_token = CSRF_TOKEN;
-            }
-            return fetch(BASE_URL, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest' // pour forcer la détection AJAX
-                    },
-                    body: JSON.stringify(payload)
-                })
-                .then(r => {
-                    if (!r.ok) throw new Error('HTTP ' + r.status + ' - ' + r.statusText);
-                    return r.json();
-                })
-                .catch(err => {
-                    // Affichage d'une erreur plus détaillée
-                    console.error('API Error:', err);
-                    throw new Error('Erreur de connexion au serveur. Vérifiez que le fichier est accessible.');
-                });
-        }
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
+<script>
+const BASE_URL = window.location.pathname;
+const CSRF_TOKEN = '<?= $csrf_token ?>';
+let cart = [];
+let selectedClient = null;
+let payMode = 'Espece';
+let currentProducts = [];
+let currentCategory = 'Tous';
+let searchTimer = null;
 
-        // ===== VARIABLES =====
-        let cart = [];
-        let selectedClient = null;
-        let payMode = 'Espece';
-        let currentProducts = [];
-        let allProductsCache = [];
-        let searchTimer = null;
-        let clientTimer = null;
-        let currentCategory = 'Tous';
-        let recentClients = [];
-        let hasCategorie = false;
-        let pendingProduct = null;
-        let selectedLotId = null;
-        let lastFactureNum = null;
+const gid = id => document.getElementById(id);
+const fmt = n => new Intl.NumberFormat('fr-FR').format(Math.round(n || 0)) + ' FCFA';
+const esc = s => (s || '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-        const $ = id => document.getElementById(id);
-        const fmt = n => new Intl.NumberFormat('fr-FR').format(Math.round(n || 0)) + ' FCFA';
-        const esc = s => (s || '').toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+function toast(msg, type = 'success') {
+    const t = gid('toastMsg');
+    t.textContent = msg;
+    t.className = 'toast-msg show' + (type === 'error' ? ' error' : '');
+    setTimeout(() => t.classList.remove('show'), 2500);
+}
 
-        function toast(msg, type = 'success') {
-            const t = $('toastMsg');
-            const icon = type === 'error' ? 'bi-exclamation-triangle-fill' : 'bi-check-circle-fill';
-            t.innerHTML = `<i class="bi ${icon}"></i> ${msg}`;
-            t.className = 'toast-notif ' + type;
-            t.style.display = 'flex';
-            clearTimeout(t._timer);
-            t._timer = setTimeout(() => t.style.display = 'none', 2500);
-        }
+function openModal(id) { gid(id).classList.add('show'); }
+function closeModal(id) { gid(id).classList.remove('show'); }
 
-        function openModal(id) {
-            $(id).classList.add('show');
-        }
+// ===== TOUT EN POST, AUCUN GET =====
+function api(action, data) {
+    return fetch(BASE_URL, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: new URLSearchParams({ ...data, action })
+    }).then(r => r.json()).catch(err => { throw new Error('Erreur connexion'); });
+}
 
-        function closeModal(id) {
-            $(id).classList.remove('show');
-        }
-
-        // ===== INIT =====
-        document.addEventListener('DOMContentLoaded', function() {
-            loadCategories();
-            loadInitialProducts();
-            loadRecentClients();
-            $('searchInput').focus();
-        });
-
-        // ===== CATÉGORIES =====
-        function loadCategories() {
-            api('load_categories').then(res => {
-                if (res.success && res.has_categorie && res.data && res.data.length > 0) {
-                    hasCategorie = true;
-                    const bar = $('categoryBar');
-                    bar.classList.remove('hidden');
-                    res.data.forEach(cat => {
-                        const btn = document.createElement('button');
-                        btn.className = 'cat-btn';
-                        btn.dataset.cat = cat;
-                        btn.textContent = cat;
-                        btn.onclick = function() {
-                            filterCategory(cat, this);
-                        };
-                        bar.appendChild(btn);
-                    });
-                } else {
-                    $('categoryBar').classList.add('hidden');
-                }
-            }).catch(() => {
-                $('categoryBar').classList.add('hidden');
-                toast('Erreur chargement catégories', 'error');
+// Charger clients pour selectpicker
+async function loadClients() {
+    try {
+        const res = await api('get_clients', { q: '' });
+        if (res.success) {
+            const select = gid('clientSelect');
+            select.innerHTML = '<option value="">-- Sélectionner un client --</option>';
+            res.clients.forEach(c => {
+                const opt = document.createElement('option');
+                opt.value = c.code_contact;
+                opt.textContent = c.nom_prenom_contact + (c.telephone_contact ? ' (' + c.telephone_contact + ')' : '');
+                opt.dataset.name = c.nom_prenom_contact;
+                opt.dataset.code = c.code_contact;
+                select.appendChild(opt);
             });
+            jQuery('.selectpicker').selectpicker('refresh');
         }
+    } catch (e) { console.error(e); }
+}
 
-        function filterCategory(cat, btnEl) {
-            currentCategory = cat;
-            document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
-            if (btnEl) btnEl.classList.add('active');
-            const q = $('searchInput').value.trim();
-            if (q.length >= 2) searchProducts(q);
-            else loadInitialProducts();
+// Recherche clients dans selectpicker
+jQuery('#clientSelect').on('changed.bs.select', function(e, clickedIndex) {
+    const opt = this.options[clickedIndex];
+    if (opt && opt.value) {
+        selectedClient = { code: opt.value, name: opt.dataset.name };
+        gid('clientDisplay').style.display = 'block';
+        gid('clientSelectWrapper').style.display = 'none';
+        gid('clientName').textContent = selectedClient.name;
+        gid('clientCode').textContent = selectedClient.code;
+        updateButtons();
+    }
+});
+
+function resetClient() {
+    selectedClient = null;
+    gid('clientDisplay').style.display = 'none';
+    gid('clientSelectWrapper').style.display = 'block';
+    gid('clientSelect').selectedIndex = 0;
+    jQuery('.selectpicker').selectpicker('refresh');
+    updateButtons();
+}
+
+// Charger produits
+async function loadProducts(q = '') {
+    try {
+        const res = await api('get_products', { q, categorie: currentCategory });
+        if (res.success) {
+            currentProducts = res.products;
+            renderProducts(currentProducts, q);
         }
+    } catch (e) { toast('Erreur chargement', 'error'); }
+}
 
-        // ===== PRODUITS =====
-        function loadInitialProducts() {
-            showSearchSpinner(true);
-            api('load_products', {
-                    categorie: currentCategory
-                })
-                .then(res => {
-                    showSearchSpinner(false);
-                    if (res.success) {
-                        currentProducts = res.data || [];
-                        allProductsCache = currentProducts;
-                        renderProducts(currentProducts, '');
-                        $('resultCount').textContent = currentProducts.length + ' produits';
-                        $('resultCount').className = 'result-count has-results';
-                        $('resultCount').style.display = 'inline-block';
-                    } else {
-                        toast(res.message || 'Erreur chargement', 'error');
-                        $('productGrid').innerHTML =
-                            `<div class="empty-state"><i class="bi bi-emoji-frown"></i><h3>Erreur</h3><p>${esc(res.message||'')}</p></div>`;
-                    }
-                })
-                .catch(err => {
-                    showSearchSpinner(false);
-                    toast(err.message || 'Erreur connexion', 'error');
-                    $('productGrid').innerHTML =
-                        `<div class="empty-state"><i class="bi bi-wifi-off"></i><h3>Erreur de connexion</h3><p>Vérifiez le serveur.</p></div>`;
-                });
-        }
+function renderProducts(products, q = '') {
+    if (products.length === 0) {
+        gid('productGrid').innerHTML = '<div style="text-align:center;padding:40px;color:var(--color-gray-500);"><i class="bi bi-box-seam" style="font-size:48px;opacity:.3;"></i><h3>Aucun produit</h3></div>';
+        return;
+    }
+    gid('productGrid').innerHTML = products.map((p, i) => {
+        const stock = parseInt(p.stock) || 0;
+        let stockClass = 'stock-out', stockText = 'Rupture';
+        if (stock > 5) { stockClass = 'stock-in'; stockText = 'Stock: ' + stock; }
+        else if (stock > 0) { stockClass = 'stock-low'; stockText = 'Stock: ' + stock + ' ⚠'; }
+        const inCart = cart.some(item => item.code === p.code_produit);
+        const cardClass = inCart ? 'product-card in-cart' : 'product-card';
+        const titleHTML = q ? p.titre_produit.replace(new RegExp(q, 'gi'), m => `<mark>${m}</mark>`) : esc(p.titre_produit);
+        return `<div class="${cardClass}" onclick="addProduct(${i})">
+            <div class="pc-title">${titleHTML}</div>
+            <div class="pc-code">${esc(p.code_produit)}</div>
+            <div class="pc-price">${fmt(p.prix_fournisseur || 0)}</div>
+            <div class="pc-stock ${stockClass}">${stockText}</div>
+        </div>`;
+    }).join('');
+}
 
-        function showSearchSpinner(show) {
-            const box = $('searchBox');
-            if (show) {
-                box.classList.add('is-loading');
-                if (!box.querySelector('.spinner-inline')) {
-                    const sp = document.createElement('div');
-                    sp.className = 'spinner-inline';
-                    box.insertBefore(sp, $('clearBtn'));
-                }
-            } else {
-                box.classList.remove('is-loading');
-                const sp = box.querySelector('.spinner-inline');
-                if (sp) sp.remove();
-            }
-        }
+function filterCategory(cat, btn) {
+    currentCategory = cat;
+    document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    loadProducts(gid('searchInput').value.trim());
+}
 
-        function renderProducts(products, q) {
-            if (products.length === 0) {
-                $('productGrid').innerHTML = q ?
-                    `<div class="empty-state"><i class="bi bi-emoji-frown"></i><h3>Aucun produit pour "${esc(q)}"</h3><p>Essayez autre chose.</p></div>` :
-                    `<div class="empty-state"><i class="bi bi-box-seam"></i><h3>Aucun produit</h3><p>Changez de catégorie.</p></div>`;
-                return;
-            }
-            $('productGrid').innerHTML = products.map((p, i) => {
-                const stock = parseInt(p.stock) || 0;
-                let stockClass = 'stock-out',
-                    stockText = 'Rupture';
-                if (stock > 5) {
-                    stockClass = 'stock-in';
-                    stockText = 'Stock: ' + stock;
-                } else if (stock > 0) {
-                    stockClass = 'stock-low';
-                    stockText = 'Stock: ' + stock + ' ⚠';
-                }
-                const inCart = cart.some(item => item.code === p.code_produit);
-                const cardClass = inCart ? 'product-card in-cart' : 'product-card';
-                const catLabel = (p.categorie && p.categorie !== 'Autre') ? `<span class="pc-cat">${esc(p.categorie)}</span>` : '';
-                const lotBadge = (p.lots && p.lots.length > 0) ? `<span class="badge bg-info" style="font-size:9px;margin-left:4px;">${p.lots.length} cond.</span>` :
-                '';
-                const titleHTML = q ? highlightText(p.titre_produit, q) : esc(p.titre_produit);
-                const codeHTML = q ? highlightText(p.code_produit, q) : esc(p.code_produit);
-                return `
-                        <div class="${cardClass}" onclick="openLotSelection(${i})">
-                            <div class="pc-top">
-                                <div style="flex:1;">${catLabel}${lotBadge}<div class="pc-title">${titleHTML}</div></div>
-                                <span class="pc-stock ${stockClass}">${stockText}</span>
-                            </div>
-                            <div class="pc-bottom">
-                                <div class="pc-price">${fmt(p.prix)}</div>
-                                <div class="pc-code">${codeHTML}</div>
-                            </div>
-                        </div>
-                    `;
-            }).join('');
-        }
+gid('searchInput').addEventListener('input', function() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadProducts(this.value.trim()), 300);
+});
 
-        function highlightText(text, q) {
-            if (!q) return esc(text);
-            const reg = new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-            return esc(text).replace(reg, '<mark style="background:#bfdbfe;color:#1e40af;padding:0 2px;border-radius:2px;">$1</mark>');
-        }
-
-        // ===== RECHERCHE PRODUITS =====
-        $('searchInput').addEventListener('input', function() {
-            const q = this.value.trim();
-            $('clearBtn').style.display = q ? 'block' : 'none';
-            clearTimeout(searchTimer);
-            if (q.length < 2) {
-                $('resultCount').style.display = 'none';
-                currentProducts = allProductsCache;
-                renderProducts(currentProducts, '');
-                if (allProductsCache.length > 0) {
-                    $('resultCount').textContent = allProductsCache.length + ' produits';
-                    $('resultCount').className = 'result-count has-results';
-                    $('resultCount').style.display = 'inline-block';
-                }
-                return;
-            }
-            showSearchSpinner(true);
-            searchTimer = setTimeout(() => searchProducts(q), 250);
+async function addProduct(idx) {
+    const p = currentProducts[idx];
+    if (!p) return;
+    const stock = parseInt(p.stock) || 0;
+    if (stock <= 0) { toast('Rupture de stock', 'error'); return; }
+    const existing = cart.find(item => item.code === p.code_produit);
+    if (existing) {
+        if (existing.qte + 1 > stock) { toast('Stock max atteint', 'error'); return; }
+        existing.qte += 1;
+        existing.montant = existing.qte * existing.prix;
+    } else {
+        const prix = parseFloat(p.prix_fournisseur) || 0;
+        const premierLot = (p.lots && p.lots.length > 0) ? p.lots[0] : null;
+        cart.push({
+            code: p.code_produit,
+            nom: p.titre_produit,
+            prix: prix,
+            prix_achat: parseFloat(p.prix_fournisseur) || 0,
+            qte: 1,
+            stock: stock,
+            montant: prix,
+            lot_id: premierLot ? premierLot.code_lot_produit : null,
+            produitsParLot: premierLot ? (parseInt(premierLot.unites_par_lot) || 0) : 0
         });
+    }
+    renderCart();
+    renderProducts(currentProducts, gid('searchInput').value.trim());
+    toast('Produit ajouté');
+}
 
-        function searchProducts(q) {
-            api('search_products', {
-                    q,
-                    categorie: currentCategory
-                })
-                .then(res => {
-                    showSearchSpinner(false);
-                    if (res.success) {
-                        currentProducts = res.data || [];
-                        renderProducts(currentProducts, q);
-                        const count = currentProducts.length;
-                        $('resultCount').textContent = count + ' résultat(s)';
-                        $('resultCount').className = count > 0 ? 'result-count has-results' : 'result-count';
-                        $('resultCount').style.display = 'inline-block';
-                    } else {
-                        toast(res.message || 'Erreur recherche', 'error');
-                        $('productGrid').innerHTML =
-                            `<div class="empty-state"><i class="bi bi-emoji-frown"></i><h3>Erreur</h3><p>${esc(res.message||'')}</p></div>`;
-                    }
-                })
-                .catch(err => {
-                    showSearchSpinner(false);
-                    toast(err.message || 'Erreur connexion', 'error');
-                });
+async function getProductPrice(produitId, quantite) {
+    try {
+        const res = await api('get_product_price', { produit_id: produitId, quantite });
+        if (res.success) return parseFloat(res.prix) || 0;
+        return 0;
+    } catch (e) { return 0; }
+}
+
+window.updateQty = function(code, delta) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    const newQty = item.qte + delta;
+    if (newQty <= 0) { window.removeProduct(code); return; }
+    if (newQty > item.stock) { toast('Stock max', 'error'); return; }
+    item.qte = newQty;
+    item.montant = item.qte * item.prix;
+    renderCart();
+};
+
+window.setQty = function(code, value) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    let newQty = parseInt(value, 10);
+    if (isNaN(newQty) || newQty <= 0) { renderCart(); return; }
+    if (newQty > item.stock) { toast('Stock max atteint', 'error'); newQty = item.stock; }
+    item.qte = newQty;
+    item.montant = item.qte * item.prix;
+    renderCart();
+};
+
+window.updatePrice = function(code, newPrice) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    item.prix = parseFloat(newPrice) || 0;
+    item.montant = item.qte * item.prix;
+    renderCart();
+};
+
+window.removeProduct = function(code) {
+    cart = cart.filter(p => p.code !== code);
+    renderCart();
+    renderProducts(currentProducts, gid('searchInput').value.trim());
+    toast('Retiré');
+};
+
+function renderCart() {
+    if (cart.length === 0) {
+        gid('cartItems').innerHTML = '<div class="cart-empty"><i class="bi bi-cart-x"></i><p>Panier vide</p></div>';
+        gid('cartCount').textContent = '0';
+        gid('btnCheckout').disabled = true;
+        gid('btnAttente').disabled = true;
+    } else {
+        let html = '';
+        cart.forEach(p => {
+            html += `<div class="cart-line">
+                <div class="cl-info">
+                    <div class="cl-name">${esc(p.nom)}</div>
+                    <div class="cl-price">P.U: <input type="number" value="${p.prix}" onchange="updatePrice('${p.code}', this.value)" onclick="event.stopPropagation()"> FCFA</div>
+                </div>
+                <div class="cl-qty">
+                    <button onclick="updateQty('${p.code}', -1)">-</button>
+                    <input type="number" class="cl-qty-input" min="1" max="${p.stock}" step="1"
+                           value="${p.qte}"
+                           onclick="event.stopPropagation()"
+                           onchange="setQty('${p.code}', this.value)">
+                    <button onclick="updateQty('${p.code}', 1)">+</button>
+                </div>
+                <div class="cl-montant">${fmt(p.montant)}</div>
+                <button class="cl-remove" onclick="removeProduct('${p.code}')"><i class="bi bi-x-circle"></i></button>
+            </div>`;
+        });
+        gid('cartItems').innerHTML = html;
+        gid('cartCount').textContent = cart.reduce((s, p) => s + p.qte, 0);
+        gid('btnCheckout').disabled = !selectedClient;
+        gid('btnAttente').disabled = !selectedClient;
+    }
+    calculateTotals();
+}
+
+function calculateTotals() {
+    const ht = cart.reduce((s, p) => s + p.montant, 0);
+    const taxRate = parseFloat(gid('taxRate').value) || 0;
+    const discRate = parseFloat(gid('discountRate').value) || 0;
+    const tax = Math.round(ht * taxRate / 100);
+    const disc = Math.round(ht * discRate / 100);
+    const ttc = Math.round(ht + tax - disc);
+    gid('totalHT').textContent = fmt(ht);
+    gid('totalRemise').textContent = fmt(disc);
+    gid('totalTTC').textContent = fmt(ttc);
+}
+
+function getTTC() {
+    const ht = cart.reduce((s, p) => s + p.montant, 0);
+    const taxRate = parseFloat(gid('taxRate').value) || 0;
+    const discRate = parseFloat(gid('discountRate').value) || 0;
+    return Math.round(ht + Math.round(ht * taxRate / 100) - Math.round(ht * discRate / 100));
+}
+
+function updateButtons() {
+    const hasItems = cart.length > 0;
+    gid('btnCheckout').disabled = !(hasItems && selectedClient);
+    gid('btnAttente').disabled = !(hasItems && selectedClient);
+}
+
+gid('btnClear').addEventListener('click', function() {
+    if (cart.length === 0) return;
+    if (confirm('Vider le panier ?')) {
+        cart = [];
+        renderCart();
+        renderProducts(currentProducts, gid('searchInput').value.trim());
+        toast('Panier vidé');
+    }
+});
+
+// ===== GESTION DES LOTS =====
+// containerId/totalId permettent de réutiliser cet écran depuis le modal
+// de paiement (payModal) OU le modal de mise en attente (attenteModal).
+let lotsRenderTarget = { containerId: 'lotsContainer', totalId: 'totalLots' };
+
+function renderLotsConfig(containerId, totalId) {
+    if (containerId) lotsRenderTarget = { containerId, totalId };
+    const container = gid(lotsRenderTarget.containerId);
+    const totalEl = gid(lotsRenderTarget.totalId);
+    if (cart.length === 0) {
+        container.innerHTML = '<div style="color: #64748b; font-style: italic; font-size: 12px;">Aucun produit dans le panier</div>';
+        totalEl.textContent = '0';
+        return;
+    }
+
+    let html = '';
+    let totalLots = 0;
+
+    cart.forEach((item, idx) => {
+        const produitsParLot = item.produitsParLot ?? 0;
+        const nombreLots = produitsParLot > 0 ? Math.floor(item.qte / produitsParLot) : 0;
+        const reste = produitsParLot > 0 ? (item.qte % produitsParLot) : item.qte;
+        totalLots += nombreLots;
+
+        let resultText;
+        if (produitsParLot === 0) {
+            resultText = 'Non configuré';
+        } else {
+            resultText = `${nombreLots} lot(s)`;
+            if (reste > 0) resultText += ` et ${reste} produit(s)`;
         }
 
-        $('clearBtn').addEventListener('click', function() {
-            $('searchInput').value = '';
-            $('clearBtn').style.display = 'none';
-            $('searchInput').dispatchEvent(new Event('input'));
-            $('searchInput').focus();
-        });
+        html += `
+            <div class="lot-item">
+                <div class="lot-info">
+                    <div class="lot-name">${esc(item.nom)}</div>
+                    <div class="lot-qty">Quantité: ${item.qte}</div>
+                </div>
+                <div class="lot-input-group">
+                    <label>Produits/lot:</label>
+                    <input type="number"
+                           min="0"
+                           max="${item.qte}"
+                           value="${produitsParLot}"
+                           onchange="updateProduitsParLot(${idx}, this.value)"
+                           onclick="event.stopPropagation()">
+                </div>
+                <div class="lot-result">${resultText}</div>
+            </div>
+        `;
+    });
 
-        $('searchInput').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && currentProducts.length > 0) {
-                e.preventDefault();
-                openLotSelection(0);
-            }
-            if (e.key === 'Escape') {
-                this.value = '';
-                this.dispatchEvent(new Event('input'));
-            }
-        });
+    container.innerHTML = html;
+    totalEl.textContent = totalLots;
+}
 
-        // ===== CLIENTS =====
-        function loadRecentClients() {
-            api('load_recent_customers').then(res => {
-                if (res.success && res.data && res.data.length > 0) {
-                    recentClients = res.data;
-                    renderRecentClients();
-                } else {
-                    $('recentClientsZone').classList.add('hidden');
-                }
-            }).catch(() => $('recentClientsZone').classList.add('hidden'));
-        }
+function updateProduitsParLot(idx, value) {
+    const produitsParLot = Math.max(0, parseInt(value) || 0);
+    cart[idx].produitsParLot = produitsParLot;
+    renderLotsConfig();
+}
 
-        function renderRecentClients() {
-            if (recentClients.length === 0) {
-                $('recentClientsZone').classList.add('hidden');
-                return;
-            }
-            $('recentClientsZone').classList.remove('hidden');
-            $('recentClientsGrid').innerHTML = recentClients.map(c => `
-                        <div class="rc-chip" onclick="quickSelectClient('${esc(c.code_contact)}','${esc(c.nom_prenom_contact)}','${esc(c.telephone_contact||'')}')">
-                            <i class="bi bi-person"></i> ${esc(c.nom_prenom_contact)}
-                        </div>
-                    `).join('');
-        }
+// Encaisser
+gid('btnCheckout').addEventListener('click', function() {
+    if (!selectedClient) { toast('Sélectionnez un client', 'error'); return; }
+    if (cart.length === 0) { toast('Panier vide', 'error'); return; }
 
-        function quickSelectClient(code, name, phone) {
-            selectClient(code, name, phone);
-            $('recentClientsZone').classList.add('hidden');
-        }
+    // produitsParLot reste à 0 (non configuré) tant que l'utilisateur ne le renseigne pas
+    gid('payAmount').textContent = fmt(getTTC());
+    gid('receivedAmount').value = '';
+    gid('changeAmount').textContent = '0 FCFA';
+    gid('changeBox').className = 'change-box';
+    gid('changeLbl').textContent = 'Monnaie à rendre';
+    gid('etatPreview').textContent = '-';
+    gid('restePreview').textContent = '0 FCFA';
 
-        $('clientSearch').addEventListener('input', function() {
-            const q = this.value.trim();
-            clearTimeout(clientTimer);
-            if (q.length < 2) {
-                $('clientDropdown').style.display = 'none';
-                if (!selectedClient && recentClients.length > 0) $('recentClientsZone').classList.remove('hidden');
-                return;
-            }
-            $('recentClientsZone').classList.add('hidden');
-            clientTimer = setTimeout(() => {
-                api('search_customers', {
-                        q
-                    })
-                    .then(res => {
-                        if (res.success) renderClientDropdown(res.data || [], q);
-                        else toast(res.message || 'Erreur client', 'error');
-                    })
-                    .catch(err => toast(err.message || 'Erreur connexion', 'error'));
-            }, 250);
-        });
+    // Afficher la configuration des lots
+    renderLotsConfig('lotsContainer', 'totalLots');
 
-        $('clientSearch').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
-                const firstItem = $('clientDropdown').querySelector('.customer-item[data-code]');
-                if (firstItem) firstItem.click();
-                e.preventDefault();
-            }
-            if (e.key === 'Escape') {
-                this.value = '';
-                $('clientDropdown').style.display = 'none';
-            }
-        });
+    openModal('payModal');
+});
 
-        function renderClientDropdown(data, q) {
-            const dd = $('clientDropdown');
-            if (data.length === 0) {
-                dd.innerHTML =
-                    `<div class="dd-header"><span>Aucun résultat</span></div><div class="dd-empty"><i class="bi bi-emoji-frown"></i>Aucun client pour "${esc(q)}"<br><button style="margin-top:8px;background:var(--color-primary);color:#fff;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;" data-bs-toggle="modal" data-bs-target="#clientModal"><i class="bi bi-person-plus"></i> Créer</button></div>`;
-                dd.style.display = 'block';
-                return;
-            }
-            dd.innerHTML = `
-                        <div class="dd-header"><span>${data.length} client(s)</span><span style="color:var(--text-tertiary);">Entrée = sélectionner</span></div>
-                        ${data.map(c => {
-                            const initials = (c.nom_prenom_contact||'').split(' ').map(w=>(w[0]||'')).join('').substring(0,2).toUpperCase();
-                            const typeLabel = c.statut_contact || c.type_contact || 'Client';
-                            const tagClass = (c.type_contact === 'Entreprise') ? 'tag-client' : 'tag-particulier';
-                            return `
-                                <div class="customer-item" data-code="${esc(c.code_contact)}" onclick="selectClient('${esc(c.code_contact)}','${esc(c.nom_prenom_contact)}','${esc(c.telephone_contact||'')}')">
-                                    <div class="ci-avatar">${initials}</div>
-                                    <div class="ci-body">
-                                        <strong>${highlightText(c.nom_prenom_contact, q)}</strong>
-                                        <small>${highlightText(c.code_contact, q)}${c.telephone_contact ? ' — ' + highlightText(c.telephone_contact, q) : ''}</small>
-                                        <div class="ci-tags"><span class="ci-tag ${tagClass}">${esc(typeLabel)}</span></div>
-                                    </div>
-                                    <i class="bi bi-chevron-right ci-arrow"></i>
-                                </div>
-                            `;
-                        }).join('')}
-                    `;
-            dd.style.display = 'block';
-        }
+// En attente
+gid('btnAttente').addEventListener('click', function() {
+    if (!selectedClient) { toast('Sélectionnez un client', 'error'); return; }
+    if (cart.length === 0) { toast('Panier vide', 'error'); return; }
 
-        document.addEventListener('click', function(e) {
-            if (!$('clientSearchWrapper').contains(e.target)) $('clientDropdown').style.display = 'none';
-        });
+    // produitsParLot reste à 0 (non configuré) tant que l'utilisateur ne le renseigne pas
+    renderLotsConfig('lotsContainerAttente', 'totalLotsAttente');
+    openModal('attenteModal');
+});
 
-        function selectClient(code, name, phone) {
-            selectedClient = {
-                code,
-                name,
-                phone
+function confirmerAttente() {
+    closeModal('attenteModal');
+    validateSale(true, 0);
+}
+
+function selectPayMode(btn) {
+    document.querySelectorAll('.pay-mode').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    payMode = btn.dataset.mode;
+}
+
+function calculateChange() {
+    const received = parseFloat(gid('receivedAmount').value) || 0;
+    const ttc = getTTC();
+    const change = received - ttc;
+    const reste = Math.max(0, ttc - received);
+
+    if (received >= ttc) {
+        gid('changeLbl').textContent = 'Monnaie à rendre';
+        gid('changeAmount').textContent = fmt(change);
+        gid('changeBox').className = 'change-box';
+        gid('etatPreview').innerHTML = '<span class="badge bg-success">PAYEE</span>';
+        gid('restePreview').textContent = '0 FCFA';
+    } else if (received > 0) {
+        gid('changeLbl').textContent = 'Montant restant';
+        gid('changeAmount').textContent = fmt(reste);
+        gid('changeBox').className = 'change-box insufficient';
+        gid('etatPreview').innerHTML = '<span class="badge bg-warning text-dark">PARTIELLE</span>';
+        gid('restePreview').textContent = fmt(reste);
+    } else {
+        gid('changeLbl').textContent = 'Aucun paiement';
+        gid('changeAmount').textContent = '0 FCFA';
+        gid('changeBox').className = 'change-box insufficient';
+        gid('etatPreview').innerHTML = '<span class="badge bg-danger">IMPAYEE</span>';
+        gid('restePreview').textContent = fmt(ttc);
+    }
+}
+
+function validatePayment() {
+    const received = parseFloat(gid('receivedAmount').value) || 0;
+    validateSale(false, received);
+}
+
+async function validateSale(enAttente = false, avance = 0) {
+    const btn = enAttente ? gid('btnAttente') : gid('btnValidatePay');
+    btn.disabled = true;
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-spinner"></i> Validation...';
+
+    try {
+        // Préparer les données de lots
+        const lotsData = cart.map(item => {
+            const ppl = item.produitsParLot ?? 0;
+            return {
+                code: item.code,
+                nom: item.nom,
+                qte: item.qte,
+                produitsParLot: ppl,
+                nombreLots: ppl > 0 ? Math.floor(item.qte / ppl) : 0
             };
-            $('selectedClientName').textContent = name;
-            $('selectedClientInfo').textContent = code + (phone ? ' — ' + phone : '');
-            $('clientSearchWrapper').style.display = 'none';
-            $('clientSelectedBox').style.display = 'flex';
-            $('clientDropdown').style.display = 'none';
-            $('recentClientsZone').classList.add('hidden');
-            $('clientSearch').value = '';
-        }
-
-        function resetClient() {
-            selectedClient = null;
-            $('clientSearchWrapper').style.display = 'flex';
-            $('clientSelectedBox').style.display = 'none';
-            $('clientSearch').focus();
-            if (recentClients.length > 0) $('recentClientsZone').classList.remove('hidden');
-        }
-
-        // ===== CRÉER CLIENT =====
-        $('btnSaveClient').addEventListener('click', function() {
-            const nom = $('newClientName').value.trim();
-            if (!nom) {
-                toast('Nom requis', 'error');
-                return;
-            }
-            const payload = {
-                action: 'create_customer',
-                nom,
-                tel: $('newClientPhone').value,
-                adresse: $('newClientAddress').value,
-                csrf_token: CSRF_TOKEN
-            };
-            fetch(BASE_URL, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest'
-                    },
-                    body: JSON.stringify(payload)
-                })
-                .then(r => r.json())
-                .then(res => {
-                    if (res.success) {
-                        const c = res.customer;
-                        selectClient(c.code_contact, c.nom_prenom_contact, c.telephone_contact || '');
-                        bootstrap.Modal.getInstance($('clientModal')).hide();
-                        $('clientForm').reset();
-                        recentClients.unshift(c);
-                        toast('Client créé');
-                    } else {
-                        toast(res.message || 'Erreur', 'error');
-                    }
-                })
-                .catch(() => toast('Erreur connexion', 'error'));
         });
 
-        // ===== SÉLECTION DE LOT =====
-        function openLotSelection(idx) {
-            const p = currentProducts[idx];
-            if (!p) return;
-            if (parseInt(p.stock) <= 0) {
-                toast('Rupture de stock', 'error');
-                return;
-            }
-            const lots = p.lots || [];
-            if (lots.length === 0) {
-                addProductToCart(p, null);
-                return;
-            }
-            if (lots.length === 1) {
-                addProductToCart(p, lots[0].code_lot_produit);
-                return;
-            }
-            pendingProduct = p;
-            selectedLotId = null;
-            const list = $('lotSelectionList');
-            list.innerHTML = lots.map(l => `
-                        <div class="lot-option" data-lot="${esc(l.code_lot_produit)}" onclick="selectLotOption('${esc(l.code_lot_produit)}')">
-                            <div class="lot-info"><strong>${esc(l.titre_lot)}</strong><small>${l.unites_par_lot} unité(s) par lot — disponible : ${l.quantite}</small></div>
-                            <div class="lot-stock">${l.quantite} restant(s)</div>
-                        </div>
-                    `).join('');
-            if (lots.length > 0) {
-                const first = lots[0].code_lot_produit;
-                selectLotOption(first);
-                document.querySelectorAll('.lot-option').forEach(el => el.classList.remove('selected'));
-                document.querySelector(`.lot-option[data-lot="${first}"]`)?.classList.add('selected');
-            }
-            $('lotQtyInput').value = 1;
-            openModal('lotModal');
-        }
-
-        function selectLotOption(lotId) {
-            selectedLotId = lotId;
-            document.querySelectorAll('.lot-option').forEach(el => el.classList.remove('selected'));
-            document.querySelector(`.lot-option[data-lot="${lotId}"]`)?.classList.add('selected');
-        }
-
-        $('btnConfirmLot').addEventListener('click', function() {
-            if (!pendingProduct) {
-                toast('Aucun produit en attente', 'error');
-                return;
-            }
-            if (!selectedLotId) {
-                toast('Veuillez sélectionner un lot', 'error');
-                return;
-            }
-            const qty = parseInt($('lotQtyInput').value) || 1;
-            if (qty < 1) {
-                toast('Quantité invalide', 'error');
-                return;
-            }
-            const lot = pendingProduct.lots.find(l => l.code_lot_produit === selectedLotId);
-            if (lot && parseInt(lot.quantite) < qty) {
-                toast('Stock insuffisant pour ce lot', 'error');
-                return;
-            }
-            addProductToCart(pendingProduct, selectedLotId, qty);
-            closeModal('lotModal');
-        });
-
-        // ===== AJOUT AU PANIER =====
-        async function addProductToCart(product, lotId, qty = 1) {
-            const stock = parseInt(product.stock) || 0;
-            if (stock <= 0) {
-                toast('Rupture de stock', 'error');
-                return;
-            }
-
-            const existing = cart.find(item => item.code === product.code_produit && item.lot_id === lotId);
-            let item;
-            if (existing) {
-                if (existing.qte + qty > stock) {
-                    toast('Stock max atteint', 'error');
-                    return;
-                }
-                existing.qte += qty;
-                item = existing;
-            } else {
-                const totalQte = cart.filter(i => i.code === product.code_produit).reduce((s, i) => s + i.qte, 0) + qty;
-                const prix = await getProductPrice(product.code_produit, totalQte);
-                item = {
-                    code: product.code_produit,
-                    nom: product.titre_produit,
-                    prix,
-                    prix_achat: parseFloat(product.prix_fournisseur) || 0,
-                    qte: qty,
-                    stock: stock,
-                    montant: 0,
-                    categorie: product.categorie || '',
-                    lot_id: lotId
-                };
-                cart.push(item);
-            }
-            item.montant = item.qte * item.prix;
-            renderCart();
-            refreshProductCards();
-            toast('Produit ajouté');
-        }
-
-        async function getProductPrice(produitId, quantite) {
-            try {
-                const res = await fetch(BASE_URL, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-Requested-With': 'XMLHttpRequest'
-                    },
-                    body: JSON.stringify({
-                        action: 'get_product_price',
-                        produit_id: produitId,
-                        quantite
-                    })
-                });
-                const data = await res.json();
-                if (data.success) return parseFloat(data.prix) || 0;
-                else return 0;
-            } catch (e) {
-                return 0;
-            }
-        }
-
-        // ===== FONCTIONS PANIER GLOBALES =====
-        window.updateQty = function(code, lotId, delta) {
-            const item = cart.find(p => p.code === code && (p.lot_id || '') === (lotId || ''));
-            if (!item) return;
-            const newQty = item.qte + delta;
-            if (newQty <= 0) {
-                window.removeProduct(code, lotId);
-                return;
-            }
-            if (newQty > item.stock) {
-                toast('Stock max', 'error');
-                return;
-            }
-            item.qte = newQty;
-            const totalQte = cart.filter(i => i.code === code).reduce((s, i) => s + i.qte, 0);
-            getProductPrice(code, totalQte).then(prix => {
-                item.prix = prix;
-                item.montant = item.qte * item.prix;
-                renderCart();
-            });
+        const data = {
+            panier: JSON.stringify(cart.map(p => ({
+                code: p.code,
+                prix: p.prix,
+                prix_achat: p.prix_achat,
+                qte: p.qte,
+                montant: p.montant,
+                lot_id: p.lot_id || null,
+                produits_par_lot: p.produitsParLot ?? 0
+            }))),
+            client_id: selectedClient.code,
+            mode_reglement: payMode,
+            avance: enAttente ? 0 : avance,
+            taux_tva: parseFloat(gid('taxRate').value) || 0,
+            taux_remise: parseFloat(gid('discountRate').value) || 0,
+            en_attente: enAttente,
+            csrf_token: CSRF_TOKEN,
+            lots: JSON.stringify(lotsData)
         };
 
-        window.removeProduct = function(code, lotId) {
-            cart = cart.filter(p => !(p.code === code && (p.lot_id || '') === (lotId || '')));
-            renderCart();
-            refreshProductCards();
-            toast('Retiré');
-        };
+        const res = await api('valider_vente', data);
 
-        // ===== RENDU PANIER =====
-        function renderCart() {
-            if (cart.length === 0) {
-                $('cartItems').innerHTML = `<div class="cart-empty"><i class="bi bi-cart-x"></i><p>Panier vide</p></div>`;
-                $('cartCount').textContent = '0';
-                $('btnCheckout').disabled = true;
-                $('pdfExportBtn').disabled = true;
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+
+        if (res.success) {
+            closeModal('payModal');
+            if (enAttente) {
+                toast('Commande mise en attente : ' + res.document);
             } else {
-                let html = '';
-                cart.forEach(p => {
-                    html += `
-                            <div class="cart-line" data-code="${esc(p.code)}" data-lotid="${esc(p.lot_id||'')}">
-                                <div class="cl-header">
-                                    <div class="cl-name">${esc(p.nom)}</div>
-                                    ${p.lot_id ? `<span class="cl-lot">${esc(p.lot_id)}</span>` : ''}
-                                    <button class="cl-remove" onclick="window.removeProduct('${p.code}','${p.lot_id||''}')"><i class="bi bi-trash"></i></button>
-                                </div>
-                                <div class="cl-footer">
-                                    <div class="qty-selector">
-                                        <button onclick="window.updateQty('${p.code}','${p.lot_id||''}',-1)">-</button>
-                                        <span>${p.qte}</span>
-                                        <button onclick="window.updateQty('${p.code}','${p.lot_id||''}',1)">+</button>
-                                    </div>
-                                    <div style="text-align:right;">
-                                        <div class="cl-total">${fmt(p.montant)}</div>
-                                        <div class="cl-unit">${fmt(p.prix)} / unité</div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                });
-                $('cartItems').innerHTML = html;
-                $('cartCount').textContent = cart.reduce((s, p) => s + p.qte, 0);
-                $('btnCheckout').disabled = false;
-                $('pdfExportBtn').disabled = !lastFactureNum;
+                toast('Vente validée ! ' + res.type_document + ': ' + res.document + ' (' + res.etat + ')');
+                generateTicket(res);
+                openModal('ticketModal');
             }
-            calculateTotals();
+            resetSale();
+        } else {
+            toast(res.message || 'Erreur', 'error');
         }
+    } catch (err) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        toast(err.message || 'Erreur connexion', 'error');
+    }
+}
 
-        $('btnClear').addEventListener('click', function() {
-            if (cart.length === 0) return;
-            cart = [];
-            renderCart();
-            refreshProductCards();
-            toast('Panier vidé');
+function generateTicket(res) {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('fr-FR');
+    const timeStr = now.toLocaleTimeString('fr-FR');
+    const t = res.totaux;
+
+    let html = `<div style="font-family:monospace;font-size:12px;">
+        <div style="text-align:center;font-weight:700;font-size:16px;margin-bottom:4px;">VENTE COMPTOIR</div>
+        <div style="text-align:center;font-size:11px;color:#64748b;margin-bottom:12px;">${dateStr} ${timeStr}</div>
+        <div style="font-size:11px;margin-bottom:8px;">Client: ${esc(selectedClient.name)} (${selectedClient.code})</div>
+        <div style="font-size:11px;margin-bottom:12px;">${res.type_document}: ${res.document}</div>
+        <div style="font-size:11px;margin-bottom:12px;">Bon livraison: ${res.bon_livraison}</div>
+        <div style="font-size:11px;margin-bottom:12px;">État: <strong>${res.etat}</strong></div>
+        <hr style="border:1px dashed #ccc;">`;
+
+    cart.forEach(p => {
+        html += `<div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span>${esc(p.nom)} x${p.qte}</span>
+            <span>${fmt(p.montant)}</span>
+        </div>`;
+    });
+
+    html += `<hr style="border:1px dashed #ccc;">
+        <div style="display:flex;justify-content:space-between;"><span>Sous-total HT</span><span>${fmt(t.ht)}</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Taxe</span><span>${fmt(t.taxe)}</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Remise</span><span>${fmt(t.remise)}</span></div>
+        <div style="display:flex;justify-content:space-between;font-weight:700;font-size:14px;margin-top:8px;"><span>TOTAL TTC</span><span>${fmt(t.ttc)}</span></div>
+        <div style="display:flex;justify-content:space-between;margin-top:8px;"><span>Avance payée</span><span>${fmt(t.avance)}</span></div>
+        ${t.reste > 0 ? `<div style="display:flex;justify-content:space-between;color:#ef4444;"><span>Reste</span><span>${fmt(t.reste)}</span></div>` : ''}`;
+
+    // Section des lots
+    if (res.lots && res.lots.length > 0) {
+        html += `<hr style="border:1px dashed #ccc;margin-top:8px;">
+            <div style="font-weight:700;margin:8px 0;">CONFIGURATION DES LOTS</div>`;
+        res.lots.forEach(lot => {
+            const ppl = lot.produitsParLot || 0;
+            const nbLots = ppl > 0 ? Math.floor(lot.qte / ppl) : 0;
+            const reste = ppl > 0 ? (lot.qte % ppl) : lot.qte;
+            const resultText = ppl === 0 ? 'Non configuré' : (reste > 0 ? `${nbLots} lot(s) et ${reste} produit(s)` : `${nbLots} lot(s)`);
+            html += `<div style="font-size:10px;margin-bottom:4px;">
+                ${esc(lot.nom)}: ${lot.qte} pcs / ${ppl} par lot = <strong>${resultText}</strong>
+            </div>`;
         });
+        const totalLots = res.lots.reduce((sum, l) => sum + ((l.produitsParLot || 0) > 0 ? Math.floor(l.qte / l.produitsParLot) : 0), 0);
+        html += `<div style="font-weight:700;margin-top:8px;">TOTAL: ${totalLots} lot(s)</div>`;
+    }
 
-        function refreshProductCards() {
-            const q = $('searchInput').value.trim();
-            renderProducts(currentProducts, q.length >= 2 ? q : '');
-        }
+    html += `<hr style="border:1px dashed #ccc;margin-top:8px;">
+        <div style="text-align:center;font-size:10px;color:#94a3b8;margin-top:8px;">Merci !</div>
+    </div>`;
 
-        // ===== TOTAUX =====
-        function calculateTotals() {
-            const ht = cart.reduce((s, p) => s + p.montant, 0);
-            const taxRate = parseFloat($('taxRate').value) || 0;
-            const discRate = parseFloat($('discountRate').value) || 0;
-            const tax = Math.round(ht * taxRate / 100);
-            const disc = Math.round(ht * discRate / 100);
-            const ttc = Math.round(ht + tax - disc);
-            $('totalHT').textContent = fmt(ht);
-            $('totalRemise').textContent = fmt(disc);
-            $('totalTTC').textContent = fmt(ttc);
-        }
-        $('taxRate').addEventListener('change', calculateTotals);
-        $('discountRate').addEventListener('change', calculateTotals);
+    gid('printZone').innerHTML = html;
+}
 
-        function getTTC() {
-            const ht = cart.reduce((s, p) => s + p.montant, 0);
-            const taxRate = parseFloat($('taxRate').value) || 0;
-            const discRate = parseFloat($('discountRate').value) || 0;
-            return Math.round(ht + Math.round(ht * taxRate / 100) - Math.round(ht * discRate / 100));
-        }
+function resetSale() {
+    cart = [];
+    selectedClient = null;
+    renderCart();
+    resetClient();
+    loadProducts();
+    gid('taxRate').value = '0';
+    gid('discountRate').value = '0';
+    calculateTotals();
+}
 
-        // ===== PAIEMENT =====
-        $('btnCheckout').addEventListener('click', function() {
-            if (!selectedClient) {
-                toast('Sélectionnez un client', 'error');
-                return;
-            }
-            if (cart.length === 0) {
-                toast('Panier vide', 'error');
-                return;
-            }
-            calculateTotals();
-            $('payAmount').textContent = fmt(getTTC());
-            $('receivedAmount').value = '';
-            $('changeAmount').textContent = '0 FCFA';
-            $('changeBox').style.background = 'var(--color-primary-soft)';
-            $('changeLbl').textContent = 'Monnaie à rendre';
-            openModal('payModal');
+async function createClient() {
+    const nom = gid('clientNom').value.trim();
+    if (!nom) { toast('Nom requis', 'error'); return; }
+    try {
+        const res = await api('create_customer', {
+            nom,
+            tel: gid('clientTel').value,
+            email: gid('clientEmail').value,
+            csrf_token: CSRF_TOKEN
         });
-
-        document.querySelectorAll('.pay-mode').forEach(btn => {
-            btn.addEventListener('click', function() {
-                document.querySelectorAll('.pay-mode').forEach(b => b.classList.remove('active'));
-                this.classList.add('active');
-                payMode = this.dataset.mode;
-            });
-        });
-
-        $('receivedAmount').addEventListener('input', function() {
-            const received = parseFloat(this.value) || 0;
-            const ttc = getTTC();
-            const change = received - ttc;
-            if (change >= 0) {
-                $('changeLbl').textContent = 'Monnaie à rendre';
-                $('changeAmount').textContent = fmt(change);
-                $('changeBox').style.background = 'var(--color-primary-soft)';
-            } else {
-                $('changeLbl').textContent = 'Montant restant';
-                $('changeAmount').textContent = fmt(Math.abs(change));
-                $('changeBox').style.background = '#fee2e2';
-            }
-        });
-
-        $('btnValidatePay').addEventListener('click', function() {
-            const received = parseFloat($('receivedAmount').value) || 0;
-            const ttc = getTTC();
-            if (received < ttc && payMode === 'Espece') {
-                toast('Montant insuffisant', 'error');
-                return;
-            }
-            const advance = Math.min(received, ttc);
-            const data = {
-                panier: cart.map(p => ({
-                    code: p.code,
-                    prix: p.prix,
-                    prix_achat: p.prix_achat,
-                    qte: p.qte,
-                    montant: p.montant,
-                    lot_id: p.lot_id || null
-                })),
-                client_id: selectedClient.code,
-                mode_reglement: payMode,
-                avance: advance,
-                taux_tva: parseFloat($('taxRate').value) || 0,
-                taux_remise: parseFloat($('discountRate').value) || 0,
-                csrf_token: CSRF_TOKEN
-            };
-            this.disabled = true;
-            this.innerHTML = '<i class="bi bi-spinner"></i> Validation...';
-            api('valider_vente', data)
-                .then(res => {
-                    this.disabled = false;
-                    this.innerHTML = '<i class="bi bi-check-lg"></i> Valider';
-                    if (res.success) {
-                        closeModal('payModal');
-                        lastFactureNum = res.facture;
-                        // Activer les boutons PDF
-                        $('pdfExportBtn').disabled = false;
-                        $('pdfFactureNum').value = lastFactureNum;
-                        $('pdfFactureNumTicket').value = lastFactureNum;
-                        generateTicket(res);
-                        openModal('ticketModal');
-                        toast('Vente validée !');
-                    } else {
-                        toast(res.message || res.error || 'Erreur', 'error');
+        if (res.success) {
+            closeModal('clientModal');
+            gid('clientForm').reset();
+            await loadClients();
+            setTimeout(() => {
+                const select = gid('clientSelect');
+                for (let i = 0; i < select.options.length; i++) {
+                    if (select.options[i].value === res.code) {
+                        select.selectedIndex = i;
+                        jQuery('.selectpicker').selectpicker('refresh');
+                        selectedClient = { code: res.code, name: res.nom };
+                        gid('clientDisplay').style.display = 'block';
+                        gid('clientSelectWrapper').style.display = 'none';
+                        gid('clientName').textContent = res.nom;
+                        gid('clientCode').textContent = res.code;
+                        updateButtons();
+                        break;
                     }
-                })
-                .catch(err => {
-                    this.disabled = false;
-                    this.innerHTML = '<i class="bi bi-check-lg"></i> Valider';
-                    toast(err.message || 'Erreur connexion', 'error');
-                });
-        });
-
-        // ===== TICKET =====
-        function generateTicket(res) {
-            const now = new Date();
-            const dateStr = now.toLocaleDateString('fr-FR');
-            const timeStr = now.toLocaleTimeString('fr-FR');
-            const linesHTML = cart.map(p => `
-                        <tr><td style="text-align:left;padding:4px 0;font-size:12px;">${esc(p.nom)}${p.lot_id ? ' <span style="color:#64748b;font-size:10px;">('+esc(p.lot_id)+')</span>' : ''}</td><td style="text-align:center;padding:4px 0;font-size:12px;">${p.qte}</td><td style="text-align:right;padding:4px 0;font-size:12px;">${fmt(p.prix)}</td><td style="text-align:right;padding:4px 0;font-size:12px;font-weight:600;">${fmt(p.montant)}</td></tr>
-                    `).join('');
-            const t = res.totaux;
-            $('printZone').innerHTML = `
-                        <div style="font-family:monospace;max-width:300px;margin:0 auto;">
-                            <div style="text-align:center;font-weight:700;font-size:16px;margin-bottom:4px;">CAISSE COMPTOIR</div>
-                            <div style="text-align:center;font-size:11px;color:#64748b;margin-bottom:12px;">${dateStr} ${timeStr}</div>
-                            <div style="font-size:11px;margin-bottom:8px;">Client: ${esc(selectedClient.name)} (${selectedClient.code})</div>
-                            <div style="font-size:11px;margin-bottom:12px;">Facture: ${res.facture}</div>
-                            <hr style="border:1px dashed #ccc;">
-                            <table style="width:100%;border-collapse:collapse;"><thead><tr style="font-size:11px;font-weight:600;color:#64748b;"><th style="text-align:left;">Produit</th><th style="text-align:center;">Qté</th><th style="text-align:right;">Prix</th><th style="text-align:right;">Montant</th></tr></thead><tbody>${linesHTML}</tbody></table>
-                            <hr style="border:1px dashed #ccc;">
-                            <div style="font-size:12px;margin-top:8px;">
-                                <div style="display:flex;justify-content:space-between;"><span>HT</span><span>${fmt(t.ht)}</span></div>
-                                ${t.taxe>0?`<div style="display:flex;justify-content:space-between;"><span>TVA</span><span>${fmt(t.taxe)}</span></div>`:''}
-                                ${t.remise>0?`<div style="display:flex;justify-content:space-between;"><span>Remise</span><span>${fmt(t.remise)}</span></div>`:''}
-                                <div style="display:flex;justify-content:space-between;font-weight:700;font-size:14px;margin-top:4px;"><span>TTC</span><span>${fmt(t.ttc)}</span></div>
-                                <div style="display:flex;justify-content:space-between;color:#2563eb;"><span>Avance</span><span>${fmt(parseFloat($('receivedAmount').value)||t.ttc)}</span></div>
-                                ${t.reste>0?`<div style="display:flex;justify-content:space-between;color:#ef4444;"><span>Reste</span><span>${fmt(t.reste)}</span></div>`:''}
-                            </div>
-                            <hr style="border:1px dashed #ccc;margin-top:8px;">
-                            <div style="text-align:center;font-size:10px;color:#94a3b8;margin-top:8px;">Merci !</div>
-                        </div>
-                    `;
+                }
+            }, 300);
+            toast('Client créé');
+        } else {
+            toast(res.message || 'Erreur', 'error');
         }
+    } catch (e) { toast('Erreur connexion', 'error'); }
+}
 
-        function resetSale() {
-            cart = [];
-            selectedClient = null;
-            lastFactureNum = null;
-            renderCart();
-            resetClient();
-            loadInitialProducts();
-            $('taxRate').value = '0';
-            $('discountRate').value = '0';
-            calculateTotals();
-            $('pdfExportBtn').disabled = true;
-            $('pdfFactureNum').value = '';
-            $('pdfFactureNumTicket').value = '';
-        }
-
-        // Ouvrir modale client avec pré-remplissage
-        document.querySelector('[data-bs-target="#clientModal"]').addEventListener('click', function() {
-            const q = $('clientSearch').value.trim();
-            if (q) $('newClientName').value = q;
-        });
-
-        // Fermer modale lot en cliquant sur l'overlay
-        document.querySelector('#lotModal').addEventListener('click', function(e) {
-            if (e.target === this) closeModal('lotModal');
-        });
-
-        // Gestionnaire d'erreur global pour les promesses non capturées
-        window.addEventListener('unhandledrejection', function(event) {
-            console.error('Unhandled rejection:', event.reason);
-            toast(event.reason.message || 'Erreur inattendue', 'error');
-            event.preventDefault();
-        });
-    </script>
+// Initialisation
+jQuery(document).ready(function() {
+    loadClients();
+    loadProducts();
+});
+</script>
 </body>
-
 </html>
