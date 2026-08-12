@@ -77,9 +77,8 @@ function paginer($pdo, $sql, $countSql, $params, $page, $perPage, $rowRenderer, 
 }
 
 function badgeEtatTransaction($type) {
-    if ($type === 'Encaissement') return ['bg-success-subtle text-success', 'Encaissement'];
-    if ($type === 'Paiement') return ['bg-info-subtle text-info', 'Paiement'];
-    if ($type === 'Sortie') return ['bg-danger-subtle text-danger', 'Décaissement'];
+    if ($type === 'Entree') return ['bg-success-subtle text-success', 'Entrée'];
+    if ($type === 'Sortie') return ['bg-danger-subtle text-danger', 'Sortie'];
     return ['bg-primary-subtle text-primary', $type];
 }
 
@@ -89,9 +88,9 @@ function badgeEtatTransaction($type) {
 function chargerTresorerie($pdo, $page) {
     $sql = "SELECT date_transaction, heure_transaction, montant_transaction, montant_total, type_transaction, objet_transaction, mode_reglement, etat_transaction
             FROM transaction
-            WHERE type_transaction IN ('Encaissement','Paiement','Sortie') AND etat_transaction IN ('Succes','Valide')
+            WHERE type_transaction IN ('Entree','Sortie') AND etat_transaction IN ('Succes','Valide')
             ORDER BY date_transaction DESC, heure_transaction DESC";
-    $countSql = "SELECT COUNT(*) FROM transaction WHERE type_transaction IN ('Encaissement','Paiement','Sortie') AND etat_transaction IN ('Succes','Valide')";
+    $countSql = "SELECT COUNT(*) FROM transaction WHERE type_transaction IN ('Entree','Sortie') AND etat_transaction IN ('Succes','Valide')";
     $renderer = function ($row) {
         [$cls, $label] = badgeEtatTransaction($row['type_transaction']);
         $montant = $row['type_transaction'] === 'Sortie' ? (float)$row['montant_total'] : (float)$row['montant_transaction'];
@@ -139,8 +138,8 @@ function chargerTransactionsClients($pdo, $page) {
 function chargerFacturesClients($pdo, $page) {
     $sql = "SELECT f.numero_facture, f.date_facture, f.montant_ttc, f.avance, f.reste, f.etat_facture, ct.nom_prenom_contact AS client
             FROM facture f JOIN contact ct ON f.contact_id = ct.code_contact
-            WHERE ct.type_contact = 'CLIENT' ORDER BY f.date_facture DESC";
-    $countSql = "SELECT COUNT(*) FROM facture f JOIN contact ct ON f.contact_id=ct.code_contact WHERE ct.type_contact='CLIENT'";
+            WHERE ct.type_contact = 'Client' ORDER BY f.date_facture DESC";
+    $countSql = "SELECT COUNT(*) FROM facture f JOIN contact ct ON f.contact_id=ct.code_contact WHERE ct.type_contact='Client'";
     $renderer = function ($row) {
         $etat = $row['etat_facture'];
         $badge = ($etat === 'Payée' || $etat === 'Payer cash') ? 'bg-success-subtle text-success' : (($etat === 'Partielle') ? 'bg-warning-subtle text-warning' : 'bg-danger-subtle text-danger');
@@ -163,8 +162,8 @@ function chargerFacturesClients($pdo, $page) {
 function chargerFacturesFournisseurs($pdo, $page) {
     $sql = "SELECT f.numero_facture, f.date_facture, f.montant_ttc, f.avance, f.reste, f.etat_facture, ct.nom_prenom_contact AS fournisseur
             FROM facture f JOIN contact ct ON f.contact_id = ct.code_contact
-            WHERE ct.type_contact = 'FOURNISSEUR' ORDER BY f.date_facture DESC";
-    $countSql = "SELECT COUNT(*) FROM facture f JOIN contact ct ON f.contact_id=ct.code_contact WHERE ct.type_contact='FOURNISSEUR'";
+            WHERE ct.type_contact = 'Fournisseur' ORDER BY f.date_facture DESC";
+    $countSql = "SELECT COUNT(*) FROM facture f JOIN contact ct ON f.contact_id=ct.code_contact WHERE ct.type_contact='Fournisseur'";
     $renderer = function ($row) {
         $etat = $row['etat_facture'];
         $badge = ($etat === 'Payée' || $etat === 'Payer cash') ? 'bg-success-subtle text-success' : (($etat === 'Partielle') ? 'bg-warning-subtle text-warning' : 'bg-danger-subtle text-danger');
@@ -217,22 +216,30 @@ function chargerAchats($pdo, $page) {
 // ==========================================================
 // ONGLET 6 : SOLDES CLIENTS & FOURNISSEURS
 // ==========================================================
+// Basé sur contact.solde_contact (solde global du contact) :
+//   solde_contact > 0 => le contact doit ce montant
+//   solde_contact < 0 => le contact est en avance (avoir)
+// On liste tout contact dont le solde n'est pas à zéro, dans les deux sens.
 function chargerSoldes($pdo, $type, $page) {
-    $sql = "SELECT ct.code_contact, ct.nom_prenom_contact, ct.telephone_contact,
-            COUNT(f.numero_facture) AS nb_factures,
-            COALESCE(SUM(f.reste),0) AS solde_du,
-            MAX(f.date_facture) AS derniere_facture
+    $sql = "SELECT ct.code_contact, ct.nom_prenom_contact, ct.telephone_contact, ct.solde_contact,
+            (SELECT COUNT(*) FROM facture f2 WHERE f2.contact_id = ct.code_contact AND f2.reste > 0) AS nb_factures,
+            (SELECT MAX(f3.date_facture) FROM facture f3 WHERE f3.contact_id = ct.code_contact) AS derniere_facture
             FROM contact ct
-            JOIN facture f ON f.contact_id = ct.code_contact
-            WHERE ct.type_contact = :type AND f.reste > 0
-            GROUP BY ct.code_contact ORDER BY solde_du DESC";
-    $countSql = "SELECT COUNT(*) FROM (SELECT ct.code_contact FROM contact ct JOIN facture f ON f.contact_id=ct.code_contact WHERE ct.type_contact = :type AND f.reste > 0 GROUP BY ct.code_contact) x";
+            WHERE ct.type_contact = :type AND ct.solde_contact <> 0
+            ORDER BY ct.solde_contact DESC";
+    $countSql = "SELECT COUNT(*) FROM contact ct WHERE ct.type_contact = :type AND ct.solde_contact <> 0";
     $renderer = function ($row) {
+        $solde = (float)$row['solde_contact'];
+        if ($solde > 0) {
+            $soldeHtml = '<span class="text-danger fw-bold">Doit ' . fmt($solde) . ' F</span>';
+        } else {
+            $soldeHtml = '<span class="text-success fw-bold">En avance de ' . fmt(-$solde) . ' F</span>';
+        }
         return '<tr>'
             . '<td class="fw-bold">' . e($row['nom_prenom_contact']) . '</td>'
             . '<td>' . e($row['telephone_contact'] ?? '—') . '</td>'
             . '<td class="text-center">' . (int)$row['nb_factures'] . '</td>'
-            . '<td class="text-end fw-bold text-danger">' . fmt((float)$row['solde_du']) . ' F</td>'
+            . '<td class="text-end">' . $soldeHtml . '</td>'
             . '<td>' . ($row['derniere_facture'] ? date('d/m/Y', strtotime($row['derniere_facture'])) : '—') . '</td>'
             . '</tr>';
     };
@@ -272,19 +279,28 @@ $resSoldesClients   = chargerSoldes($pdo, 'CLIENT', 1);
 $resSoldesFourn     = chargerSoldes($pdo, 'FOURNISSEUR', 1);
 
 // Stats globales
-$encaissements = (float)$pdo->query("SELECT COALESCE(SUM(CAST(montant_transaction AS DECIMAL(12,2))),0) FROM transaction WHERE type_transaction IN ('Encaissement','Paiement') AND etat_transaction IN ('Succes','Valide')")->fetchColumn();
+$encaissements = (float)$pdo->query("SELECT COALESCE(SUM(CAST(montant_transaction AS DECIMAL(12,2))),0) FROM transaction WHERE type_transaction = 'Entree' AND etat_transaction IN ('Succes','Valide')")->fetchColumn();
 $decais        = (float)$pdo->query("SELECT COALESCE(SUM(CAST(montant_total AS DECIMAL(12,2))),0) FROM transaction WHERE type_transaction='Sortie' AND etat_transaction IN ('Succes','Valide')")->fetchColumn();
 $solde_caisse  = (float)$pdo->query("SELECT COALESCE(SUM(solde),0) FROM caisse WHERE statut='Actif'")->fetchColumn();
 $total_achats  = (float)$pdo->query("SELECT COALESCE(SUM(CAST(montant_commande AS DECIMAL(12,2))),0) FROM commande WHERE statut_id='011' AND etat_commande NOT IN ('En attente','Annulé')")->fetchColumn();
-$totalCreances = (float)$pdo->query("SELECT COALESCE(SUM(f.reste),0) FROM facture f JOIN contact ct ON f.contact_id=ct.code_contact WHERE ct.type_contact='CLIENT' AND f.reste > 0")->fetchColumn();
-$totalDettes   = (float)$pdo->query("SELECT COALESCE(SUM(f.reste),0) FROM facture f JOIN contact ct ON f.contact_id=ct.code_contact WHERE ct.type_contact='FOURNISSEUR' AND f.reste > 0")->fetchColumn();
+// Créances / dettes / avances : basées sur le solde global du contact
+// (contact.solde_contact), qui reflète tout crédit accordé ET tout trop-perçu,
+// pas seulement le reste des factures individuellement impayées.
+$totalCreances       = (float)$pdo->query("SELECT COALESCE(SUM(solde_contact),0) FROM contact WHERE type_contact='CLIENT' AND solde_contact > 0")->fetchColumn();
+$totalAvancesClients = (float)$pdo->query("SELECT COALESCE(SUM(-solde_contact),0) FROM contact WHERE type_contact='CLIENT' AND solde_contact < 0")->fetchColumn();
+$totalDettes             = (float)$pdo->query("SELECT COALESCE(SUM(solde_contact),0) FROM contact WHERE type_contact='FOURNISSEUR' AND solde_contact > 0")->fetchColumn();
+$totalAvancesFournisseurs = (float)$pdo->query("SELECT COALESCE(SUM(-solde_contact),0) FROM contact WHERE type_contact='FOURNISSEUR' AND solde_contact < 0")->fetchColumn();
 $solde_net     = $encaissements - $decais;
 
 // Graphique : évolution achats (12 derniers mois)
 $evolAchats = $pdo->query("SELECT DATE_FORMAT(date_commande,'%Y-%m') AS mois, COALESCE(SUM(CAST(montant_commande AS DECIMAL(12,2))),0) AS total FROM commande WHERE statut_id='011' AND etat_commande NOT IN ('En attente','Annulé') AND date_commande >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH) GROUP BY mois ORDER BY mois ASC")->fetchAll(PDO::FETCH_ASSOC);
 
 // Graphique : répartition trésorerie
-$repartitionTreso = $pdo->query("SELECT type_transaction, COALESCE(SUM(CAST(montant_transaction AS DECIMAL(12,2))),0) AS total FROM transaction WHERE type_transaction IN ('Encaissement','Paiement','Sortie') AND etat_transaction IN ('Succes','Valide') GROUP BY type_transaction")->fetchAll(PDO::FETCH_ASSOC);
+// Répartition trésorerie : les types réellement enregistrés par l'application
+// sont uniquement 'Entree' (vente comptoir, règlement client) et 'Sortie'
+// (règlement/décaissement fournisseur) — 'Encaissement'/'Paiement' n'ont jamais
+// existé en base, ce qui faisait que le graphique ne montrait quasiment rien.
+$repartitionTreso = $pdo->query("SELECT type_transaction, COALESCE(SUM(CAST(montant_transaction AS DECIMAL(12,2))),0) AS total FROM transaction WHERE type_transaction IN ('Entree','Sortie') AND etat_transaction IN ('Succes','Valide') GROUP BY type_transaction")->fetchAll(PDO::FETCH_ASSOC);
 
 $onglet = $_GET['onglet'] ?? 'tresorerie';
 $ongletsValides = ['tresorerie', 'transactions_clients', 'factures_clients', 'factures_fournisseurs', 'achats', 'soldes'];
@@ -293,6 +309,8 @@ if (!in_array($onglet, $ongletsValides, true)) $onglet = 'tresorerie';
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rapport Financier</title>
@@ -393,6 +411,10 @@ h1, h2, h3, h4, h5, h6 {
     gap: 8px;
 }
 .chart-card h4 i { font-size: 16px; }
+.chart-card .chart-wrap {
+    position: relative;
+    height: 190px;
+}
 
 /* ===== REPORT CARDS ===== */
 .report-card {
@@ -612,6 +634,8 @@ tbody tr:last-child td { border-bottom: none; }
             ['warning', 'exclamation-triangle', 'Créances clients', fmt($totalCreances) . ' F', ''],
             ['purple', 'truck', 'Dettes fournisseurs', fmt($totalDettes) . ' F', ''],
             ['primary', 'bag', 'Total achats', fmt($total_achats) . ' F', ''],
+            ['success', 'piggy-bank', 'Avances clients', fmt($totalAvancesClients) . ' F', ''],
+            ['success', 'piggy-bank', 'Avances chez fournisseurs', fmt($totalAvancesFournisseurs) . ' F', ''],
         ];
         $colorMap = [
             'primary' => ['var(--color-primary-soft)', 'var(--color-primary)'],
@@ -654,7 +678,9 @@ tbody tr:last-child td { border-bottom: none; }
         <div class="tab-pane fade <?= $onglet=='tresorerie'?'show active':'' ?>" id="pane-tresorerie">
             <div class="chart-card">
                 <h4><i class="bi bi-pie-chart"></i> Répartition trésorerie</h4>
-                <canvas id="chartTreso" height="90"></canvas>
+                <div class="chart-wrap">
+                    <canvas id="chartTreso"></canvas>
+                </div>
             </div>
             <div class="report-card">
                 <h3><i class="bi bi-clock-history"></i> Mouvements de trésorerie <span class="text-muted small ms-2"><?= $resTresorerie['total'] ?> lignes</span></h3>
@@ -731,14 +757,14 @@ tbody tr:last-child td { border-bottom: none; }
         <!-- ONGLET 6 : SOLDES -->
         <div class="tab-pane fade <?= $onglet=='soldes'?'show active':'' ?>" id="pane-soldes">
             <div class="sub-nav">
-                <button type="button" class="active" data-solde="clients"><i class="bi bi-arrow-down-circle"></i> Créances clients (<?= fmt($totalCreances) ?> F)</button>
-                <button type="button" data-solde="fournisseurs"><i class="bi bi-arrow-up-circle"></i> Dettes fournisseurs (<?= fmt($totalDettes) ?> F)</button>
+                <button type="button" class="active" data-solde="clients"><i class="bi bi-arrow-down-circle"></i> Clients — doivent <?= fmt($totalCreances) ?> F / avance <?= fmt($totalAvancesClients) ?> F</button>
+                <button type="button" data-solde="fournisseurs"><i class="bi bi-arrow-up-circle"></i> Fournisseurs — on doit <?= fmt($totalDettes) ?> F / avance <?= fmt($totalAvancesFournisseurs) ?> F</button>
             </div>
             <div class="report-card" id="card-soldes_clients">
                 <h3><i class="bi bi-people"></i> Qui doit de l'argent (factures non soldées)</h3>
                 <div class="table-wrapper">
                     <table>
-                        <thead><tr><th>Client</th><th>Téléphone</th><th>Nb factures dues</th><th>Solde dû</th><th>Dernière facture</th></tr></thead>
+                        <thead><tr><th>Client</th><th>Téléphone</th><th>Nb factures dues</th><th>Solde</th><th>Dernière facture</th></tr></thead>
                         <tbody id="tbody-soldes_clients"><?= $resSoldesClients['tableHtml'] ?></tbody>
                     </table>
                 </div>
@@ -748,7 +774,7 @@ tbody tr:last-child td { border-bottom: none; }
                 <h3><i class="bi bi-truck"></i> Ce qu'on doit aux fournisseurs</h3>
                 <div class="table-wrapper">
                     <table>
-                        <thead><tr><th>Fournisseur</th><th>Téléphone</th><th>Nb factures dues</th><th>Solde dû</th><th>Dernière facture</th></tr></thead>
+                        <thead><tr><th>Fournisseur</th><th>Téléphone</th><th>Nb factures dues</th><th>Solde</th><th>Dernière facture</th></tr></thead>
                         <tbody id="tbody-soldes_fournisseurs"><?= $resSoldesFourn['tableHtml'] ?></tbody>
                     </table>
                 </div>
@@ -780,16 +806,28 @@ $(document).ready(function () {
     });
 
     // Graphique répartition trésorerie
+    <?php
+        $labelsTreso = [];
+        $colorsTreso = [];
+        $dataTreso = [];
+        $colorParType = ['Entree' => '#10b981', 'Sortie' => '#ef4444'];
+        $labelParType = ['Entree' => 'Entrées', 'Sortie' => 'Sorties'];
+        foreach ($repartitionTreso as $r) {
+            $labelsTreso[] = $labelParType[$r['type_transaction']] ?? $r['type_transaction'];
+            $colorsTreso[] = $colorParType[$r['type_transaction']] ?? '#64748b';
+            $dataTreso[] = floatval($r['total']);
+        }
+    ?>
     <?php if (!empty($repartitionTreso)): ?>
     var ctxTreso = document.getElementById('chartTreso')?.getContext('2d');
     if (ctxTreso) {
         new Chart(ctxTreso, {
             type: 'doughnut',
             data: {
-                labels: <?= json_encode(array_map(fn($r) => $r['type_transaction'], $repartitionTreso)) ?>,
+                labels: <?= json_encode($labelsTreso) ?>,
                 datasets: [{
-                    data: <?= json_encode(array_map(fn($r) => floatval($r['total']), $repartitionTreso)) ?>,
-                    backgroundColor: ['#10b981', '#0891b2', '#ef4444'],
+                    data: <?= json_encode($dataTreso) ?>,
+                    backgroundColor: <?= json_encode($colorsTreso) ?>,
                     borderWidth: 0,
                     borderRadius: 4,
                     spacing: 3

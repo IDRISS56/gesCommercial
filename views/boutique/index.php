@@ -264,6 +264,8 @@ $inactifs = $pdo->query("SELECT COUNT(*) FROM boutique WHERE etat_boutique = 'In
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gestion des boutiques</title>
@@ -711,11 +713,7 @@ $(document).ready(function() {
     }
     
     setTimeout(function() { $('.alert').alert('close'); }, 5000);
-    
-    <?php if ($message): ?>
-    showToast('<?= addslashes($message) ?>', '<?= $messageType === 'success' ? 'success' : ($messageType === 'danger' ? 'error' : 'info') ?>');
-    <?php endif; ?>
-    
+   
     function rechercher(page) {
         page = page || 1;
         var search = $('#searchInput').val();

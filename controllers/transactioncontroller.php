@@ -1,7 +1,7 @@
 ﻿<?php
 class transaction {
     public function gestion() {
-        requirePermission(['Administrateur', 'Superviseur','Proprietaire']);
+        requirePermission(['Administrateur', 'Superviseur','Caisse']);
         include "views/transaction/index.php";
     }
 }

@@ -3,26 +3,10 @@
 // Fusion de : chiffre_affaires.php, resume_ventes.php, marge_beneficiaire.php,
 // rentabilite_ventes.php, performance_vendeur.php
 // Filtres (période + boutique) partagés entre les 5 onglets.
+// Toutes les interactions se font en POST (sauf réinitialisation en GET).
+// Le champ "Valeur" se met à jour dynamiquement sans rechargement.
 require 'databases/database.php';
 require 'fonctions_rapport.php';
-
-// - Authentification -
-if (!isset($_SESSION['user_id'])) {
-    header('Location: ../utilisateur/login');
-    exit;
-}
-$stmtU = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
-$stmtU->execute([$_SESSION['user_id']]);
-$user = $stmtU->fetch(PDO::FETCH_ASSOC);
-if (!$user) {
-    session_destroy();
-    header('Location: ../utilisateur/login');
-    exit;
-}
-if (!in_array($user['role'], ['Administrateur', 'Superviseur', 'Proprietaire'], true)) {
-    http_response_code(403);
-    die("Accès non autorisé à ce rapport.");
-}
 
 if (!function_exists('e')) {
     function e($str) { return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8'); }
@@ -32,10 +16,10 @@ if (!function_exists('fmt')) {
 }
 
 // ==========================================================
-// FILTRES PARTAGÉS : PÉRIODE + BOUTIQUE
+// FILTRES PARTAGÉS : PÉRIODE + BOUTIQUE (en POST prioritaire)
 // ==========================================================
 $periodesValides = ['journalier', 'hebdomadaire', 'mensuel', 'trimestriel', 'semestriel', 'annuel'];
-$periode = $_GET['periode'] ?? $_POST['periode'] ?? 'journalier';
+$periode = $_POST['periode'] ?? $_GET['periode'] ?? 'journalier';
 if (!in_array($periode, $periodesValides, true)) $periode = 'journalier';
 
 function valeurParDefaut($periode) {
@@ -49,8 +33,8 @@ function valeurParDefaut($periode) {
     }
 }
 
-$valeur = $_GET['valeur'] ?? $_POST['valeur'] ?? valeurParDefaut($periode);
-$boutiqueId = trim($_GET['boutique_id'] ?? $_POST['boutique_id'] ?? '');
+$valeur = $_POST['valeur'] ?? $_GET['valeur'] ?? valeurParDefaut($periode);
+$boutiqueId = trim($_POST['boutique_id'] ?? $_GET['boutique_id'] ?? '');
 
 // Construction de la clause de date (sur c.date_commande) selon la période
 $whereDate = "1=1";
@@ -107,10 +91,17 @@ $whereVente = "c.statut_id='012' AND c.etat_commande NOT IN ('En attente','Annul
 $whereFull = "$whereVente AND $whereDate$whereBoutique";
 $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
 
+// Onglet
+$onglet = $_POST['onglet'] ?? $_GET['onglet'] ?? 'ca';
+if (!in_array($onglet, ['ca', 'ventes', 'marge', 'rentabilite', 'vendeurs'], true)) $onglet = 'ca';
+
 // ==========================================================
 // FONCTION DE RENDU DU CHAMP VALEUR SELON LA PÉRIODE
 // ==========================================================
+$moisNoms = ['01'=>'Janvier','02'=>'Février','03'=>'Mars','04'=>'Avril','05'=>'Mai','06'=>'Juin','07'=>'Juillet','08'=>'Août','09'=>'Septembre','10'=>'Octobre','11'=>'Novembre','12'=>'Décembre'];
+
 function renderValeurInput($periode, $valeur) {
+    global $moisNoms;
     switch ($periode) {
         case 'journalier':
             echo '<input type="date" name="valeur" class="form-select" value="' . e($valeur) . '">';
@@ -119,7 +110,16 @@ function renderValeurInput($periode, $valeur) {
             echo '<input type="week" name="valeur" class="form-select" value="' . e($valeur) . '">';
             break;
         case 'mensuel':
-            echo '<input type="month" name="valeur" class="form-select" value="' . e($valeur) . '">';
+            echo '<select name="valeur" class="form-select">';
+            $ac = (int)date('Y');
+            for ($a = $ac - 2; $a <= $ac + 1; $a++) {
+                foreach ($moisNoms as $num => $nom) {
+                    $v = "$a-$num";
+                    $sel = ($v === $valeur) ? ' selected' : '';
+                    echo "<option value=\"$v\"$sel>$nom $a</option>";
+                }
+            }
+            echo '</select>';
             break;
         case 'trimestriel':
             echo '<select name="valeur" class="form-select">';
@@ -356,7 +356,7 @@ function chargerVendeurs($pdo, $whereFull, $paramsBoutique, $page) {
 }
 
 // ==========================================================
-// DISPATCHER AJAX
+// DISPATCHER AJAX (utilise les données POST du formulaire)
 // ==========================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $tab = $_POST['tab'] ?? 'ca';
@@ -422,13 +422,12 @@ $sqlMargeCat = "SELECT cat.titre_categorie, COALESCE(SUM(CAST(c.montant_commande
 $stmt = $pdo->prepare($sqlMargeCat);
 $stmt->execute($paramsBoutique);
 $margeCat = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-$onglet = $_GET['onglet'] ?? 'ca';
-if (!in_array($onglet, ['ca', 'ventes', 'marge', 'rentabilite', 'vendeurs'], true)) $onglet = 'ca';
 ?>
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rapport Commercial</title>
@@ -573,7 +572,7 @@ h1, h2, h3, h4, h5, h6 {
     color: var(--text-primary);
 }
 
-/* ===== ONGLETS ===== */
+/* ===== ONGLETS (en boutons) ===== */
 .nav-tabs {
     border-bottom: 2px solid var(--border-color);
     margin-bottom: 20px;
@@ -591,6 +590,8 @@ h1, h2, h3, h4, h5, h6 {
     display: flex;
     align-items: center;
     gap: 6px;
+    background: transparent;
+    cursor: pointer;
 }
 .nav-tabs .nav-link:hover {
     color: var(--color-primary);
@@ -842,7 +843,7 @@ tbody tr:last-child td { border-bottom: none; }
 
     <!-- Filtres -->
     <div class="filters-section">
-        <form method="GET" id="filterFormMain">
+        <form method="POST" id="filterFormMain">
             <input type="hidden" name="onglet" id="ongletInput" value="<?= e($onglet) ?>">
             <div class="d-flex flex-wrap align-items-end gap-3">
                 <div class="flex-grow-1" style="min-width: 180px;">
@@ -879,13 +880,33 @@ tbody tr:last-child td { border-bottom: none; }
         </form>
     </div>
 
-    <!-- Onglets -->
+    <!-- Onglets (boutons submit) -->
     <ul class="nav nav-tabs" id="rapportTabs" role="tablist">
-        <li class="nav-item"><button class="nav-link <?= $onglet=='ca'?'active':'' ?>" data-bs-toggle="tab" data-bs-target="#pane-ca" type="button" data-tab="ca"><i class="bi bi-cash-stack"></i> Chiffre d'affaires</button></li>
-        <li class="nav-item"><button class="nav-link <?= $onglet=='ventes'?'active':'' ?>" data-bs-toggle="tab" data-bs-target="#pane-ventes" type="button" data-tab="ventes"><i class="bi bi-cart-check"></i> Résumé des ventes</button></li>
-        <li class="nav-item"><button class="nav-link <?= $onglet=='marge'?'active':'' ?>" data-bs-toggle="tab" data-bs-target="#pane-marge" type="button" data-tab="marge"><i class="bi bi-piggy-bank"></i> Marge bénéficiaire</button></li>
-        <li class="nav-item"><button class="nav-link <?= $onglet=='rentabilite'?'active':'' ?>" data-bs-toggle="tab" data-bs-target="#pane-rentabilite" type="button" data-tab="rentabilite"><i class="bi bi-graph-up-arrow"></i> Rentabilité des ventes</button></li>
-        <li class="nav-item"><button class="nav-link <?= $onglet=='vendeurs'?'active':'' ?>" data-bs-toggle="tab" data-bs-target="#pane-vendeurs" type="button" data-tab="vendeurs"><i class="bi bi-people"></i> Performance vendeurs</button></li>
+        <li class="nav-item">
+            <button type="submit" name="onglet" value="ca" class="nav-link <?= $onglet=='ca'?'active':'' ?>" form="filterFormMain">
+                <i class="bi bi-cash-stack"></i> Chiffre d'affaires
+            </button>
+        </li>
+        <li class="nav-item">
+            <button type="submit" name="onglet" value="ventes" class="nav-link <?= $onglet=='ventes'?'active':'' ?>" form="filterFormMain">
+                <i class="bi bi-cart-check"></i> Résumé des ventes
+            </button>
+        </li>
+        <li class="nav-item">
+            <button type="submit" name="onglet" value="marge" class="nav-link <?= $onglet=='marge'?'active':'' ?>" form="filterFormMain">
+                <i class="bi bi-piggy-bank"></i> Marge bénéficiaire
+            </button>
+        </li>
+        <li class="nav-item">
+            <button type="submit" name="onglet" value="rentabilite" class="nav-link <?= $onglet=='rentabilite'?'active':'' ?>" form="filterFormMain">
+                <i class="bi bi-graph-up-arrow"></i> Rentabilité des ventes
+            </button>
+        </li>
+        <li class="nav-item">
+            <button type="submit" name="onglet" value="vendeurs" class="nav-link <?= $onglet=='vendeurs'?'active':'' ?>" form="filterFormMain">
+                <i class="bi bi-people"></i> Performance vendeurs
+            </button>
+        </li>
     </ul>
 
     <div class="tab-content">
@@ -973,43 +994,32 @@ tbody tr:last-child td { border-bottom: none; }
     </div>
 </div>
 
-<!-- Formulaire caché pour la pagination AJAX -->
-<form id="filterForm" style="display:none;">
-    <input type="hidden" name="periode" value="<?= e($periode) ?>">
-    <input type="hidden" name="valeur" value="<?= e($valeur) ?>">
-    <input type="hidden" name="boutique_id" value="<?= e($boutiqueId) ?>">
-</form>
-
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
 <script>
 $(document).ready(function () {
+    // Initialisation des selectpicker
     $('.selectpicker').selectpicker('destroy');
     $('.selectpicker').selectpicker();
 
-    // Synchroniser le formulaire caché avec les filtres visibles avant chaque requête AJAX
-    function syncFilterForm() {
-        $('#filterForm input[name="periode"]').val($('#periodeSelect').val());
-        var $valeurInput = $('#valeurContainer').find('[name="valeur"]');
-        $('#filterForm input[name="valeur"]').val($valeurInput.val());
-        $('#filterForm input[name="boutique_id"]').val($('#boutiqueSelect').val());
-    }
-
-    // Quand la période change → on remplace le champ "Valeur" dynamiquement
-    $('#periodeSelect').on('changed.bs.select', function () {
-        var periode = $(this).val();
-        var $container = $('#valeurContainer');
+    // Mise à jour dynamique du champ "Valeur" sans rechargement
+    function genererChampValeur(periode) {
         var html = '';
+        var maintenant = new Date();
+        var annee = maintenant.getFullYear();
+        var mois = maintenant.getMonth() + 1;
+        var jour = maintenant.getDate();
 
         switch (periode) {
             case 'journalier':
-                html = '<input type="date" name="valeur" class="form-select" value="' + new Date().toISOString().split('T')[0] + '">';
+                var dateStr = maintenant.toISOString().split('T')[0];
+                html = '<input type="date" name="valeur" class="form-select" value="' + dateStr + '">';
                 break;
             case 'hebdomadaire':
-                var now = new Date();
-                var tempDate = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+                // Calcul de la semaine ISO
+                var tempDate = new Date(Date.UTC(annee, mois - 1, jour));
                 var dayNum = tempDate.getUTCDay() || 7;
                 tempDate.setUTCDate(tempDate.getUTCDate() + 4 - dayNum);
                 var yearStart = new Date(Date.UTC(tempDate.getUTCFullYear(), 0, 1));
@@ -1018,136 +1028,78 @@ $(document).ready(function () {
                 html = '<input type="week" name="valeur" class="form-select" value="' + weekStr + '">';
                 break;
             case 'mensuel':
-                var m = new Date();
-                var monthStr = m.getFullYear() + '-' + ((m.getMonth() + 1) < 10 ? '0' : '') + (m.getMonth() + 1);
-                html = '<input type="month" name="valeur" class="form-select" value="' + monthStr + '">';
+                var moisNoms = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+                html = '<select name="valeur" class="form-select">';
+                for (var a = annee - 2; a <= annee + 1; a++) {
+                    for (var m = 1; m <= 12; m++) {
+                        var val = a + '-' + (m < 10 ? '0' : '') + m;
+                        var selected = (a === annee && m === mois) ? ' selected' : '';
+                        html += '<option value="' + val + '"' + selected + '>' + moisNoms[m-1] + ' ' + a + '</option>';
+                    }
+                }
+                html += '</select>';
                 break;
             case 'trimestriel':
-                var ac = new Date().getFullYear();
-                var ct = Math.ceil((new Date().getMonth() + 1) / 3);
+                var trimestre = Math.ceil(mois / 3);
                 html = '<select name="valeur" class="form-select">';
-                for (var a = ac - 2; a <= ac + 1; a++) {
+                for (var a = annee - 2; a <= annee + 1; a++) {
                     for (var t = 1; t <= 4; t++) {
-                        var sel = (a == ac && t == ct) ? ' selected' : '';
-                        html += '<option value="' + a + '-T' + t + '"' + sel + '>T' + t + ' ' + a + '</option>';
+                        var val = a + '-T' + t;
+                        var selected = (a === annee && t === trimestre) ? ' selected' : '';
+                        html += '<option value="' + val + '"' + selected + '>T' + t + ' ' + a + '</option>';
                     }
                 }
                 html += '</select>';
                 break;
             case 'semestriel':
-                var ac2 = new Date().getFullYear();
-                var cs = (new Date().getMonth() < 6) ? 1 : 2;
+                var semestre = (mois <= 6) ? 1 : 2;
                 html = '<select name="valeur" class="form-select">';
-                for (var a = ac2 - 2; a <= ac2 + 1; a++) {
+                for (var a = annee - 2; a <= annee + 1; a++) {
                     for (var s = 1; s <= 2; s++) {
-                        var lib = (s == 1) ? 'Jan-Juin' : 'Juil-Déc';
-                        var sel = (a == ac2 && s == cs) ? ' selected' : '';
-                        html += '<option value="' + a + '-S' + s + '"' + sel + '>S' + s + ' ' + a + ' (' + lib + ')</option>';
+                        var lib = (s === 1) ? 'Jan-Juin' : 'Juil-Déc';
+                        var val = a + '-S' + s;
+                        var selected = (a === annee && s === semestre) ? ' selected' : '';
+                        html += '<option value="' + val + '"' + selected + '>S' + s + ' ' + a + ' (' + lib + ')</option>';
                     }
                 }
                 html += '</select>';
                 break;
             case 'annuel':
-                var ac3 = new Date().getFullYear();
                 html = '<select name="valeur" class="form-select">';
-                for (var a = ac3 - 3; a <= ac3 + 1; a++) {
-                    var sel = (a == ac3) ? ' selected' : '';
-                    html += '<option value="' + a + '"' + sel + '>' + a + '</option>';
+                for (var a = annee - 3; a <= annee + 1; a++) {
+                    var selected = (a === annee) ? ' selected' : '';
+                    html += '<option value="' + a + '"' + selected + '>' + a + '</option>';
                 }
                 html += '</select>';
                 break;
+            default:
+                html = '<input type="date" name="valeur" class="form-select" value="' + maintenant.toISOString().split('T')[0] + '">';
         }
+        return html;
+    }
 
-        $container.html(html);
-        syncFilterForm();
+    // Lorsque la période change, mettre à jour le champ sans recharger
+    // On utilise l'événement 'change' natif pour plus de fiabilité
+    $('#periodeSelect').on('change', function () {
+        var periode = $(this).val();
+        var nouveauHtml = genererChampValeur(periode);
+        $('#valeurContainer').html(nouveauHtml);
+        // On force le rafraîchissement des selectpicker si besoin (mais on n'en a pas pour les champs valeur)
+        // On peut aussi propager le changement à l'onglet actif si on veut soumettre automatiquement ?
+        // On garde le comportement : l'utilisateur clique sur Filtrer pour appliquer.
+        // Mais on pourrait aussi soumettre automatiquement si souhaité.
+        // Pour rester cohérent avec la demande "instantané", on ne soumet pas, on met juste à jour le champ.
     });
 
-    // Synchroniser quand la valeur change aussi
-    $('#valeurContainer').on('change', '[name="valeur"]', syncFilterForm);
-    $('#boutiqueSelect').on('changed.bs.select', syncFilterForm);
-
-    // Mémoriser l'onglet actif dans l'URL
-    $('#rapportTabs button').on('shown.bs.tab', function (e) {
-        var tab = $(e.target).data('tab');
-        $('#ongletInput').val(tab);
-        var url = new URL(window.location.href);
-        url.searchParams.set('onglet', tab);
-        history.replaceState(null, '', url);
-    });
-
-    // --- Graphiques ---
-    var ctxCA = document.getElementById('chartCA')?.getContext('2d');
-    if (ctxCA) {
-        new Chart(ctxCA, {
-            type: 'line',
-            data: {
-                labels: <?= json_encode(array_column($caMensuel, 'mois')) ?>,
-                datasets: [{
-                    label: 'CA (FCFA)',
-                    data: <?= json_encode(array_map(fn($r) => floatval($r['ca']), $caMensuel)) ?>,
-                    borderColor: '#4f46e5',
-                    backgroundColor: 'rgba(79, 70, 229, 0.08)',
-                    tension: 0.3,
-                    fill: true,
-                    borderWidth: 2.5,
-                    pointRadius: 4,
-                    pointBackgroundColor: '#4f46e5'
-                }]
-            },
-            options: {
-                plugins: { legend: { display: false } },
-                scales: { y: { beginAtZero: true, grid: { color: '#f1f5f9' } }, x: { grid: { display: false } } }
-            }
-        });
-    }
-    var ctxCat = document.getElementById('chartCat')?.getContext('2d');
-    if (ctxCat) {
-        new Chart(ctxCat, {
-            type: 'bar',
-            data: {
-                labels: <?= json_encode(array_map(fn($r) => $r['titre_categorie'] ?? 'Sans catégorie', $catVentes)) ?>,
-                datasets: [{
-                    label: 'CA (FCFA)',
-                    data: <?= json_encode(array_map(fn($r) => floatval($r['ca']), $catVentes)) ?>,
-                    backgroundColor: 'rgba(79, 70, 229, 0.85)',
-                    borderRadius: 6
-                }]
-            },
-            options: {
-                plugins: { legend: { display: false } },
-                scales: { y: { beginAtZero: true, grid: { color: '#f1f5f9' } }, x: { grid: { display: false } } }
-            }
-        });
-    }
-    var ctxMarge = document.getElementById('chartMarge')?.getContext('2d');
-    if (ctxMarge) {
-        new Chart(ctxMarge, {
-            type: 'bar',
-            data: {
-                labels: <?= json_encode(array_map(fn($r) => $r['titre_categorie'] ?? 'Sans catégorie', $margeCat)) ?>,
-                datasets: [{
-                    label: 'Marge (FCFA)',
-                    data: <?= json_encode(array_map(fn($r) => floatval($r['marge']), $margeCat)) ?>,
-                    backgroundColor: 'rgba(16, 185, 129, 0.85)',
-                    borderRadius: 6
-                }]
-            },
-            options: {
-                plugins: { legend: { display: false } },
-                scales: { y: { beginAtZero: true, grid: { color: '#f1f5f9' } }, x: { grid: { display: false } } }
-            }
-        });
-    }
-
-    // --- Pagination AJAX par onglet ---
+    // Pagination AJAX : utiliser les données du formulaire principal
     function chargerPage(tab, page) {
-        syncFilterForm();
-        var data = $('#filterForm').serialize() + '&ajax=1&tab=' + tab + '&page=' + page;
+        var data = $('#filterFormMain').serialize() + '&ajax=1&tab=' + tab + '&page=' + page;
         $.post(window.location.pathname, data, function (res) {
             $('#tbody-' + tab).html(res.table);
             $('#pagination-' + tab).html(res.pagination);
         }, 'json');
     }
+
     $('.tab-content').on('click', '.pagination .page-link', function (e) {
         e.preventDefault();
         var page = $(this).data('page');
@@ -1156,6 +1108,78 @@ $(document).ready(function () {
         chargerPage(tab, page);
     });
 });
+
+// Graphiques (inchangés)
+<?php if (!empty($caMensuel)): ?>
+const ctxCA = document.getElementById('chartCA')?.getContext('2d');
+if (ctxCA) {
+    new Chart(ctxCA, {
+        type: 'line',
+        data: {
+            labels: <?= json_encode(array_column($caMensuel, 'mois')) ?>,
+            datasets: [{
+                label: 'CA (FCFA)',
+                data: <?= json_encode(array_map(fn($r) => floatval($r['ca']), $caMensuel)) ?>,
+                borderColor: '#4f46e5',
+                backgroundColor: 'rgba(79, 70, 229, 0.08)',
+                tension: 0.3,
+                fill: true,
+                borderWidth: 2.5,
+                pointRadius: 4,
+                pointBackgroundColor: '#4f46e5'
+            }]
+        },
+        options: {
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true, grid: { color: '#f1f5f9' } }, x: { grid: { display: false } } }
+        }
+    });
+}
+<?php endif; ?>
+
+<?php if (!empty($catVentes)): ?>
+const ctxCat = document.getElementById('chartCat')?.getContext('2d');
+if (ctxCat) {
+    new Chart(ctxCat, {
+        type: 'bar',
+        data: {
+            labels: <?= json_encode(array_map(fn($r) => $r['titre_categorie'] ?? 'Sans catégorie', $catVentes)) ?>,
+            datasets: [{
+                label: 'CA (FCFA)',
+                data: <?= json_encode(array_map(fn($r) => floatval($r['ca']), $catVentes)) ?>,
+                backgroundColor: 'rgba(79, 70, 229, 0.85)',
+                borderRadius: 6
+            }]
+        },
+        options: {
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true, grid: { color: '#f1f5f9' } }, x: { grid: { display: false } } }
+        }
+    });
+}
+<?php endif; ?>
+
+<?php if (!empty($margeCat)): ?>
+const ctxMarge = document.getElementById('chartMarge')?.getContext('2d');
+if (ctxMarge) {
+    new Chart(ctxMarge, {
+        type: 'bar',
+        data: {
+            labels: <?= json_encode(array_map(fn($r) => $r['titre_categorie'] ?? 'Sans catégorie', $margeCat)) ?>,
+            datasets: [{
+                label: 'Marge (FCFA)',
+                data: <?= json_encode(array_map(fn($r) => floatval($r['marge']), $margeCat)) ?>,
+                backgroundColor: 'rgba(16, 185, 129, 0.85)',
+                borderRadius: 6
+            }]
+        },
+        options: {
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true, grid: { color: '#f1f5f9' } }, x: { grid: { display: false } } }
+        }
+    });
+}
+<?php endif; ?>
 </script>
 </body>
 </html>

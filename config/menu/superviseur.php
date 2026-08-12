@@ -2,6 +2,8 @@
  <html lang="fr">
 
  <head>
+<?php include "includes/pwa_head.php"; ?>
+
      <meta charset="UTF-8">
      <meta name="viewport" content="width=device-width, initial-scale=1.0">
      <title>Sutura Group| Système de gestion</title>
@@ -1299,12 +1301,12 @@
                                 echo 'N/A';
                             } ?></span>
                  </div>
-                 <div class="notification-bell" id="notificationBell">
+                 <!-- <div class="notification-bell" id="notificationBell">
                      <i class="bi-bell-fill"></i>
                      <span class="notification-badge" id="notificationBadge">
                          6
                      </span>
-                 </div>
+                 </div> -->
                  <button class="color-picker-btn" id="colorPickerBtn" title="Choisir une palette">
                      <i class="bi-palette-fill"></i>
                  </button>
@@ -1814,6 +1816,11 @@
                          label: 'Produits',
                          url: '/produit/gestion'
                      },
+                     {
+                         icon: 'bi-boxes',
+                         label: 'Configuration des lots',
+                         url: '/produit/lots'
+                     },
 
                      {
                          icon: 'bi-geo',
@@ -1853,11 +1860,6 @@
                          icon: 'bi-list-ul',
                          label: 'Ajustement du stock',
                          url: '/produit/ajustement'
-                     },
-                     {
-                         icon: 'bi-bar-chart',
-                         label: 'Stock disponible',
-                         url: '/produit/stockDisponible'
                      }
 
                  ]
@@ -1869,15 +1871,22 @@
                  emoji: '🛒',
                  items: [{
                          icon: 'bi-list-ul',
-                         label: 'Vente au Comptoir',
+                         label: 'Vente en Détail',
                          url: '/publics/vente'
                      },
 
+
                      {
                          icon: 'bi-list-ul',
-                         label: 'Suivi de vente',
+                         label: 'Bon de Commande',
                          url: '/commande/vente'
                      },
+
+                    //  {
+                    //      icon: 'bi-cash-coin',
+                    //      label: 'Avoirs Clients',
+                    //      url: '/facture/avoirClient'
+                    //  },
 
                      {
                          icon: 'bi-cash-coin',
@@ -1906,7 +1915,7 @@
 
                      {
                          icon: 'bi-list-ul',
-                         label: 'Suivi des achats',
+                         label: 'Bon de Commande fournisseur',
                          url: '/commande/suiviAchat'
                      },
 
@@ -1944,31 +1953,24 @@
              },
 
              {
-                 key: 'configuration',
-                 title: 'CONFIGURATIONS',
-                 icon: 'bi-clipboard-check',
-                 emoji: '🛠️',
-                 items: [{
-                         icon: 'bi-geo',
-                         label: 'Boutiques',
-                         url: '/boutique/gestion'
-                     },
-
-                     {
-                         icon: 'bi-envelope',
-                         label: 'Taxes',
-                         url: '/taxe/gestion'
-                     }
-
-                 ]
-             },
-
-             {
     key: 'Rapport',
     title: 'RAPPORTS',
     icon: 'bi-clock-history',
     emoji: '📈',
     items: [
+        
+         {
+            icon: 'bi-arrow-left-right',
+            label: 'Historique des Produits',
+            url: '/rapport/historiqueProduit'
+         },
+
+          {
+            icon: 'bi-arrow-left-right',
+            label: 'Mouvement de Stock',
+            url: '/rapport/mouvementStock'
+         },
+
         { 
             icon: 'bi-wallet2',
             label: 'Rapport Commercial',
@@ -1979,13 +1981,8 @@
             icon: 'bi-bar-chart-line',
             label: 'Rapport Financier',
             url: '/rapport/rapportFinancier'
-        },
+        }
 
-        {
-            icon: 'bi-arrow-left-right',
-            label: 'Mouvement de Stock',
-            url: '/rapport/mouvementStock'
-         }
     ]
 }
          ];

@@ -1,10 +1,5 @@
 <?php
-require __DIR__ . '/../../databases/database.php';
-
-if (!isset($_SESSION['user_id'])) {
-    header('Location: ../utilisateur/login');
-    exit;
-}
+require 'databases/database.php';
 
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
@@ -36,6 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
     } else {
         $numero_facture = trim($_POST['numero_facture'] ?? '');
         $fournisseur_id = trim($_POST['fournisseur_id'] ?? '');
+        $type_operation = trim($_POST['type_operation'] ?? 'facture'); // 'facture' (règlement/avance) ou 'depense'
         $montant = floatval(str_replace(',', '.', $_POST['montant'] ?? 0));
         $mode_reglement = trim($_POST['mode_reglement'] ?? 'Espece');
         $numero_reglement = trim($_POST['numero_reglement'] ?? '');
@@ -58,9 +54,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
             $pdo->beginTransaction();
 
             // ============================================================
-            // CAS 1 : DÉCAISSEMENT DIRECT (DÉPENSE) SANS FACTURE
+            // CAS 1 : DÉCAISSEMENT DIRECT (DÉPENSE) — n'affecte jamais le
+            // solde d'un fournisseur, c'est une sortie de caisse pure.
             // ============================================================
-            if (empty($numero_facture)) {
+            if ($type_operation === 'depense') {
                 if (empty($fournisseur_id)) {
                     throw new Exception("Veuillez sélectionner un fournisseur ou une facture.");
                 }
@@ -101,15 +98,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 $messageType = 'success';
             }
             // ============================================================
-            // CAS 2 : RÈGLEMENT D'UNE FACTURE FOURNISSEUR
+            // CAS 2 : RÈGLEMENT D'UNE FACTURE FOURNISSEUR, ET/OU AVANCE
+            // SANS FACTURE (le fournisseur ne doit rien pour l'instant mais
+            // on veut lui verser une avance).
             // ============================================================
             else {
-                $stmt = $pdo->prepare("SELECT * FROM facture WHERE numero_facture = ? AND type_facture = 'Fournisseur' FOR UPDATE");
-                $stmt->execute([$numero_facture]);
-                $facture = $stmt->fetch(PDO::FETCH_ASSOC);
-                if (!$facture) throw new Exception("Facture introuvable.");
-                if ($facture['statut_facture'] !== 'Validee') throw new Exception("Seule une facture validée peut recevoir un règlement.");
-                if ($montant > floatval($facture['reste'])) throw new Exception("Le montant dépasse le reste à payer (" . fmt($facture['reste']) . " F).");
+                $facture = null;
+                if (!empty($numero_facture)) {
+                    $stmt = $pdo->prepare("SELECT * FROM facture WHERE numero_facture = ? AND type_facture = 'Fournisseur' FOR UPDATE");
+                    $stmt->execute([$numero_facture]);
+                    $facture = $stmt->fetch(PDO::FETCH_ASSOC);
+                    if (!$facture) throw new Exception("Facture introuvable.");
+                    if ($facture['statut_facture'] !== 'Validee') throw new Exception("Seule une facture validée peut recevoir un règlement.");
+                    $fournisseur_id = $facture['contact_id'];
+                    // Un règlement peut désormais dépasser le reste de CETTE facture : le
+                    // surplus part en avance chez ce fournisseur (voir solde_contact plus bas).
+                } else {
+                    if (empty($fournisseur_id)) throw new Exception("Veuillez sélectionner un fournisseur.");
+                    $stmtF = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ? AND type_contact = 'Fournisseur' FOR UPDATE");
+                    $stmtF->execute([$fournisseur_id]);
+                    if (!$stmtF->fetch()) throw new Exception("Fournisseur introuvable.");
+                }
+                // La seule contrainte qui reste est la disponibilité physique de la
+                // caisse (vérifiée juste après).
 
                 $stmt = $pdo->prepare("SELECT * FROM caisse WHERE statut = 'Actif' AND (boutique_id = ? OR boutique_id IS NULL) ORDER BY boutique_id IS NULL LIMIT 1 FOR UPDATE");
                 $stmt->execute([$user['boutique_id']]);
@@ -124,17 +135,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 $soldeAvant = floatval($caisse['solde']);
                 $soldeApres = $soldeAvant - $montant;
                 $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
+                $objetTransaction = $facture ? 'Règlement facture fournisseur' : 'Avance / versement fournisseur';
 
                 $stmtTr = $pdo->prepare("INSERT INTO transaction
                     (numero_transaction, date_transaction, heure_transaction, montant_transaction,
                      frais_transaction, montant_total, type_transaction, objet_transaction,
                      caisse_id, facture_id, mode_reglement, numero_reglement, reference_reglement,
                      utilisateur_id, etat_transaction)
-                    VALUES (?, ?, CURTIME(), ?, 0, ?, 'Sortie', 'Règlement facture fournisseur',
+                    VALUES (?, ?, CURTIME(), ?, 0, ?, 'Sortie', ?,
                             ?, ?, ?, ?, ?, ?, 'Succes')");
                 $stmtTr->execute([
-                    $numTrans, $date_reglement, $montant, $montant,
-                    $caisse['caisse_id'], $numero_facture, $mode_reglement_mapped,
+                    $numTrans, $date_reglement, $montant, $montant, $objetTransaction,
+                    $caisse['caisse_id'], ($facture ? $numero_facture : null), $mode_reglement_mapped,
                     $numero_reglement, $reference_reglement, $user['id']
                 ]);
 
@@ -142,16 +154,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 $stmtMaj->execute([$soldeApres, $caisse['caisse_id']]);
                 if ($stmtMaj->rowCount() === 0) throw new Exception("La mise à jour du solde de la caisse n'a affecté aucune ligne (caisse devenue inactive entre-temps ?).");
 
-                $nouvelleAvance = floatval($facture['avance']) + $montant;
-                $nouveauReste = round(floatval($facture['montant_ttc']) - $nouvelleAvance, 2);
-                if ($nouveauReste < 0) $nouveauReste = 0;
-                $nouvelEtat = ($nouveauReste <= 0) ? 'Payee' : (($nouvelleAvance > 0) ? 'Partielle' : 'Impayee');
+                // Ce que ce règlement rembourse sur la facture SÉLECTIONNÉE (s'il y en
+                // a une) est calculé puis plafonné à son reste. Le reliquat — surplus
+                // sur la facture sélectionnée, ou montant total s'il n'y avait pas de
+                // facture — est ensuite automatiquement affecté aux AUTRES factures
+                // impayées/partielles de ce même fournisseur, de la plus ancienne à la
+                // plus récente, jusqu'à épuisement — chacune passant à son tour à
+                // Payée (si totalement couverte) ou Partielle (si couverte en partie).
+                // Ce qui n'est absorbé par aucune facture part en avance sur le solde
+                // global du fournisseur (contact.solde_contact, cf. plus bas).
+                $autresFacturesSoldees = 0;
+                $surplus = $montant;
 
-                $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
-                    ->execute([$nouvelleAvance, $nouveauReste, $nouvelEtat, $numero_facture]);
+                if ($facture) {
+                    $avanceAvant = floatval($facture['avance']);
+                    $nouvelleAvance = min($avanceAvant + $montant, floatval($facture['montant_ttc']));
+                    $montantApplique = $nouvelleAvance - $avanceAvant;
+                    $nouveauReste = round(floatval($facture['montant_ttc']) - $nouvelleAvance, 2);
+                    if ($nouveauReste < 0) $nouveauReste = 0;
+                    $nouvelEtat = ($nouveauReste <= 0) ? 'Payee' : (($nouvelleAvance > 0) ? 'Partielle' : 'Impayee');
+
+                    $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
+                        ->execute([$nouvelleAvance, $nouveauReste, $nouvelEtat, $numero_facture]);
+
+                    $surplus = round($montant - $montantApplique, 2);
+                }
+
+                if ($surplus > 0) {
+                    $stmtAutres = $pdo->prepare("SELECT * FROM facture
+                                                  WHERE type_facture = 'Fournisseur' AND contact_id = ?
+                                                    AND numero_facture <> ? AND categorie_facture <> 'Avoir'
+                                                    AND statut_facture = 'Validee' AND etat_facture IN ('Impayee','Partielle')
+                                                  ORDER BY date_facture ASC, numero_facture ASC
+                                                  FOR UPDATE");
+                    $stmtAutres->execute([$fournisseur_id, $numero_facture]);
+                    $autresFactures = $stmtAutres->fetchAll(PDO::FETCH_ASSOC);
+
+                    foreach ($autresFactures as $autre) {
+                        if ($surplus <= 0) break;
+                        $resteAvantAutre = floatval($autre['reste']);
+                        $montantApplicable = min($surplus, $resteAvantAutre);
+                        if ($montantApplicable <= 0) continue;
+
+                        $nouvelleAvanceAutre = round(floatval($autre['avance']) + $montantApplicable, 2);
+                        $nouveauResteAutre = round(floatval($autre['montant_ttc']) - $nouvelleAvanceAutre, 2);
+                        if ($nouveauResteAutre < 0) $nouveauResteAutre = 0;
+                        $nouvelEtatAutre = ($nouveauResteAutre <= 0) ? 'Payee' : 'Partielle';
+
+                        $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
+                            ->execute([$nouvelleAvanceAutre, $nouveauResteAutre, $nouvelEtatAutre, $autre['numero_facture']]);
+
+                        $autresFacturesSoldees++;
+                        $surplus = round($surplus - $montantApplicable, 2);
+                    }
+                }
+
+                // SOLDE DU CONTACT (compte fournisseur) : on retire le montant total
+                // versé. Convention :
+                //   solde_contact > 0 => on doit encore ce montant au fournisseur
+                //   solde_contact < 0 => on est en avance chez lui (trop-perçu)
+                // S'il ne devait rien du tout, ce versement rend directement son
+                // solde négatif : c'est exactement l'avance qu'on souhaite lui verser.
+                $pdo->prepare("SELECT solde_contact FROM contact WHERE code_contact = ? FOR UPDATE")
+                    ->execute([$fournisseur_id]);
+                $pdo->prepare("UPDATE contact SET solde_contact = solde_contact - ? WHERE code_contact = ?")
+                    ->execute([$montant, $fournisseur_id]);
 
                 $pdo->commit();
                 $message = "Règlement de " . fmt($montant) . " F enregistré avec succès.";
+                if ($autresFacturesSoldees > 0) {
+                    $message .= " Le surplus a mis à jour " . $autresFacturesSoldees . " autre(s) facture(s) du fournisseur.";
+                } elseif (!$facture) {
+                    $message .= " Ce montant a été enregistré comme avance sur le compte du fournisseur.";
+                }
                 $messageType = 'success';
             }
         } catch (Exception $ex) {
@@ -165,7 +240,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
 // ============================================================
 // RÉCUPÉRATION DES DONNÉES
 // ============================================================
-$stmt = $pdo->prepare("SELECT code_contact, nom_prenom_contact FROM contact WHERE type_contact = 'Fournisseur' AND etat_contact = 'Actif' ORDER BY nom_prenom_contact");
+$stmt = $pdo->prepare("SELECT code_contact, nom_prenom_contact, solde_contact FROM contact WHERE type_contact = 'Fournisseur' AND etat_contact = 'Actif' ORDER BY nom_prenom_contact");
 $stmt->execute();
 $fournisseurs = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -184,6 +259,8 @@ $factures_json = json_encode($factures_fournisseurs);
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Règlement / Décaissement Fournisseur</title>
@@ -217,6 +294,7 @@ $factures_json = json_encode($factures_fournisseurs);
         .champ-lecture { background: var(--bg) !important; font-weight: 700; color: var(--dk); }
         .montant-du { color: var(--b) !important; }
         .reste-a-payer { color: var(--dng) !important; }
+        .reste-a-payer.reste-negatif { color: var(--suc) !important; }
         .btn-valider { background: var(--b); color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13px; font-weight: 700; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
         .btn-valider:hover:not(:disabled) { background: var(--bd); }
         .btn-valider:disabled { opacity: .5; cursor: not-allowed; }
@@ -259,6 +337,7 @@ $factures_json = json_encode($factures_fournisseurs);
             <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
             <input type="hidden" name="numero_facture" id="numeroFacture" value="">
             <input type="hidden" name="fournisseur_id" id="fournisseurId" value="">
+            <input type="hidden" name="type_operation" id="typeOperation" value="facture">
 
             <div class="type-selector">
                 <div class="type-btn active-facture" id="typeFactureBtn" onclick="setType('facture')">
@@ -289,12 +368,12 @@ $factures_json = json_encode($factures_fournisseurs);
                     <select class="form-select selectpicker" id="selectFournisseur" data-live-search="true" data-live-search-placeholder="Rechercher un fournisseur..." required>
                         <option value="">-- Sélectionner un fournisseur --</option>
                         <?php foreach ($fournisseurs as $f): ?>
-                            <option value="<?= e($f['code_contact']) ?>" data-nom="<?= e($f['nom_prenom_contact']) ?>"><?= e($f['nom_prenom_contact']) ?></option>
+                            <option value="<?= e($f['code_contact']) ?>" data-nom="<?= e($f['nom_prenom_contact']) ?>" data-solde="<?= e($f['solde_contact']) ?>"><?= e($f['nom_prenom_contact']) ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div class="col-md-6" id="factureCol">
-                    <label class="form-label">Facture</label>
+                    <label class="form-label">Facture <span style="font-weight:400; text-transform:none;">(facultatif)</span></label>
                     <select class="form-select selectpicker" id="selectFacture" data-live-search="true" data-live-search-placeholder="Rechercher une facture..." disabled>
                         <option value="">-- Sélectionner d'abord un fournisseur --</option>
                     </select>
@@ -305,7 +384,7 @@ $factures_json = json_encode($factures_fournisseurs);
 
             <div class="row g-3 mb-3">
                 <div class="col-md-6">
-                    <label class="form-label">Montant dû</label>
+                    <label class="form-label">Solde fournisseur</label>
                     <input type="text" class="form-control champ-lecture montant-du" id="montantDu" value="0 F" readonly>
                 </div>
                 <div class="col-md-6">
@@ -368,110 +447,165 @@ $(document).ready(function() {
     $('.selectpicker').selectpicker();
 
     const selectFournisseur = document.getElementById('selectFournisseur');
-    const selectFacture = document.getElementById('selectFacture');
-    const montantDuEl = document.getElementById('montantDu');
-    const montantVerseEl = document.getElementById('montantVerse');
-    const resteAPayerEl = document.getElementById('resteAPayer');
-    const btnValider = document.getElementById('btnValider');
-    let montantDuValue = 0;
+    const selectFacture     = document.getElementById('selectFacture');
+    const montantDuEl       = document.getElementById('montantDu');
+    const montantVerseEl    = document.getElementById('montantVerse');
+    const resteAPayerEl     = document.getElementById('resteAPayer');
+    const btnValider        = document.getElementById('btnValider');
+    const factureCol        = document.getElementById('factureCol');
+    const infoText          = document.getElementById('infoText');
+    const btnFacture        = document.getElementById('typeFactureBtn');
+    const btnDepense        = document.getElementById('typeDepenseBtn');
 
-    $('#selectFournisseur').on('changed.bs.select', function() {
-        const fourCode = this.value;
-        document.getElementById('fournisseurId').value = fourCode;
-        selectFacture.innerHTML = '<option value="">-- Sélectionner une facture --</option>';
-        montantDuValue = 0;
-        updateCalculs();
+    let soldeFournisseurValue = 0;
+
+    // ============================================================
+    // ✅ CONTOURNEMENT BUG bootstrap-select 1.14.0-beta3 :
+    //    refresh() duplique les options -> on utilise destroy + re-init
+    // ============================================================
+    function reinit($sel) {
+        if ($sel.data('selectpicker')) {
+            $sel.selectpicker('destroy');
+        }
+        $sel.selectpicker(); // relit les data-* (live-search, placeholder...)
+    }
+
+    // Reconstruction complète du select Facture selon le fournisseur choisi.
+    // En mode "Règlement", une option "Aucune facture" est toujours proposée
+    // en premier : elle permet un versement d'avance même si le fournisseur
+    // ne doit rien pour l'instant (ou en plus des factures en cours).
+    function rebuildFactures(fourCode) {
+        const $sf = $('#selectFacture');
+        $sf.empty();
 
         if (!fourCode) {
-            $('#selectFacture').selectpicker('refresh');
-            $('#selectFacture').prop('disabled', true);
-            return;
-        }
-
-        if (currentType === 'facture') {
+            $sf.append('<option value="">-- Sélectionner d\'abord un fournisseur --</option>');
+            $sf.prop('disabled', true);
+        } else if (currentType === 'facture') {
+            $sf.append('<option value="">Aucune facture — Versement en avance</option>');
             const facturesFour = facturesData.filter(f => f.contact_id === fourCode);
-            if (facturesFour.length === 0) {
-                selectFacture.innerHTML = '<option value="">Aucune facture validée impayée</option>';
-                $('#selectFacture').selectpicker('refresh');
-                $('#selectFacture').prop('disabled', true);
-                return;
-            }
             facturesFour.forEach(f => {
                 const opt = document.createElement('option');
                 opt.value = f.numero_facture;
-                opt.textContent = `${f.numero_facture} — ${fmt2(f.montant_ttc)} F (Reste: ${fmt2(f.reste)} F) — ${f.etat_facture}`;
+                opt.textContent = f.numero_facture + ' — ' + fmt2(f.montant_ttc) + ' F (Reste: ' + fmt2(f.reste) + ' F) — ' + f.etat_facture;
                 opt.dataset.reste = f.reste;
                 opt.dataset.montant = f.montant_ttc;
-                selectFacture.appendChild(opt);
+                $sf[0].appendChild(opt);
             });
-            $('#selectFacture').prop('disabled', false);
-            $('#selectFacture').selectpicker('refresh');
+            $sf.prop('disabled', false);
+        } else {
+            // Mode dépense : pas de facture
+            $sf.append('<option value="">-- Mode dépense directe --</option>');
+            $sf.prop('disabled', true);
         }
+
+        reinit($sf); // ⛔ JAMAIS selectpicker('refresh') avec la beta3
+        updateCalculs();
+    }
+
+    // ============================================================
+    // Changement de fournisseur
+    // ============================================================
+    $('#selectFournisseur').on('changed.bs.select', function() {
+        const fourCode = this.value;
+        document.getElementById('fournisseurId').value = fourCode;
+        soldeFournisseurValue = parseFloat(this.selectedOptions[0]?.dataset.solde || 0);
+        if (currentType === 'facture') {
+            montantDuEl.value = fmt2(soldeFournisseurValue) + ' F';
+        }
+        rebuildFactures(fourCode);
     });
 
+    // ============================================================
+    // Sélection d'une facture
+    // ============================================================
     $('#selectFacture').on('changed.bs.select', function() {
         const reste = parseFloat(this.selectedOptions[0]?.dataset.reste || 0);
-        montantDuValue = reste;
         document.getElementById('numeroFacture').value = this.value;
-        montantDuEl.value = fmt2(montantDuValue) + ' F';
-        montantVerseEl.value = montantDuValue;
+        if (this.value) montantVerseEl.value = reste;
         updateCalculs();
     });
 
+    // ============================================================
+    // Saisie du montant versé
+    // ============================================================
     $('#montantVerse').on('input', updateCalculs);
+
+    // Filet de sécurité : resynchronise le champ caché numero_facture depuis la
+    // vraie valeur du <select> juste avant l'envoi du formulaire.
+    $('#formReglement').on('submit', function () {
+        document.getElementById('typeOperation').value = currentType;
+        if (currentType === 'facture') {
+            document.getElementById('numeroFacture').value = selectFacture.value;
+        } else {
+            document.getElementById('numeroFacture').value = '';
+        }
+    });
 
     function updateCalculs() {
         const verse = parseFloat(montantVerseEl.value) || 0;
-        let reste = montantDuValue - verse;
-        if (reste < 0) reste = 0;
-        resteAPayerEl.value = fmt2(reste) + ' F';
 
-        if (currentType === 'facture') {
-            btnValider.disabled = !(selectFacture.value && verse > 0);
-        } else {
+        if (currentType === 'depense') {
+            resteAPayerEl.value = '—';
+            resteAPayerEl.classList.remove('reste-negatif');
             btnValider.disabled = !(selectFournisseur.value && verse > 0);
+            return;
         }
+
+        const reste = soldeFournisseurValue - verse;
+        resteAPayerEl.value = fmt2(reste) + ' F' + (reste > 0 ? ' (on doit encore)' : (reste < 0 ? ' (on est en avance)' : ' (soldé)'));
+        resteAPayerEl.classList.toggle('reste-negatif', reste < 0);
+        // La facture est facultative : on peut verser une avance à un
+        // fournisseur sans en sélectionner une (il ne doit rien, ou on verse
+        // plus que le dû).
+        btnValider.disabled = !(selectFournisseur.value && verse > 0);
     }
 
+    // ============================================================
+    // Changement de type : facture / dépense directe
+    // ============================================================
     window.setType = function(type) {
         currentType = type;
-        const btnFacture = document.getElementById('typeFactureBtn');
-        const btnDepense = document.getElementById('typeDepenseBtn');
-        const factureCol = document.getElementById('factureCol');
-        const infoText = document.getElementById('infoText');
 
         btnFacture.className = 'type-btn' + (type === 'facture' ? ' active-facture' : '');
         btnDepense.className = 'type-btn' + (type === 'depense' ? ' active-depense' : '');
 
         if (type === 'facture') {
             factureCol.style.display = '';
-            infoText.textContent = 'Seules les factures VALIDÉES avec état IMPAYÉE ou PARTIELLE sont affichées.';
+            infoText.textContent = 'Sélectionnez un fournisseur, puis une facture à régler — ou laissez « Aucune facture » pour lui verser une simple avance.';
             document.getElementById('numeroFacture').value = '';
-            montantDuValue = 0;
-            montantDuEl.value = '0 F';
+            montantDuEl.value = fmt2(soldeFournisseurValue) + ' F';
         } else {
             factureCol.style.display = 'none';
-            selectFacture.innerHTML = '<option value="">-- Mode dépense directe --</option>';
-            $('#selectFacture').selectpicker('refresh');
-            $('#selectFacture').prop('disabled', true);
             infoText.textContent = 'Dépense directe : sélectionnez un fournisseur et saisissez le montant. Aucune facture ne sera impactée.';
             document.getElementById('numeroFacture').value = '';
-            montantDuValue = 0;
             montantDuEl.value = 'Dépense directe';
         }
-        updateCalculs();
+
+        // Rebuild du select Facture selon le nouveau mode et le fournisseur courant
+        rebuildFactures(selectFournisseur.value);
     };
 
+    // ============================================================
+    // Réinitialisation complète du formulaire
+    // ============================================================
     window.resetForm = function() {
         document.getElementById('formReglement').reset();
-        selectFacture.innerHTML = '<option value="">-- Sélectionner d\'abord un fournisseur --</option>';
-        $('#selectFacture').selectpicker('refresh');
-        $('#selectFacture').prop('disabled', true);
-        $('#selectFournisseur').selectpicker('val', '');
         document.getElementById('numeroFacture').value = '';
         document.getElementById('fournisseurId').value = '';
-        montantDuValue = 0;
-        updateCalculs();
+        soldeFournisseurValue = 0;
+
+        // Remet les deux selects à leur état initial via destroy + re-init
+        const $sf = $('#selectFacture');
+        $sf.empty().append('<option value="">-- Sélectionner d\'abord un fournisseur --</option>');
+        $sf.prop('disabled', true);
+        reinit($sf);
+
+        const $sc = $('#selectFournisseur');
+        $sc.val('');
+        reinit($sc);
+
+        // Retour au mode facture
         setType('facture');
     };
 });

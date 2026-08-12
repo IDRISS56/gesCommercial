@@ -1,23 +1,7 @@
 <?php
 ob_start();
-
-// views/statut/index.php – Gestion des statuts (design vente)
+// views/statut/index.php – Gestion des statuts (design boutique)
 require 'databases/database.php';
-
-
-// if (!isset($_SESSION['user_id'])) {
-//     header('Location: ../utilisateur/login');
-//     exit;
-// }
-
-// $stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
-// $stmt->execute([$_SESSION['user_id']]);
-// $user = $stmt->fetch(PDO::FETCH_ASSOC);
-// if (!$user) {
-//     session_destroy();
-//     header('Location: ../utilisateur/login');
-//     exit;
-// }
 
 function e($str)
 {
@@ -34,16 +18,20 @@ function generateStatutId($pdo)
     return $prefix . str_pad($count, 4, '0', STR_PAD_LEFT);
 }
 
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+$csrf_token = $_SESSION['csrf_token'];
+
 $types_statut = ['Sortie', 'Entrée', 'Autre'];
 $etats_statut = ['Actif', 'Inactif'];
 
 $message = '';
 $messageType = '';
 $action = $_POST['action'] ?? '';
-$csrf_token = $_POST['csrf_token'] ?? '';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (empty($csrf_token) || $csrf_token !== ($_SESSION['csrf_token'] ?? '')) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'])) {
+    if (empty($_POST['csrf_token']) || $_POST['csrf_token'] !== $csrf_token) {
         $message = 'Token de sécurité invalide.';
         $messageType = 'danger';
     } else {
@@ -121,13 +109,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-$csrf_token = $_SESSION['csrf_token'];
-
 function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
 {
     $sql = "SELECT * FROM statut WHERE 1=1";
     $params = [];
+
     if (!empty($search)) {
         $sql .= " AND (code_statut LIKE ? OR titre_statut LIKE ? OR type_statut LIKE ? OR symbole_statut LIKE ?)";
         $like = '%' . $search . '%';
@@ -156,17 +142,12 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
 
     ob_start();
     if (empty($statuts)): ?>
-        <tr>
-            <td colspan="6" class="text-center py-5 text-muted">
-                <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
-                Aucun statut trouvé
-            </td>
-        </tr>
+        <tr><td colspan="6" class="text-center py-5 text-muted"><i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>Aucun statut trouvé</td></tr>
     <?php else: ?>
         <?php foreach ($statuts as $s): ?>
             <tr>
                 <td class="td-bold"><?= e($s['code_statut']) ?></td>
-                <td><?= e($s['titre_statut']) ?></td>
+                <td class="td-semi"><?= e($s['titre_statut']) ?></td>
                 <td><?= e($s['type_statut']) ?></td>
                 <td><?= e($s['symbole_statut'] ?? '—') ?></td>
                 <td>
@@ -177,7 +158,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                 <td class="text-end">
                     <div class="d-inline-flex gap-1">
                         <button class="act-btn e editBtn" data-code="<?= e($s['code_statut']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
-                        <button class="act-btn d deleteBtn" data-code="<?= e($s['code_statut']) ?>" data-nom="<?= e($s['titre_statut']) ?>" title="Supprimer" data-bs-toggle="modal" data-bs-target="#deleteConfirmModal"><i class="bi bi-trash"></i></button>
+                        <button class="act-btn d deleteBtn" data-code="<?= e($s['code_statut']) ?>" data-nom="<?= e($s['titre_statut']) ?>" title="Supprimer"><i class="bi bi-trash"></i></button>
                     </div>
                 </td>
             </tr>
@@ -218,18 +199,19 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20)
                 </ul>
             </nav>
         </div>
-<?php endif;
+    <?php endif;
     $paginationHtml = ob_get_clean();
 
     return [
-        'table' => $tableHtml,
+        'table'      => $tableHtml,
         'pagination' => $paginationHtml,
-        'total' => $total,
-        'page' => $page,
+        'total'      => $total,
+        'page'       => $page,
         'totalPages' => $totalPages
     ];
 }
 
+// --- AJAX pour le tableau ---
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $search = trim($_POST['search'] ?? '');
     $filtres = [
@@ -245,6 +227,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     exit;
 }
 
+// --- Affichage initial ---
 $search = trim($_POST['search'] ?? '');
 $filtres = [
     'type' => trim($_POST['type'] ?? ''),
@@ -254,6 +237,7 @@ $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 $initialData = getTableContent($pdo, $search, $filtres, $page);
 
+// Chargement des données pour l'édition
 $editStatut = null;
 if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $code = $_POST['edit_code'];
@@ -261,331 +245,226 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $stmt->execute([$code]);
     $editStatut = $stmt->fetch(PDO::FETCH_ASSOC);
 }
+
+// Statistiques
+$totalStatuts = $pdo->query("SELECT COUNT(*) FROM statut")->fetchColumn();
+$actifs = $pdo->query("SELECT COUNT(*) FROM statut WHERE etat_statut = 'Actif'")->fetchColumn();
+$inactifs = $pdo->query("SELECT COUNT(*) FROM statut WHERE etat_statut = 'Inactif'")->fetchColumn();
 ?>
 <!DOCTYPE html>
 <html lang="fr">
-
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gestion des statuts</title>
-    <!-- Bootstrap 5 -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Bootstrap Icons -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <!-- Bootstrap SelectPicker (CSS) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css">
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        /* ===== STYLE DASHBOARD (repris de vente.php) ===== */
         :root {
-            --b: #2563eb;
-            --bd: #1d4ed8;
-            --bl: #eff6ff;
-            --bb: #bfdbfe;
-            --bg: #f1f5f9;
-            --w: #fff;
-            --dk: #0f172a;
-            --mt: #64748b;
-            --lt: #94a3b8;
-            --brd: #e2e8f0;
-            --dng: #ef4444;
-            --dngl: #fef2f2;
-            --dngb: #fecaca;
-            --suc: #10b981;
-            --sucl: #ecfdf5;
-            --sucb: #a7f3d0;
-            --wrn: #f59e0b;
-            --wrnl: #fffbeb;
-            --wrnb: #fde68a;
-            --prp: #8b5cf6;
-            --prpl: #f5f3ff;
-            --prpb: #e9d5ff;
-            --tl: #0891b2;
-            --tll: #ecfeff;
-            --tlb: #cffafe;
-            --R: 16px;
-            --Rs: 10px;
+            --color-primary: #4f46e5;
+            --color-primary-dark: #3730a3;
+            --color-primary-soft: #eef2ff;
+            --color-success: #10b981;
+            --color-success-soft: #d1fae5;
+            --color-warning: #f59e0b;
+            --color-warning-soft: #fef3c7;
+            --color-danger: #ef4444;
+            --color-danger-soft: #fee2e2;
+            --color-info: #0891b2;
+            --color-info-soft: #cffafe;
+            --color-purple: #8b5cf6;
+            --color-purple-soft: #ede9fe;
+            --color-gray-50: #f8fafc;
+            --color-gray-100: #f1f5f9;
+            --color-gray-200: #e2e8f0;
+            --color-gray-300: #cbd5e1;
+            --color-gray-400: #94a3b8;
+            --color-gray-500: #64748b;
+            --color-gray-600: #475569;
+            --color-gray-700: #334155;
+            --color-gray-800: #1e293b;
+            --color-gray-900: #0f172a;
+            --bg-body: #f1f5f9;
+            --bg-surface: #ffffff;
+            --border-color: #e2e8f0;
+            --text-primary: #0f172a;
+            --text-secondary: #334155;
+            --text-tertiary: #64748b;
+            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
+            --radius-sm: 10px;
+            --radius-md: 14px;
+            --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Inter', -apple-system, sans-serif;
-            background: var(--bg);
-            color: var(--dk);
-            min-height: 100vh;
-            line-height: 1.5;
-            padding: 28px 20px;
-        }
-        ::-webkit-scrollbar { width: 5px; }
-        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-
+        body { font-family: 'Inter', sans-serif; background: var(--bg-body); color: var(--text-primary); min-height: 100vh; font-size: 14px; padding: 24px 20px; }
+        h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; letter-spacing: -0.02em; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-track { background: transparent; }
         .W { max-width: 1400px; margin: 0 auto; }
-        .hdr {
-            display: flex;
-            align-items: flex-end;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        .hdr-l h1 { font-size: 26px; font-weight: 800; color: var(--dk); letter-spacing: -0.02em; }
-        .hdr-l p { font-size: 13px; color: var(--mt); margin-top: 2px; font-weight: 500; }
-        .hdr-r {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        .hdr-badge {
-            background: var(--bl);
-            border: 1px solid var(--bb);
-            color: var(--b);
-            padding: 8px 14px;
-            border-radius: var(--Rs);
-            font-size: 12px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .pbar {
-            background: var(--w);
-            border: 1px solid var(--brd);
-            border-radius: var(--R);
-            padding: 16px 20px;
-            margin-bottom: 22px;
-            box-shadow: 0 1px 3px rgba(0,0,0,.04);
-        }
-        .prow {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        .prow label {
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--mt);
-            letter-spacing: .03em;
-            text-transform: uppercase;
-        }
-        .prow input, .prow select {
-            padding: 7px 10px;
-            border: 1.5px solid var(--brd);
-            border-radius: 8px;
-            font-size: 13px;
-            font-weight: 500;
-            color: var(--dk);
-            background: var(--bg);
-            font-family: 'Inter', sans-serif;
-            transition: all .2s;
-        }
-        .prow input:focus, .prow select:focus {
-            border-color: var(--b);
-            background: #fff;
-            box-shadow: 0 0 0 3px var(--bl);
-            outline: none;
-        }
-        .prow select {
-            appearance: none;
-            padding-right: 32px;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%2364748b' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
-            background-repeat: no-repeat;
-            background-position: right 10px center;
-        }
-        .btn-go {
-            background: var(--b);
-            color: #fff;
-            padding: 7px 16px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            box-shadow: 0 2px 4px rgba(37,99,235,.2);
-            transition: background .15s;
-            border: none;
-            cursor: pointer;
-        }
-        .btn-go:hover { background: var(--bd); }
-        .btn-go-outline {
-            background: transparent;
-            color: var(--mt);
-            border: 1.5px solid var(--brd);
-            padding: 7px 14px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 600;
-            transition: all .2s;
-            cursor: pointer;
-        }
-        .btn-go-outline:hover {
-            background: var(--bg);
-            border-color: var(--lt);
-        }
-
-        .data-table-wrap {
-            background: var(--w);
-            border: 1px solid var(--brd);
-            border-radius: var(--R);
-            overflow: hidden;
-            box-shadow: 0 1px 3px rgba(0,0,0,.04);
-        }
-        .table>:not(caption)>*>* { padding: 12px 18px; }
-        .table thead th {
-            font-size: 0.7rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-            color: var(--lt);
-            background: var(--bg);
-            border-bottom: 1px solid var(--brd);
-        }
-        .table tbody tr {
-            border-bottom: 1px solid var(--brd);
-            transition: background .2s;
-        }
-        .table tbody tr:hover { background: var(--bl); }
-        .table tbody td {
-            vertical-align: middle;
-            color: var(--dk);
-            font-size: 0.85rem;
-        }
-        .td-bold { color: var(--dk) !important; font-weight: 700; }
-        .td-semi { color: var(--dk) !important; font-weight: 500; }
-
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 14px;
-            border-radius: 999px;
-            font-size: 0.73rem;
-            font-weight: 700;
-            text-transform: capitalize;
-        }
-        .status-badge .sdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-        .status-badge.on { background: var(--sucl); color: #059669; }
-        .status-badge.off { background: var(--dngl); color: #dc2626; }
-
-        .act-btn {
-            width: 34px;
-            height: 34px;
-            border-radius: 6px;
-            border: 1px solid transparent;
-            background: transparent;
-            color: var(--lt);
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            transition: all .2s;
-        }
+        .stat-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 14px 16px; transition: var(--transition-base); }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+        .stat-icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
+        .stat-label { font-size: 10px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
+        .stat-value { font-size: 18px; font-weight: 800; color: var(--text-primary); font-family: 'Outfit', sans-serif; line-height: 1; }
+        .data-table-wrap { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius-sm); overflow: hidden; box-shadow: var(--shadow-sm); animation: fadeUp .4s ease both; }
+        .table { margin: 0; }
+        .table thead th { background: var(--color-gray-100); color: var(--text-tertiary); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; padding: 12px 14px; border-bottom: 2px solid var(--border-color); }
+        .table tbody tr { border-bottom: 1px solid var(--border-color); transition: background .2s; }
+        .table tbody tr:hover { background: var(--color-primary-soft); }
+        .table tbody td { padding: 12px 14px; vertical-align: middle; color: var(--text-primary); font-size: 13px; }
+        .td-bold { color: var(--text-primary) !important; font-weight: 700; font-family: 'Outfit', sans-serif; }
+        .td-semi { color: var(--text-primary) !important; font-weight: 500; }
+        .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+        .status-badge .sdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 2s infinite; }
+        .status-badge.on { background: var(--color-success-soft); color: #065f46; }
+        .status-badge.off { background: var(--color-danger-soft); color: #991b1b; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .act-btn { width: 32px; height: 32px; border-radius: 6px; border: 1.5px solid transparent; background: transparent; display: inline-flex; align-items: center; justify-content: center; transition: all .2s; font-size: 14px; cursor: pointer; padding: 0; }
         .act-btn:hover { transform: scale(1.1); }
-        .act-btn.e:hover { color: var(--wrn); background: var(--wrnl); border-color: rgba(245,158,11,.15); }
-        .act-btn.d:hover { color: var(--dng); background: var(--dngl); border-color: rgba(239,68,68,.15); }
+        .act-btn.e { color: var(--color-warning); border-color: rgba(245, 158, 11, 0.2); }
+        .act-btn.e:hover { color: #b45309; background: var(--color-warning-soft); border-color: var(--color-warning); }
+        .act-btn.d { color: var(--color-danger); border-color: rgba(239, 68, 68, 0.2); }
+        .act-btn.d:hover { color: #b91c1c; background: var(--color-danger-soft); border-color: var(--color-danger); }
+        .btn-chic { padding: 10px 18px; border-radius: 10px; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 8px; border: none; cursor: pointer; transition: all .25s cubic-bezier(0.4, 0, 0.2, 1); position: relative; overflow: hidden; letter-spacing: -0.01em; }
+        .btn-chic::before { content: ''; position: absolute; top: 50%; left: 50%; width: 0; height: 0; background: rgba(255,255,255,0.3); border-radius: 50%; transform: translate(-50%, -50%); transition: width .4s, height .4s; }
+        .btn-chic:hover::before { width: 300px; height: 300px; }
+        .btn-chic i { font-size: 15px; position: relative; z-index: 1; }
+        .btn-chic span { position: relative; z-index: 1; }
+        .btn-chic-primary { background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%); color: #fff; box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3); }
+        .btn-chic-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(79, 70, 229, 0.4); }
+        .btn-go-outline { background: transparent; color: var(--text-tertiary); border: 1.5px solid var(--border-color); padding: 7px 14px; border-radius: 8px; font-size: 12px; font-weight: 600; transition: all .2s; cursor: pointer; }
+        .btn-go-outline:hover { background: var(--color-gray-100); border-color: var(--color-gray-300); }
+        .modal-chic .modal-content { border: none !important; border-radius: 20px !important; box-shadow: 0 25px 60px rgba(15, 23, 42, 0.15) !important; overflow: hidden !important; animation: modalSlideIn .4s cubic-bezier(0.16, 1, 0.3, 1); display: flex !important; flex-direction: column !important; max-height: 90vh !important; }
+        @keyframes modalSlideIn { from { opacity: 0; transform: translateY(30px) scale(0.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        .modal-chic .modal-header { background: linear-gradient(135deg, #1e293b 0%, #334155 50%, #475569 100%); color: #fff; border: none; padding: 22px 28px; position: relative; overflow: hidden; flex-shrink: 0 !important; }
+        .modal-chic .modal-header::before { content: ''; position: absolute; top: -50%; right: -20%; width: 200px; height: 200px; background: radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%); border-radius: 50%; }
+        .modal-chic .modal-title { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 12px; position: relative; z-index: 1; }
+        .modal-chic .modal-title i { font-size: 22px; background: rgba(255,255,255,0.15); width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; }
+        .modal-chic .btn-close { filter: invert(1); opacity: 0.7; position: relative; z-index: 1; }
+        .modal-chic .btn-close:hover { opacity: 1; transform: rotate(90deg); }
+        .modal-chic .modal-body { padding: 28px !important; overflow-y: auto !important; background: #f8fafc !important; flex: 1 1 auto !important; min-height: 0 !important; }
+        .modal-chic .modal-footer { background: #ffffff !important; border-top: 2px solid var(--border-color) !important; padding: 18px 28px !important; display: flex !important; gap: 10px !important; justify-content: flex-end !important; flex-wrap: wrap !important; flex-shrink: 0 !important; }
+        .form-label { font-size: 10px; font-weight: 700; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+        .form-control, .form-select { border-radius: 10px; border: 1.5px solid var(--border-color); padding: 10px 14px; font-size: 13px; transition: all .2s; }
+        .form-control:focus, .form-select:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-soft); }
+        .bootstrap-select .dropdown-toggle { background: #fff !important; border: 1.5px solid var(--border-color) !important; border-radius: 8px !important; padding: 9px 12px !important; font-size: 13px !important; }
+        .bootstrap-select .dropdown-toggle:focus { border-color: var(--color-primary) !important; box-shadow: 0 0 0 3px var(--color-primary-soft) !important; }
+        .bootstrap-select { width: 100% !important; }
+        .bootstrap-select .filter-option { color: var(--text-primary) !important; }
 
-        .pagination .page-link {
-            color: var(--b);
-            border: 1px solid var(--brd);
-            border-radius: 6px;
-            margin: 0 2px;
-            padding: 6px 14px;
-            font-weight: 500;
+        /* Réduire la taille des selectpicker Type et État */
+        #typeFilter, #etatFilter,
+        #typeFilter + .bootstrap-select,
+        #etatFilter + .bootstrap-select {
+            width: 160px !important;
+            min-width: 160px !important;
+            max-width: 180px !important;
         }
-        .pagination .page-link:hover { background: var(--bl); border-color: var(--b); }
-        .pagination .page-item.active .page-link { background: var(--b); border-color: var(--b); color: #fff; }
-        .pagination .page-item.disabled .page-link { color: var(--lt); border-color: var(--brd); }
+        #typeFilter + .bootstrap-select .dropdown-toggle,
+        #etatFilter + .bootstrap-select .dropdown-toggle {
+            min-width: 160px !important;
+            width: 160px !important;
+            padding: 7px 10px !important;
+            font-size: 12px !important;
+        }
+        #searchInput {
+            flex: 1;
+            min-width: 180px !important;
+            max-width: 280px !important;
+        }
+        .bg-white.border.rounded-3.p-3.mb-4.shadow-sm label.text-uppercase {
+            font-size: 10px !important;
+            white-space: nowrap;
+        }
+        .bg-white.border.rounded-3.p-3.mb-4.shadow-sm .d-flex {
+            gap: 10px !important;
+        }
 
-        .modal-content {
-            border-radius: var(--R);
-            border: none;
-            box-shadow: 0 12px 40px rgba(15,23,42,.08);
-        }
-        .modal-header { border-bottom: 1px solid var(--brd); background: var(--bg); }
-        .modal-footer { border-top: 1px solid var(--brd); background: var(--bg); }
-
-        @keyframes fadeUp {
-            from { opacity: 0; transform: translateY(12px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .data-table-wrap { animation: fadeUp .4s ease both; }
-
-        @media (max-width:700px) {
-            body { padding: 14px; }
-            .hdr { flex-direction: column; align-items: flex-start; }
-            .prow { flex-direction: column; align-items: stretch; }
-            .prow .btn-go { width: 100%; justify-content: center; }
-        }
-        .bootstrap-select .dropdown-toggle .filter-option { color: var(--dk); }
-        .bootstrap-select .dropdown-menu {
-            border-radius: var(--Rs);
-            border-color: var(--brd);
-        }
-        .bootstrap-select .dropdown-menu .bs-searchbox input {
-            border-radius: 6px;
-            border: 1px solid var(--brd);
-            padding: 8px 12px;
-        }
-        .bootstrap-select .dropdown-menu .bs-searchbox input:focus {
-            border-color: var(--b);
-            box-shadow: 0 0 0 3px var(--bl);
+        @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        @media (max-width: 700px) {
+            .bootstrap-select, .bootstrap-select .dropdown-toggle { width: 100% !important; min-width: 0 !important; }
         }
     </style>
 </head>
-
 <body>
 <div class="W">
-    <!-- En-tête -->
-    <div class="hdr">
-        <div class="hdr-l">
-            <h1>Gestion des statuts</h1>
-            <p>Définissez les statuts pour les commandes, mouvements, etc.</p>
+    <div class="d-flex flex-wrap justify-content-between align-items-end mb-4 gap-2">
+        <div>
+            <h1 class="h3 fw-bold mb-1"><i class="bi bi-tags text-primary me-2"></i>Gestion des statuts</h1>
+            <p class="text-muted small mb-0">Définissez les statuts pour les commandes, mouvements, etc.</p>
         </div>
-        <div class="hdr-r">
-            <div class="hdr-badge"><i class="bi bi-tags"></i> <?= $initialData['total'] ?? 0 ?> statut(s)</div>
-            <button class="btn-go" id="addBtn"><i class="bi bi-plus-circle"></i> Nouveau statut</button>
+        <div class="d-flex gap-2">
+            <span class="badge rounded-pill bg-primary-subtle text-primary border border-primary-subtle px-3 py-2">
+                <i class="bi bi-tags"></i> <?= $totalStatuts ?> statut(s)
+            </span>
+            <button type="button" class="btn-chic btn-chic-primary" id="addBtn">
+                <i class="bi bi-plus-circle"></i>
+                <span>Nouveau statut</span>
+            </button>
         </div>
     </div>
 
-    <!-- Messages -->
-    <?php if ($message): ?>
-        <div class="alert alert-<?= $messageType === 'error' ? 'danger' : 'success' ?> alert-dismissible fade show" role="alert">
-            <?= $message ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
-    <?php endif; ?>
+    <div class="row g-3 mb-4">
+        <?php
+        $stats = [
+            ['primary', 'tags', 'Total statuts', $totalStatuts, ''],
+            ['success', 'check-circle-fill', 'Actifs', $actifs, ''],
+            ['danger', 'x-circle-fill', 'Inactifs', $inactifs, ''],
+        ];
+        $colorMap = [
+            'primary' => ['var(--color-primary-soft)', 'var(--color-primary)'],
+            'success' => ['var(--color-success-soft)', 'var(--color-success)'],
+            'danger'  => ['var(--color-danger-soft)', 'var(--color-danger)'],
+        ];
+        foreach ($stats as $s): $bg = $colorMap[$s[0]][0]; $fg = $colorMap[$s[0]][1]; ?>
+            <div class="col-6 col-md-4 col-xl-2">
+                <div class="stat-card d-flex align-items-center gap-3 h-100">
+                    <div class="stat-icon" style="background: <?= $bg ?>; color: <?= $fg ?>;">
+                        <i class="bi bi-<?= $s[1] ?>"></i>
+                    </div>
+                    <div class="flex-grow-1 overflow-hidden">
+                        <div class="stat-label"><?= $s[2] ?></div>
+                        <div class="stat-value text-truncate"><?= $s[3] ?><?php if ($s[4]): ?><small class="text-muted ms-1" style="font-size:11px;"><?= $s[4] ?></small><?php endif; ?></div>
+                    </div>
+                </div>
+            </div>
+        <?php endforeach; ?>
+    </div>
 
-    <!-- Barre de recherche / filtres -->
-    <div class="pbar">
+    <!-- FILTRES -->
+    <div class="bg-white border rounded-3 p-3 mb-4 shadow-sm">
         <form id="searchForm" method="post" onsubmit="return false;">
             <input type="hidden" name="ajax" value="1">
             <input type="hidden" name="page" id="pageInput" value="<?= $page ?>">
-            <div class="prow">
-                <label for="searchInput"><i class="bi bi-search"></i> Recherche</label>
-                <input type="text" name="search" id="searchInput" placeholder="Code, titre, type, symbole..." value="<?= e($search) ?>" style="flex:1; min-width:150px;">
-                <label for="typeFilter">Type</label>
-                <select name="type" id="typeFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un type...">
+            <div class="d-flex flex-wrap align-items-center gap-3">
+                <label class="text-uppercase small fw-bold text-muted mb-0"><i class="bi bi-search"></i> Recherche</label>
+                <input type="text" id="searchInput" class="form-control" placeholder="Code, titre, type, symbole..." value="<?= e($search) ?>">
+                <label class="text-uppercase small fw-bold text-muted mb-0"><i class="bi bi-tag"></i> Type</label>
+                <select id="typeFilter" class="form-control selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un type..." data-width="100%">
                     <option value="">Tous</option>
                     <?php foreach ($types_statut as $t): ?>
                         <option value="<?= e($t) ?>" <?= ($filtres['type'] == $t) ? 'selected' : '' ?>><?= e($t) ?></option>
                     <?php endforeach; ?>
                 </select>
-                <label for="etatFilter">État</label>
-                <select name="etat" id="etatFilter" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un état...">
+                <label class="text-uppercase small fw-bold text-muted mb-0"><i class="bi bi-toggle-on"></i> État</label>
+                <select id="etatFilter" class="form-control selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un état..." data-width="100%">
                     <option value="">Tous</option>
                     <?php foreach ($etats_statut as $e): ?>
                         <option value="<?= e($e) ?>" <?= ($filtres['etat'] == $e) ? 'selected' : '' ?>><?= e($e) ?></option>
                     <?php endforeach; ?>
                 </select>
-                <button type="button" class="btn-go" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
-                <button type="button" class="btn-go-outline" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i></button>
+                <button type="button" class="btn-chic btn-chic-primary" id="filterBtn"><i class="bi bi-funnel"></i><span>Filtrer</span></button>
+                <button type="button" class="btn-go-outline" id="resetBtn"><i class="bi bi-arrow-counterclockwise"></i> Réinitialiser</button>
             </div>
         </form>
     </div>
 
-    <!-- Tableau -->
     <div class="data-table-wrap" id="tableWrapper">
         <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-bottom bg-light">
             <h5 class="mb-0 fw-bold" style="font-family:'Outfit',sans-serif;">Liste des statuts</h5>
@@ -614,70 +493,71 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     </div>
 </div>
 
-<!-- ========================================================= -->
-<!-- MODAL FORMULAIRE (ajout/modification) -->
-<!-- ========================================================= -->
-<div class="modal fade" id="statutModal" tabindex="-1" aria-labelledby="modalTitle" aria-hidden="true">
+<!-- Modal Ajout/Édition -->
+<div class="modal fade modal-chic" id="statutModal" tabindex="-1" aria-labelledby="modalTitle" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title fw-bold" id="modalTitle"><i class="bi bi-tag text-primary me-2"></i> Nouveau statut</h5>
+                <h5 class="modal-title" id="modalTitle"><i class="bi bi-tags"></i><span id="modalTitleText">Nouveau statut</span></h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
             </div>
-            <form method="post" id="statutForm">
+            <form method="post" id="statutForm" style="display: flex; flex-direction: column; flex: 1; min-height: 0;">
                 <input type="hidden" name="action" id="formAction" value="add">
                 <input type="hidden" name="old_code" id="oldCode" value="">
                 <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
                 <div class="modal-body">
-                    <!-- Code et titre -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-hash me-1"></i> Identification</h6>
+                    <h6 class="text-uppercase fw-bold mb-3" style="font-size:11px;letter-spacing:0.8px;color:var(--color-primary);display:flex;align-items:center;gap:8px;">
+                        <i class="bi bi-hash-fill"></i> Identification
+                    </h6>
                     <div class="row g-3 mb-4">
                         <div class="col-md-6">
-                            <label for="code_statut" class="form-label fw-semibold">Code statut</label>
+                            <label for="code_statut" class="form-label">Code statut</label>
                             <div class="input-group">
                                 <span class="input-group-text"><i class="bi bi-hash"></i></span>
                                 <input type="text" class="form-control" id="code_statut" name="code_statut" readonly value="<?= e($editStatut['code_statut'] ?? generateStatutId($pdo)) ?>">
                             </div>
-                            <div class="form-text">ID généré automatiquement</div>
+                            <div class="form-text" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">ID généré automatiquement</div>
                         </div>
                         <div class="col-md-6">
-                            <label for="titre_statut" class="form-label fw-semibold">Titre <span class="text-danger">*</span></label>
+                            <label for="titre_statut" class="form-label">Titre <span class="text-danger">*</span></label>
                             <div class="input-group">
                                 <span class="input-group-text"><i class="bi bi-heading"></i></span>
                                 <input type="text" class="form-control" id="titre_statut" name="titre_statut" required placeholder="En cours" value="<?= e($editStatut['titre_statut'] ?? '') ?>">
                             </div>
-                            <div class="form-text">Le titre doit être unique.</div>
+                            <div class="form-text" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">Le titre doit être unique.</div>
                         </div>
                     </div>
 
-                    <!-- Type et symbole -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-tags me-1"></i> Détails</h6>
+                    <h6 class="text-uppercase fw-bold mb-3" style="font-size:11px;letter-spacing:0.8px;color:var(--color-info);display:flex;align-items:center;gap:8px;">
+                        <i class="bi bi-sliders2-fill"></i> Détails
+                    </h6>
                     <div class="row g-3 mb-4">
                         <div class="col-md-6">
-                            <label for="type_statut" class="form-label fw-semibold">Type <span class="text-danger">*</span></label>
+                            <label for="type_statut" class="form-label">Type <span class="text-danger">*</span></label>
                             <select class="form-select" id="type_statut" name="type_statut" required>
                                 <option value="">=== Faites votre choix ===</option>
                                 <?php foreach ($types_statut as $t): ?>
                                     <option value="<?= e($t) ?>" <?= (isset($editStatut) && $editStatut['type_statut'] == $t) ? 'selected' : '' ?>><?= e($t) ?></option>
                                 <?php endforeach; ?>
                             </select>
-                            <div class="form-text">Exemples : Sortie, Entrée, Autre</div>
+                            <div class="form-text" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">Exemples : Sortie, Entrée, Autre</div>
                         </div>
                         <div class="col-md-6">
-                            <label for="symbole_statut" class="form-label fw-semibold">Symbole</label>
+                            <label for="symbole_statut" class="form-label">Symbole</label>
                             <div class="input-group">
                                 <span class="input-group-text"><i class="bi bi-emoji-smile"></i></span>
                                 <input type="text" class="form-control" id="symbole_statut" name="symbole_statut" placeholder="✔️" value="<?= e($editStatut['symbole_statut'] ?? '') ?>">
                             </div>
-                            <div class="form-text">Icône ou code court (ex: ✔️, ⚠️, etc.)</div>
+                            <div class="form-text" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">Icône ou code court (ex: ✔️, ⚠️, etc.)</div>
                         </div>
                     </div>
 
-                    <!-- État -->
-                    <h6 class="text-uppercase text-muted small fw-bold mb-3"><i class="bi bi-toggle-on me-1"></i> Statut</h6>
+                    <h6 class="text-uppercase fw-bold mb-3" style="font-size:11px;letter-spacing:0.8px;color:var(--color-warning);display:flex;align-items:center;gap:8px;">
+                        <i class="bi bi-toggle-on-fill"></i> Statut
+                    </h6>
                     <div class="row g-3">
                         <div class="col-md-6">
-                            <label for="etat_statut" class="form-label fw-semibold">État</label>
+                            <label for="etat_statut" class="form-label">État</label>
                             <select class="form-select" id="etat_statut" name="etat_statut">
                                 <?php foreach ($etats_statut as $e): ?>
                                     <option value="<?= e($e) ?>" <?= (isset($editStatut) && $editStatut['etat_statut'] == $e) ? 'selected' : '' ?>><?= e($e) ?></option>
@@ -687,27 +567,31 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x"></i> Annuler</button>
-                    <button type="submit" class="btn btn-primary" id="saveBtn"><i class="bi bi-save"></i> Enregistrer</button>
+                    <button type="button" class="btn-chic" style="background:var(--color-gray-100);color:var(--text-secondary);" data-bs-dismiss="modal">
+                        <i class="bi bi-x-lg"></i>
+                        <span>Annuler</span>
+                    </button>
+                    <button type="submit" class="btn-chic btn-chic-primary" id="saveBtn">
+                        <i class="bi bi-check-lg"></i>
+                        <span>Enregistrer</span>
+                    </button>
                 </div>
             </form>
         </div>
     </div>
 </div>
 
-<!-- ========================================================= -->
-<!-- MODALE : CONFIRMATION SUPPRESSION -->
-<!-- ========================================================= -->
+<!-- Modal de confirmation de suppression -->
 <div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content border-0 shadow" style="border-radius: 16px;">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="border-radius:16px;border:none;">
             <div class="modal-body text-center p-4">
                 <div class="mb-3"><i class="bi bi-exclamation-triangle-fill text-warning" style="font-size: 3rem;"></i></div>
-                <h5 class="modal-title mb-2" style="font-weight: 600; color: var(--dark);">Confirmer la suppression</h5>
-                <p class="text-danger mb-4">Êtes-vous sûr de vouloir supprimer le statut <strong id="deleteNomStatut"></strong> ?<br>Cette action est irréversible.</p>
+                <h5 class="mb-2 fw-bold">Confirmer la suppression</h5>
+                <p class="text-muted small mb-4">Êtes-vous sûr de vouloir supprimer le statut <strong id="deleteNomStatut" class="text-danger"></strong> ?<br>Cette action est irréversible.</p>
                 <div class="d-flex gap-2 justify-content-center">
-                    <button type="button" class="btn btn-outline-secondary" style="border-radius: 10px;" data-bs-dismiss="modal">Annuler</button>
-                    <button type="button" class="btn btn-danger" id="confirmDeleteBtn" style="border-radius: 10px; min-width: 120px;"><i class="bi bi-trash3 me-1"></i> Supprimer</button>
+                    <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">Annuler</button>
+                    <button type="button" class="btn btn-danger rounded-3" id="confirmDeleteBtn"><i class="bi bi-trash3 me-1"></i> Supprimer</button>
                 </div>
             </div>
         </div>
@@ -722,35 +606,53 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
 </form>
 
-<form method="post" id="actionForm">
+<form method="post" id="actionForm" style="display:none;">
     <input type="hidden" name="action" id="actionField">
     <input type="hidden" name="edit_code" id="editCodeField">
     <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
 </form>
 
-<!-- ========================================================= -->
-<!-- SCRIPTS -->
-<!-- ========================================================= -->
+<!-- Toast pour les messages -->
+<div class="position-fixed top-0 end-0 p-3" style="z-index:2000;">
+    <div id="toastMsg" class="toast align-items-center text-white border-0" role="alert">
+        <div class="d-flex">
+            <div class="toast-body fw-semibold" id="toastBody"></div>
+            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+        </div>
+    </div>
+</div>
+
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
-
 <script>
 $(document).ready(function() {
-    // --- Initialisation des selectpicker ---
     $('.selectpicker').selectpicker('destroy');
     $('.selectpicker').selectpicker();
 
     const statutModal = new bootstrap.Modal(document.getElementById('statutModal'));
+    const deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
+    const toastEl = document.getElementById('toastMsg');
+    const toast = new bootstrap.Toast(toastEl, { delay: 2500 });
 
-    // --- Ajout ---
+    function showToast(msg, type = 'success') {
+        const colors = { success: 'bg-success', error: 'bg-danger', info: 'bg-primary', warning: 'bg-warning' };
+        const icons = { success: 'bi-check-circle-fill', error: 'bi-exclamation-triangle-fill', info: 'bi-info-circle-fill', warning: 'bi-exclamation-circle-fill' };
+        $('#toastBody').html(`<i class="bi ${icons[type]} me-2"></i>${msg}`);
+        toastEl.className = `toast align-items-center text-white border-0 ${colors[type] || 'bg-primary'}`;
+        toast.show();
+    }
+
+    <?php if ($message): ?>
+    showToast('<?= addslashes($message) ?>', '<?= $messageType === 'success' ? 'success' : ($messageType === 'danger' ? 'error' : ($messageType === 'warning' ? 'warning' : 'info')) ?>');
+    <?php endif; ?>
+
     $('#addBtn').on('click', function(e) {
         e.preventDefault();
         $('#formAction').val('add');
         $('#oldCode').val('');
-        $('#modalTitle').html('<i class="bi bi-tag text-primary me-2"></i> Nouveau statut');
-
+        $('#modalTitle').html('<i class="bi bi-tags"></i><span>Nouveau statut</span>');
         $('#statutForm')[0].reset();
         $('#code_statut').prop('readonly', true);
         $('#code_statut').val('<?= generateStatutId($pdo) ?>');
@@ -758,11 +660,9 @@ $(document).ready(function() {
         $('#type_statut').val('');
         $('#symbole_statut').val('');
         $('#etat_statut').val('Actif');
-
         statutModal.show();
     });
 
-    // --- Édition ---
     $(document).on('click', '.editBtn', function(e) {
         e.preventDefault();
         const code = $(this).data('code');
@@ -771,7 +671,6 @@ $(document).ready(function() {
         $('#actionForm').submit();
     });
 
-    // --- Fonction de recherche AJAX ---
     function rechercher(page) {
         page = page || 1;
         var formData = $('#searchForm').serialize();
@@ -795,7 +694,7 @@ $(document).ready(function() {
             error: function(xhr, status, error) {
                 console.error('Statut :', status);
                 console.error('Réponse brute :', xhr.responseText);
-                alert('Erreur lors de la recherche (code ' + xhr.status + '). Voir console pour détails.');
+                showToast('Erreur lors de la recherche (code ' + xhr.status + ')', 'error');
             }
         });
     }
@@ -812,45 +711,40 @@ $(document).ready(function() {
     });
 
     $('#filterBtn').on('click', function() { rechercher(1); });
+
     $('#resetBtn').on('click', function() {
         $('#searchInput').val('');
         $('#typeFilter, #etatFilter').selectpicker('val', '');
         rechercher(1);
     });
 
-    // Pagination initiale
-    $('.page-link').on('click', function(e) {
+    $(document).on('click', '.page-link', function(e) {
         e.preventDefault();
         var page = $(this).data('page');
-        if (page) rechercher(page);
+        if (page && !$(this).parent().hasClass('disabled')) rechercher(page);
     });
 
-    // --- Gestion suppression ---
     $(document).on('click', '.deleteBtn', function(e) {
         e.preventDefault();
         const code = $(this).data('code');
         const nom = $(this).data('nom');
         $('#deleteNomStatut').text(nom);
         $('#deleteFormId').val(code);
-        $('#deleteConfirmModal').modal('show');
+        deleteModal.show();
     });
+
     $('#confirmDeleteBtn').on('click', function() {
         $('#deleteForm').submit();
     });
 
-    // Auto-fermeture des alertes
-    setTimeout(function() { $('.alert').alert('close'); }, 5000);
-
-    // --- Si édition via POST ---
     <?php if (isset($editStatut) && $action === 'load_edit'): ?>
-        $(function() {
-            $('#formAction').val('edit');
-            $('#oldCode').val('<?= e($editStatut['code_statut']) ?>');
-            $('#modalTitle').html('<i class="bi bi-tag text-primary me-2"></i> Modifier le statut');
-            $('#code_statut').prop('readonly', true);
-            $('.selectpicker').selectpicker('refresh');
-            statutModal.show();
-        });
+    $(function() {
+        $('#formAction').val('edit');
+        $('#oldCode').val('<?= e($editStatut['code_statut']) ?>');
+        $('#modalTitle').html('<i class="bi bi-pencil-square"></i><span>Modifier le statut</span>');
+        $('#code_statut').prop('readonly', true);
+        statutModal.show();
+    });
     <?php endif; ?>
 });
 </script>

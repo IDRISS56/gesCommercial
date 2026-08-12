@@ -3,7 +3,7 @@ class commande
 {
     public function suiviAchat()
     {
-        requirePermission(['Administrateur', 'Superviseur']);
+        requirePermission(['Administrateur', 'Superviseur','Caisse', 'Vendeur']);
         include "views/commande/suivi_achat.php";
     }
     public function achat()
@@ -20,5 +20,10 @@ class commande
     {
         requirePermission(['Administrateur', 'Superviseur']);
         include "views/commande/transfert.php";
+    }
+    public function devis()
+    {
+        requirePermission(['Administrateur', 'Superviseur', 'Vendeur']);
+        include "views/commande/devis.php";
     }
 }

@@ -1,4 +1,6 @@
 <?php
+
+require 'databases/database.php';
 // vente_comptoir.php – Caisse - Vente Comptoir
 while (ob_get_level()) ob_end_clean();
 ob_start();
@@ -6,38 +8,6 @@ ob_start();
 // - DÉTECTION PRÉCOCE DES REQUÊTES AJAX -
 $isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) == 'xmlhttprequest';
 $isAjax = $isAjax || (isset($_POST['ajax']) && $_POST['ajax'] == '1');
-
-// - SESSION : protection si déjà démarrée -
-// if (session_status() === PHP_SESSION_NONE) {
-// session_start();
-// }
-// if ($isAjax && !isset($_SESSION['user_id'])) {
-// header('Content-Type: application/json; charset=utf-8');
-// echo json_encode(['success' => false, 'message' => 'Session expirée']);
-// exit;
-// }
-
-// if (!isset($_SESSION['user_id'])) {
-// if ($isAjax) {
-// header('Content-Type: application/json; charset=utf-8');
-// echo json_encode(['success' => false, 'message' => 'Session expirée']);
-// exit;
-// }
-// header('Location: ../utilisateur/login');
-// exit;
-// }
-
-$host = 'localhost';
-$dbname = 'gescommercial';
-$user = 'root';
-$pass = '';
-
-try {
-    $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8", $user, $pass);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-} catch (PDOException $e) {
-    die("Erreur de connexion : " . $e->getMessage());
-}
 
 // Récupération utilisateur et boutique
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
@@ -55,44 +25,20 @@ if (!$user) {
 }
 
 define('USER_ID', $_SESSION['user_id']);
-$role = $user['role'] ?? '';
+define('USER_BOUTIQUE', $user['boutique_id'] ?? null);
+// Vente comptoir = vente cash sans compte client : toujours rattachée à ce
+// client générique plutôt qu'à une sélection manuelle.
+define('CLIENT_COMPTOIR_CODE', 'CLI-COMPTOIR');
 
-// - BOUTIQUE ACTIVE -
-// Le superviseur peut superviser plusieurs boutiques : par défaut on prend la
-// dernière choisie (ou la première active), et un selectpicker dans l'en-tête
-// lui permet de changer à tout moment. Les autres rôles restent sur leur
-// boutique assignée.
-$boutiques = [];
-if ($role === 'Superviseur') {
-    $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
-    $validBoutiqueIds = array_column($boutiques, 'code_boutique');
-
-    if (!empty($_GET['choisir_boutique']) && in_array($_GET['choisir_boutique'], $validBoutiqueIds)) {
-        $_SESSION['boutique_choisie_superviseur'] = $_GET['choisir_boutique'];
-    }
-
-    $boutiqueChoisie = $_SESSION['boutique_choisie_superviseur'] ?? null;
-    if ($boutiqueChoisie && in_array($boutiqueChoisie, $validBoutiqueIds)) {
-        $boutiqueActive = $boutiqueChoisie;
-    } elseif (!empty($boutiques)) {
-        $boutiqueActive = $boutiques[0]['code_boutique'];
-    } else {
-        $boutiqueActive = $user['boutique_id'] ?? null;
-    }
-    $_SESSION['boutique_choisie_superviseur'] = $boutiqueActive;
-
-    define('USER_BOUTIQUE', $boutiqueActive);
-} else {
-    define('USER_BOUTIQUE', $user['boutique_id'] ?? null);
-}
+// Caisse active - logique basée sur le rôle
 $caisseActive = null;
+$role = $user['role'] ?? '';
 $needCaisseChoice = false;
 $caissesDisponibles = [];
 
 if ($role === 'Superviseur') {
-    // Le superviseur voit toutes les caisses ouvertes de sa boutique (ou de tout le système à défaut) :
-    // une caisse ne compte comme "ouverte" que si elle a réellement une journée en cours (jc.statut = 'OUVERTE'),
-    // pas seulement d'après le statut statique de la caisse (qui ne reflète pas toujours la fermeture du jour).
+    // Le superviseur voit toutes les caisses actives ET actuellement en session
+    // ouverte (journees_caisse.statut = 'OUVERTE') de sa boutique, à défaut de tout le système.
     if (!empty(USER_BOUTIQUE)) {
         $stmt = $pdo->prepare("SELECT DISTINCT c.caisse_id, c.nom_caisse
                                FROM caisse c
@@ -103,9 +49,9 @@ if ($role === 'Superviseur') {
     }
     if (empty($caissesDisponibles)) {
         $caissesDisponibles = $pdo->query("SELECT DISTINCT c.caisse_id, c.nom_caisse
-                                           FROM caisse c
-                                           INNER JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
-                                           WHERE c.statut = 'Actif' ORDER BY c.nom_caisse")->fetchAll(PDO::FETCH_ASSOC);
+                               FROM caisse c
+                               INNER JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
+                               WHERE c.statut = 'Actif' ORDER BY c.nom_caisse")->fetchAll(PDO::FETCH_ASSOC);
     }
 
     if (count($caissesDisponibles) === 1) {
@@ -125,24 +71,44 @@ if ($role === 'Superviseur') {
         }
     }
 } else {
-    // Tous les autres rôles (caissier, etc.) : uniquement la caisse qui leur a été autorisée,
-    // c'est-à-dire la caisse dont ils ont eux-mêmes ouvert la journée en cours.
+    // Tous les autres rôles (vendeur, caissier, etc.) : on regarde s'ils sont liés
+    // (via boutique_id) à la boutique dont une caisse est actuellement ouverte —
+    // peu importe qui a personnellement ouvert cette journée.
+    if (empty(USER_BOUTIQUE)) {
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => "Votre compte n'est lié à aucune boutique. Contactez un administrateur."]);
+            exit;
+        }
+        include __DIR__ . '/vente_bloquee.php';
+        renderVenteBloquee("Votre compte n'est lié à aucune boutique. Contactez un administrateur pour faire vendre.");
+        exit;
+    }
+
     $stmt = $pdo->prepare("SELECT c.caisse_id, c.nom_caisse
                            FROM caisse c
                            INNER JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
-                           WHERE c.statut = 'Actif' AND jc.id_utilisateur_ouverture = ?
-                           ORDER BY jc.date_ouverture DESC LIMIT 1");
-    $stmt->execute([USER_ID]);
-    $caisseActive = $stmt->fetch(PDO::FETCH_ASSOC);
+                           WHERE c.statut = 'Actif' AND c.boutique_id = ? ORDER BY c.nom_caisse");
+    $stmt->execute([USER_BOUTIQUE]);
+    $caissesDisponibles = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    if (!$caisseActive) {
-        if ($isAjax) {
-            header('Content-Type: application/json; charset=utf-8');
-            echo json_encode(['success' => false, 'message' => "Aucune caisse ne vous a été autorisée. Ouvrez d'abord votre caisse."]);
-            exit;
+    // Aucune caisse ouverte : on ne bloque plus la page — la vente cash sera
+    // simplement indisponible (bouton "Encaisser" désactivé), mais le bon de
+    // commande (en attente) reste utilisable sans caisse.
+    if (count($caissesDisponibles) === 1) {
+        $caisseActive = $caissesDisponibles[0];
+    } else {
+        // Plusieurs caisses ouvertes dans la même boutique : l'utilisateur choisit.
+        if (!empty($_GET['choisir_caisse'])) {
+            $_SESSION['caisse_choisie_boutique'] = $_GET['choisir_caisse'];
         }
-        echo '<script>alert("Aucune caisse ne vous a été autorisée. Veuillez ouvrir votre caisse avant de vendre.");document.location.replace("../caisse/journee");</script>';
-        exit;
+        $chosen = $_SESSION['caisse_choisie_boutique'] ?? null;
+        $validIds = array_column($caissesDisponibles, 'caisse_id');
+        if ($chosen && in_array($chosen, $validIds)) {
+            foreach ($caissesDisponibles as $c) { if ($c['caisse_id'] === $chosen) { $caisseActive = $c; break; } }
+        } else {
+            $needCaisseChoice = true;
+        }
     }
 }
 
@@ -157,6 +123,8 @@ if ($needCaisseChoice) {
     <!DOCTYPE html>
     <html lang="fr">
     <head>
+<?php include "includes/pwa_head.php"; ?>
+
         <meta charset="UTF-8">
         <title>Choix de la caisse</title>
         <style>
@@ -181,16 +149,12 @@ if ($needCaisseChoice) {
     exit;
 }
 
-if (!$caisseActive) {
-    if ($isAjax) {
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['success' => false, 'message' => "Aucune caisse ouverte."]);
-        exit;
-    }
-    echo '<script>alert("Aucune caisse ouverte.");document.location.replace("../caisse/journee");</script>';
-    exit;
+// Aucune caisse ouverte : on ne bloque plus l'accès à la page — on doit
+// pouvoir créer un bon de commande même sans caisse ouverte. Seul le bouton
+// "Encaisser" (vente cash) exigera une caisse ouverte, vérifié au moment du clic.
+if ($caisseActive) {
+    define('CAISSE_ID', $caisseActive['caisse_id']);
 }
-define('CAISSE_ID', $caisseActive['caisse_id']);
 
 // CSRF Token
 if (empty($_SESSION['csrf_token'])) {
@@ -203,6 +167,112 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = $_POST['action'];
     try {
         switch ($action) {
+
+            // ===== CRÉER UN BON DE COMMANDE (EN ATTENTE) =====
+            // Contrairement à la vente comptoir (cash, immédiate), le bon de commande :
+            //  - n'exige AUCUN paiement (avance optionnelle, 0 par défaut) ;
+            //  - NE TOUCHE PAS le stock (ni produit, ni lot) à la création : le stock
+            //    n'est vérifié/réservé qu'à la validation du bon (views/commande/vente.php,
+            //    action validate_facture — cf. condition reference_id IS NULL) ;
+            //  - crée une vraie ligne `facture` (categorie_facture='Bon', statut 'En
+            //    attente') afin d'apparaître dans le suivi existant (/commande/vente),
+            //    exactement comme un bon transformé depuis un devis.
+            case 'creer_bon_attente':
+                $data = $_POST;
+                $token = $data['csrf_token'] ?? '';
+                if ($token !== $csrf_token) {
+                    echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
+                    exit;
+                }
+
+                $panier = json_decode($data['panier'] ?? '[]', true) ?: [];
+                if (empty($panier)) throw new Exception('Le panier est vide.');
+
+                // Client et boutique : ceux choisis dans les sélecteurs du panier,
+                // sinon le client générique comptoir et la boutique connectée
+                // (find-or-create pour le client comptoir, comme pour la vente cash).
+                $client_id = trim($data['client_id'] ?? '') ?: CLIENT_COMPTOIR_CODE;
+                $boutique_id = trim($data['boutique_id'] ?? '') ?: USER_BOUTIQUE;
+                $stmtCheckClient = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ?");
+                $stmtCheckClient->execute([$client_id]);
+                if (!$stmtCheckClient->fetchColumn()) {
+                    if ($client_id === CLIENT_COMPTOIR_CODE) {
+                        $pdo->prepare("INSERT INTO contact(code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, solde_contact, solde_maximum, etat_contact) VALUES (?, 'Client comptoir', '-', '-', 'Client', 'Particulier', 0, 0, 'Actif')")
+                            ->execute([$client_id]);
+                    } else {
+                        throw new Exception('Client introuvable.');
+                    }
+                }
+
+                $tax_rate = floatval($data['taux_tva'] ?? 0);
+                $discount_rate = floatval($data['taux_remise'] ?? 0);
+                $lotsData = json_decode($data['lots'] ?? '[]', true) ?: [];
+
+                $montantHT = 0;
+                foreach ($panier as $item) {
+                    $montantHT += floatval($item['montant'] ?? ($item['prix'] * $item['qte']));
+                }
+                $taxe = round($montantHT * $tax_rate / 100, 2);
+                $remise = round($montantHT * $discount_rate / 100, 2);
+                $montantTTC = round($montantHT + $taxe - $remise, 2);
+
+                // Acompte optionnel — jamais obligatoire pour créer le bon.
+                $avance = max(0, min(floatval($data['avance'] ?? 0), $montantTTC));
+                $reste = round($montantTTC - $avance, 2);
+                if ($avance <= 0) {
+                    $etatFacture = 'Impayee';
+                } elseif ($reste > 0) {
+                    $etatFacture = 'Partielle';
+                } else {
+                    $etatFacture = 'Payee';
+                }
+
+                $numBon = 'BON-' . date('Ymd') . '-' . str_pad((string)rand(1, 99999), 5, '0', STR_PAD_LEFT);
+
+                $pdo->beginTransaction();
+                try {
+                    $pdo->prepare("INSERT INTO facture(numero_facture, titre_facture, type_facture, categorie_facture, date_facture, montant_ht, taxe, remise, montant_ttc, avance, reste, contact_id, utilisateur_id, etat_facture, statut_facture, reference_id)
+                                   VALUES (?, ?, 'Client', 'Bon', CURDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, 'En attente', NULL)")
+                        ->execute([$numBon, 'Bon de commande ' . $numBon, $montantHT, $taxe, $remise, $montantTTC, $avance, $reste, $client_id, USER_ID, $etatFacture]);
+
+                    // Lignes de commande — AUCUNE vérification/mise à jour de stock ni de
+                    // lot ici : c'est repoussé à la validation du bon (validate_facture
+                    // dans commande/vente.php), qui reconnaît ce cas via reference_id NULL.
+                    $numBase = date('dmYHis');
+                    foreach ($panier as $i => $ligne) {
+                        $numCmd = $numBase . str_pad((string)$i, 2, '0', STR_PAD_LEFT) . '-DOC';
+                        $prix = floatval($ligne['prix'] ?? 0);
+                        $qte = intval($ligne['qte'] ?? 1);
+                        $montant = floatval($ligne['montant'] ?? ($prix * $qte));
+                        $prix_achat = floatval($ligne['prix_achat'] ?? $prix);
+                        $code_prod = $ligne['code'] ?? $ligne['product_id'];
+                        // Pas de lot réel créé ici (aucune écriture de stock/lot n'est
+                        // faite avant la validation du bon) : on retient seulement le
+                        // nombre d'unités par lot choisi, pour l'affichage (X Boîte(s)...).
+                        $lot_id = null;
+                        $lotConfigure = filter_var($ligne['lot_configure'] ?? false, FILTER_VALIDATE_BOOLEAN);
+                        $produits_par_lot = $lotConfigure ? max(2, intval($ligne['unites_par_lot'] ?? 2)) : 1;
+
+                        $stmtCmd = $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
+                                                  VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, 'VALIDEE')");
+                        $stmtCmd->execute([$numCmd, $code_prod, $lot_id, $client_id, $numBon,
+                                           $prix_achat, $prix, $qte, $produits_par_lot, $montant, USER_ID, $boutique_id]);
+                    }
+
+                    $pdo->commit();
+                    echo json_encode([
+                        'success' => true,
+                        'message' => 'Bon de commande ' . $numBon . ' créé (en attente). Le stock sera vérifié à la validation.',
+                        'document' => $numBon,
+                        'etat' => $etatFacture,
+                        'lots' => $lotsData,
+                        'totaux' => ['ht' => $montantHT, 'taxe' => $taxe, 'remise' => $remise, 'ttc' => $montantTTC, 'reste' => $reste, 'avance' => $avance]
+                    ]);
+                } catch (Exception $e) {
+                    if ($pdo->inTransaction()) $pdo->rollBack();
+                    throw $e;
+                }
+                exit;
 
             // ===== CHARGER LES CATÉGORIES =====
             case 'load_categories':
@@ -272,15 +342,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             case 'search_products':
                 $q = trim($_POST['q'] ?? '');
                 $cat = $_POST['categorie'] ?? 'Tous';
-                $sql = "SELECT p.code_produit, p.titre_produit, p.stock_produit, p.prix_fournisseur,
+                // Boutique dont on affiche le stock : celle choisie dans le sélecteur,
+                // sinon la boutique de l'utilisateur connecté par défaut.
+                $boutiqueAffichage = trim($_POST['boutique_id'] ?? '') ?: USER_BOUTIQUE;
+                // Le stock affiché doit être celui de la boutique choisie uniquement
+                // (pas le stock global du produit) : si aucune ligne de stock n'existe
+                // pour cette boutique, on affiche 0 — sauf si aucune boutique n'est
+                // disponible, auquel cas on retombe sur le stock global.
+                $stockExpr = !empty($boutiqueAffichage) ? "COALESCE(sb.quantite, 0)" : "CAST(p.stock_produit AS SIGNED)";
+                $sql = "SELECT p.code_produit, p.titre_produit, p.stock_produit, p.prix_produit,
                         p.categorie_id, p.etat_produit,
-                        COALESCE(sb.quantite, CAST(p.stock_produit AS SIGNED)) as stock,
+                        $stockExpr as stock,
                         COALESCE(c.titre_categorie, 'Autre') as categorie
                         FROM produit p
                         LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
                         LEFT JOIN stock sb ON sb.produit_id = p.code_produit AND sb.boutique_id = ?
                         WHERE p.etat_produit != 'RUPTURE'";
-                $params = [USER_BOUTIQUE];
+                $params = [$boutiqueAffichage];
                 if ($cat !== 'Tous') {
                     $sql .= " AND c.titre_categorie = ?";
                     $params[] = $cat;
@@ -295,24 +373,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $stmt->execute($params);
                 $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-                // Chargement des lots pour chaque produit (table `lot`)
-                foreach ($products as &$p) {
-                    $stmtLots = $pdo->prepare("SELECT code_lot, libelle, quantite, unites_par_lot
-                                               FROM lot
-                                               WHERE produit_id = ? AND etat_lot = 'Actif' AND quantite > 0");
-                    $stmtLots->execute([$p['code_produit']]);
-                    $lots = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
-
-                    // Transformation pour correspondre à l'attente du JS
-                    $p['lots'] = array_map(function($lot) {
-                        return [
-                            'code_lot_produit' => $lot['code_lot'],
-                            'titre_lot' => $lot['libelle'],
-                            'quantite' => $lot['quantite'],
-                            'unites_par_lot' => max(1, intval($lot['unites_par_lot'] ?? 1))
-                        ];
-                    }, $lots);
-                }
                 echo json_encode(['success' => true, 'products' => $products]);
                 exit;
 
@@ -330,8 +390,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     exit;
                 }
                 $numClient = 'CT-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
-                $stmt = $pdo->prepare("INSERT INTO contact (code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, etat_contact) VALUES (?, ?, ?, ?, 'Client', 'Particulier', 'Actif')");
-                $stmt->execute([$numClient, $nom, $data['tel'] ?? '', $data['email'] ?? '']);
+                $stmt = $pdo->prepare("INSERT INTO contact (code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, adresse_contact, etat_contact) VALUES (?, ?, ?, ?, 'Client', ?, ?, 'Actif')");
+                $stmt->execute([$numClient, $nom, $data['tel'] ?? '', $data['email'] ?? '', $data['statut'] ?? 'Particulier', $data['adresse'] ?? '']);
                 echo json_encode(['success' => true, 'code' => $numClient, 'nom' => $nom]);
                 exit;
 
@@ -344,28 +404,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     exit;
                 }
 
+                // L'encaissement (vente cash immédiate) exige une caisse ouverte —
+                // contrairement au bon de commande, qui peut être créé sans caisse.
+                if (!defined('CAISSE_ID')) {
+                    throw new Exception("Aucune caisse n'est ouverte. Demandez au caissier d'ouvrir sa journée pour pouvoir encaisser, ou créez un bon de commande en attente.");
+                }
+
                 $panier = json_decode($data['panier'] ?? '[]', true) ?: [];
                 if (empty($panier)) throw new Exception('Le panier est vide.');
 
-                $client_id = $data['client_id'] ?? null;
-                if (empty($client_id)) throw new Exception('Veuillez sélectionner un client.');
+                // Client et boutique : ceux choisis dans les sélecteurs du panier ;
+                // à défaut, on retombe sur le client comptoir générique et la boutique
+                // de l'utilisateur connecté (find-or-create pour le client comptoir).
+                $boutique_id = trim($data['boutique_id'] ?? '') ?: USER_BOUTIQUE;
+                $client_id = trim($data['client_id'] ?? '') ?: CLIENT_COMPTOIR_CODE;
+                $stmtCheckClient = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ?");
+                $stmtCheckClient->execute([$client_id]);
+                if (!$stmtCheckClient->fetchColumn()) {
+                    if ($client_id === CLIENT_COMPTOIR_CODE) {
+                        $pdo->prepare("INSERT INTO contact(code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, solde_contact, solde_maximum, etat_contact) VALUES (?, 'Client comptoir', '-', '-', 'Client', 'Particulier', 0, 0, 'Actif')")
+                            ->execute([$client_id]);
+                    } else {
+                        throw new Exception('Client introuvable.');
+                    }
+                }
 
-                $payment_mode = $data['mode_reglement'] ?? 'Espece';
-                // Mapper les modes de paiement
-                $modeMap = [
-                    'Espece' => 'Espèce',
-                    'Mobile' => 'Mobile money',
-                    'Cheque' => 'Chèque',
-                    'Carte' => 'Carte',
-                    'Virement' => 'Virement',
-                    'Autres' => 'Autres'
-                ];
-                $mode_reglement = $modeMap[$payment_mode] ?? 'Espèce';
-
+                // Vente comptoir = paiement cash uniquement, aucun crédit ni bon en attente.
+                $mode_reglement = 'Espèce';
                 $amount_paid = floatval($data['avance'] ?? 0);
                 $tax_rate = floatval($data['taux_tva'] ?? 0);
                 $discount_rate = floatval($data['taux_remise'] ?? 0);
-                $is_attente = filter_var($data['en_attente'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
                 // Récupération des données de lots
                 $lotsData = json_decode($data['lots'] ?? '[]', true) ?: [];
@@ -378,54 +446,86 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $remise = round($montantHT * $discount_rate / 100, 2);
                 $montantTTC = round($montantHT + $taxe - $remise, 2);
 
-                // ===== LOGIQUE DE STATUT ET TYPE DE DOCUMENT =====
-                if ($is_attente) {
-                    $avance = 0;
-                    $reste = $montantTTC;
-                    $etatFacture = 'Impayee';
-                    $statutFacture = 'En attente';
-                    $categorieDocument = 'Bon';
-                } else {
-                    $avance = min($amount_paid, $montantTTC);
-                    $reste = round($montantTTC - $avance, 2);
-                    if ($reste < 0) $reste = 0;
-                    
-                    if ($avance > 0) {
-                        // Paiement (partiel ou intégral) → Facture validée
-                        $categorieDocument = 'Facture';
-                        $statutFacture = 'Validee';
-                        $etatFacture = ($reste > 0) ? 'Partielle' : 'Payee';
-                    } else {
-                        // Aucun paiement → Bon en attente
-                        $categorieDocument = 'Bon';
-                        $etatFacture = 'Impayee';
-                        $statutFacture = 'En attente';
-                    }
+                // ===== PAIEMENT CASH INTÉGRAL OBLIGATOIRE =====
+                // La vente comptoir ne gère plus les bons / crédits : le montant reçu
+                // doit couvrir le total (le devis + transformation en bon de commande
+                // prend maintenant en charge les ventes à crédit).
+                if ($amount_paid < $montantTTC) {
+                    throw new Exception('Paiement insuffisant : la vente comptoir se règle intégralement en espèces (reçu ' . $amount_paid . ', dû ' . $montantTTC . ').');
                 }
+                // Seul le montant dû entre en caisse et sur la facture ; le surplus
+                // éventuel repart en monnaie rendue au client (jamais en caisse).
+                $avance = $montantTTC;
+                $reste = 0;
+                $etatFacture = 'Payee';
+                $statutFacture = 'Validee';
+                $categorieDocument = 'Ticket';
+                $titreDocument = 'Ticket de caisse';
 
-                $titreDocument = ($categorieDocument === 'Facture') ? 'Facture client' : 'Bon';
-
-                // Numéros uniques pour chaque document
-                $numDocument = ($categorieDocument === 'Facture')
-                    ? 'FAC-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT)
-                    : 'BON-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT);
-                $numBL = 'BL-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT);
+                // Numéro unique du ticket (aucune facture n'est créée pour la vente
+                // comptoir : elle est réglée intégralement en cash, le ticket suffit
+                // comme justificatif ; ce numéro sert uniquement de référence pour
+                // les lignes de commande et la transaction de caisse).
+                $numDocument = 'TICKET-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT);
 
                 $pdo->beginTransaction();
                 try {
-                    // 1. DOCUMENT PRINCIPAL (Facture ou Bon)
-                    $stmtDoc = $pdo->prepare("INSERT INTO facture(numero_facture, titre_facture, type_facture, categorie_facture, date_facture, montant_ht, taxe, remise, montant_ttc, avance, reste, contact_id, utilisateur_id, etat_facture, statut_facture)
-                                           VALUES (?, ?, 'Client', ?, CURDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                    $stmtDoc->execute([$numDocument, $titreDocument, $categorieDocument,
-                                    $montantHT, $taxe, $remise, $montantTTC, $avance, $reste,
-                                    $client_id, USER_ID, $etatFacture, $statutFacture]);
+                    // 0. CONTRÔLE DE STOCK (verrouillage + vérification AVANT toute écriture)
+                    // On agrège les quantités demandées par produit (le panier peut contenir
+                    // plusieurs lignes du même produit, ex. lots différents) puis on verrouille
+                    // et vérifie le stock réellement disponible pour la boutique de vente.
+                    $qteDemandeeParProduit = [];
+                    foreach ($panier as $ligne) {
+                        $code_prod = $ligne['code'] ?? $ligne['product_id'] ?? null;
+                        if (!$code_prod) {
+                            throw new Exception('Ligne de panier invalide : produit non identifié.');
+                        }
+                        $qte = intval($ligne['qte'] ?? 1);
+                        if ($qte <= 0) {
+                            throw new Exception('Quantité invalide pour un article du panier.');
+                        }
+                        $qteDemandeeParProduit[$code_prod] = ($qteDemandeeParProduit[$code_prod] ?? 0) + $qte;
+                    }
 
-                    // 2. BON DE LIVRAISON (table dédiée `bon_livraison`, toujours en attente)
-                    $stmtBL = $pdo->prepare("INSERT INTO bon_livraison(code_bon, date_livraison, facture_id, adresse_livraison, transporteur, statut, commentaire)
-                                             VALUES (?, CURDATE(), ?, NULL, NULL, 'En attente', NULL)");
-                    $stmtBL->execute([$numBL, $numDocument]);
+                    foreach ($qteDemandeeParProduit as $code_prod => $qteDemandee) {
+                        $stmtNomProd = $pdo->prepare("SELECT titre_produit FROM produit WHERE code_produit = ?");
+                        $stmtNomProd->execute([$code_prod]);
+                        $nomProd = $stmtNomProd->fetchColumn() ?: $code_prod;
 
-                    // 3. LIGNES DE COMMANDE pour le document principal ET le bon de livraison
+                        if (!empty($boutique_id)) {
+                            // Verrouille la ligne de stock de cette boutique jusqu'au commit/rollback
+                            $stmtStockLock = $pdo->prepare(
+                                "SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE"
+                            );
+                            $stmtStockLock->execute([$code_prod, $boutique_id]);
+                            $stockDispo = $stmtStockLock->fetchColumn();
+                            $stockDispo = ($stockDispo === false) ? 0 : (int) $stockDispo;
+                        } else {
+                            // Pas de boutique sélectionnée : on se rabat sur le stock global
+                            $stmtStockLock = $pdo->prepare(
+                                "SELECT stock_produit FROM produit WHERE code_produit = ? FOR UPDATE"
+                            );
+                            $stmtStockLock->execute([$code_prod]);
+                            $stockDispo = (int) $stmtStockLock->fetchColumn();
+                        }
+
+                        if ($qteDemandee > $stockDispo) {
+                            throw new Exception(
+                                "Stock insuffisant pour « $nomProd » : disponible $stockDispo, demandé $qteDemandee."
+                            );
+                        }
+                    }
+
+                    // 1. AUCUNE FACTURE CRÉÉE — la vente comptoir est réglée intégralement
+                    // en cash, le ticket (numéro $numDocument, non stocké en base facture)
+                    // suffit comme justificatif. Seules les lignes de commande et la
+                    // transaction de caisse ci-dessous sont enregistrées.
+
+                    // 2. LIGNES DE COMMANDE — vente comptoir = remise immédiate au client,
+                    // donc pas de bon de livraison (le client repart avec sa marchandise
+                    // tout de suite ; le bon de livraison ne sert que pour les commandes
+                    // à préparer/livrer plus tard, gérées via le circuit devis → bon).
+                    $libellesLotValides = ['Boîte', 'Palette', 'Carton', 'Bidon', 'Unité'];
                     $numBase = date('dmYHis');
                     foreach ($panier as $i => $ligne) {
                         $numCmd = $numBase . str_pad($i, 2, '0', STR_PAD_LEFT);
@@ -434,25 +534,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         $montant = floatval($ligne['montant'] ?? ($prix * $qte));
                         $prix_achat = floatval($ligne['prix_achat'] ?? $prix);
                         $code_prod = $ligne['code'] ?? $ligne['product_id'];
-                        $lot_id = $ligne['lot_id'] ?? null;
-                        $produits_par_lot = max(0, intval($ligne['produits_par_lot'] ?? 0));
 
-                        // Ligne pour le document principal
+                        // Configuration de lot (optionnelle, saisie manuellement dans le
+                        // panier) : si non configurée, on reste sur le comportement
+                        // "produit simple" (lot_id NULL, produits_par_lot = 1), et le
+                        // ticket affichera "X Produit(s)" plutôt que de parler de lot.
+                        $lotConfigure = filter_var($ligne['lot_configure'] ?? false, FILTER_VALIDATE_BOOLEAN);
+                        $unitesParLot = max(2, intval($ligne['unites_par_lot'] ?? 2));
+                        $libelleLot = in_array($ligne['libelle_lot'] ?? '', $libellesLotValides, true) ? $ligne['libelle_lot'] : 'Unité';
+
+                        $lot_id = null;
+                        $produits_par_lot = 1;
+                        if ($lotConfigure) {
+                            $lot_id = 'LOT-' . date('YmdHis') . rand(100, 999) . '-' . $i;
+                            $produits_par_lot = $unitesParLot;
+                            $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, produit_id, quantite, etat_lot)
+                                           VALUES (?, ?, ?, ?, ?, 'Actif')")
+                                ->execute([$lot_id, $libelleLot, $unitesParLot, $code_prod, $qte]);
+                        }
+
                         $stmtCmd = $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
                                                   VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, 'VALIDEE')");
                         $stmtCmd->execute([$numCmd . '-DOC', $code_prod, $lot_id, $client_id, $numDocument,
-                                           $prix_achat, $prix, $qte, $produits_par_lot, $montant, USER_ID, USER_BOUTIQUE]);
-
-                        // Ligne pour le bon de livraison (toujours en attente)
-                        $stmtCmdBL = $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
-                                                  VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, 'EN ATTENTE')");
-                        $stmtCmdBL->execute([$numCmd . '-BL', $code_prod, $lot_id, $client_id, $numBL,
-                                           $prix_achat, $prix, $qte, $produits_par_lot, $montant, USER_ID, USER_BOUTIQUE]);
+                                           $prix_achat, $prix, $qte, $produits_par_lot, $montant, USER_ID, $boutique_id]);
 
                         // Mise à jour stock boutique
-                        if (!empty(USER_BOUTIQUE)) {
+                        if (!empty($boutique_id)) {
                             $pdo->prepare("UPDATE stock SET quantite = GREATEST(0, quantite - ?) WHERE produit_id = ? AND boutique_id = ?")
-                                ->execute([$qte, $code_prod, USER_BOUTIQUE]);
+                                ->execute([$qte, $code_prod, $boutique_id]);
                         }
 
                         // Mise à jour stock produit
@@ -466,7 +575,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                                         ELSE 'DISPONIBLE' END WHERE code_produit = ?")
                             ->execute([$code_prod]);
 
-                        // Gestion des lots (table `lot`)
+                        // Gestion du lot tout juste créé : il est immédiatement vendu, donc
+                        // déplété au même montant que sa quantité de création (=> Inactif).
                         if ($lot_id) {
                             $pdo->prepare("UPDATE lot SET quantite = quantite - ? WHERE code_lot = ? AND quantite >= ?")
                                 ->execute([$qte, $lot_id, $qte]);
@@ -475,50 +585,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         }
                     }
 
-                    // 4. TRANSACTION CAISSE (si paiement effectué)
-                    if (!$is_attente && $avance > 0) {
-                        $stmtSolde = $pdo->prepare("SELECT solde, statut FROM caisse WHERE caisse_id = ? FOR UPDATE");
+                    // 4. TRANSACTION CAISSE — la vente comptoir est toujours payée cash et
+                    // intégralement : on encaisse exactement le montant dû (montantTTC).
+                    // La monnaie rendue au client ne transite jamais par la caisse.
+                    if ($montantTTC > 0) {
+                        $stmtSolde = $pdo->prepare("SELECT solde FROM caisse WHERE caisse_id = ? FOR UPDATE");
                         $stmtSolde->execute([CAISSE_ID]);
-                        $caisseRow = $stmtSolde->fetch(PDO::FETCH_ASSOC);
-                        if ($caisseRow === false) {
-                            throw new Exception("Caisse introuvable (caisse_id='" . CAISSE_ID . "') : le paiement n'a pas pu être lié à une caisse.");
-                        }
-                        if ($caisseRow['statut'] !== 'Actif') {
-                            throw new Exception("Cette caisse est inactive : impossible d'enregistrer un paiement dessus. Réactivez la caisse avant de continuer.");
-                        }
-                        // Le statut de la caisse ne suffit pas : on vérifie qu'une journée est
-                        // réellement en cours (la fermeture de journée ne modifie pas ce statut).
-                        $stmtJC = $pdo->prepare("SELECT COUNT(*) FROM journees_caisse WHERE caisse_id = ? AND statut = 'OUVERTE'");
-                        $stmtJC->execute([CAISSE_ID]);
-                        if ($stmtJC->fetchColumn() == 0) {
-                            throw new Exception("Aucune journée de caisse n'est ouverte pour cette caisse : impossible d'enregistrer un paiement. Ouvrez la caisse avant de continuer.");
-                        }
-                        $soldeAvant = floatval($caisseRow['solde']);
-                        $soldeApres = $soldeAvant + $avance;
+                        $soldeAvant = floatval($stmtSolde->fetchColumn());
+                        $soldeApres = $soldeAvant + $montantTTC;
                         $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
 
                         $stmtTr = $pdo->prepare("INSERT INTO transaction
                             (numero_transaction, date_transaction, heure_transaction, montant_transaction, frais_transaction, montant_total, type_transaction, objet_transaction, caisse_id, facture_id, mode_reglement, utilisateur_id, etat_transaction)
                             VALUES (?, CURDATE(), CURTIME(), ?, 0, ?, 'Entree', 'Vente comptoir', ?, ?, ?, ?, 'Succes')");
-                        $stmtTr->execute([$numTrans, $avance, $avance, CAISSE_ID, $numDocument, $mode_reglement, USER_ID]);
+                        $stmtTr->execute([$numTrans, $montantTTC, $montantTTC, CAISSE_ID, $numDocument, $mode_reglement, USER_ID]);
 
-                        $stmtMaj = $pdo->prepare("UPDATE caisse SET solde = ? WHERE caisse_id = ? AND statut = 'Actif'");
-                        $stmtMaj->execute([$soldeApres, CAISSE_ID]);
-                        if ($stmtMaj->rowCount() === 0) {
-                            throw new Exception("La mise à jour du solde de la caisse (caisse_id='" . CAISSE_ID . "') n'a affecté aucune ligne (caisse fermée entre-temps ?).");
-                        }
+                        $pdo->prepare("UPDATE caisse SET solde = ? WHERE caisse_id = ?")
+                            ->execute([$soldeApres, CAISSE_ID]);
                     }
+
+                    // 5. SOLDE DU CONTACT : sans objet ici. La vente comptoir étant
+                    // toujours payée intégralement cash sur le client générique, elle
+                    // ne crée jamais de créance/avance sur un compte client.
 
                     $pdo->commit();
                     echo json_encode([
                         'success' => true,
                         'document' => $numDocument,
                         'type_document' => $categorieDocument,
-                        'bon_livraison' => $numBL,
                         'reste' => $reste,
                         'etat' => $etatFacture,
                         'statut' => $statutFacture,
-                        'en_attente' => $is_attente,
                         'lots' => $lotsData,
                         'totaux' => [
                             'ht' => $montantHT,
@@ -553,11 +650,25 @@ $categories = $pdo->query("SELECT DISTINCT c.titre_categorie
                            WHERE c.titre_categorie IS NOT NULL AND c.titre_categorie <> ''
                            ORDER BY c.titre_categorie ASC")->fetchAll(PDO::FETCH_COLUMN);
 
-$stmtCaisseInfo = $pdo->prepare("SELECT * FROM caisse WHERE caisse_id = ?");
-$stmtCaisseInfo->execute([CAISSE_ID]);
-$caisse = $stmtCaisseInfo->fetch();
+// Boutiques actives (sélecteur en haut du panier) : la boutique connectée reste
+// pré-sélectionnée par défaut, mais le vendeur peut vendre/commander pour une
+// autre boutique — le stock affiché suit alors la boutique choisie.
+$boutiquesListe = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
 
-$userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'")->fetch();
+// Clients actifs (sélecteur client) : "Client comptoir" reste la valeur par
+// défaut si rien n'est choisi.
+$clientsListe = $pdo->query("SELECT code_contact, nom_prenom_contact, telephone_contact FROM contact WHERE type_contact = 'Client' AND etat_contact = 'Actif' AND code_contact <> '" . CLIENT_COMPTOIR_CODE . "' ORDER BY nom_prenom_contact")->fetchAll(PDO::FETCH_ASSOC);
+
+$caisse = null;
+if (defined('CAISSE_ID')) {
+    $stmtCaisseInfo = $pdo->prepare("SELECT * FROM caisse WHERE caisse_id = ?");
+    $stmtCaisseInfo->execute([CAISSE_ID]);
+    $caisse = $stmtCaisseInfo->fetch();
+}
+
+$stmtUserInfo = $pdo->prepare("SELECT * FROM utilisateur WHERE id = ?");
+$stmtUserInfo->execute([USER_ID]);
+$userInfo = $stmtUserInfo->fetch();
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -599,6 +710,8 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
         .search-box { padding: 12px 16px; border-bottom: 1px solid var(--border-color); }
         .search-box input { width: 100%; padding: 10px 14px; border: 1.5px solid var(--border-color); border-radius: 8px; font-size: 14px; }
         .search-box input:focus { outline: none; border-color: var(--color-primary); }
+        .bootstrap-select .dropdown-toggle { background: #fff !important; border: 1.5px solid var(--border-color) !important; border-radius: 8px !important; }
+        .bootstrap-select .dropdown-toggle:focus { border-color: var(--color-primary) !important; box-shadow: 0 0 0 3px var(--color-primary-soft) !important; }
         .category-bar { display: flex; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--border-color); overflow-x: auto; background: var(--bg-surface); }
         .cat-btn { padding: 6px 14px; border: 1px solid var(--border-color); background: var(--bg-surface); border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .2s; }
         .cat-btn.active { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
@@ -715,15 +828,24 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
         <div class="pos-header">
             <h2><i class="bi bi-shop"></i> Vente Comptoir</h2>
             <div class="d-flex align-items-center gap-3">
-                <?php if ($role === 'Superviseur' && count($boutiques) > 1): ?>
-                    <select id="boutiqueSelect" class="form-select form-select-sm" style="width:auto;display:inline-block;" onchange="window.location.href='?choisir_boutique='+encodeURIComponent(this.value)">
-                        <?php foreach ($boutiques as $b): ?>
-                            <option value="<?= htmlspecialchars($b['code_boutique']) ?>" <?= $b['code_boutique'] === USER_BOUTIQUE ? 'selected' : '' ?>><?= htmlspecialchars($b['nom_boutique']) ?></option>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <label for="boutiqueSelect" style="font-size:11px;font-weight:600;color:var(--color-gray-500);text-transform:uppercase;white-space:nowrap;">Boutique</label>
+                    <select id="boutiqueSelect" class="selectpicker" data-live-search="true" data-width="220px" data-container="body">
+                        <?php foreach ($boutiquesListe as $b): ?>
+                            <option value="<?= htmlspecialchars($b['code_boutique']) ?>" <?= ($b['code_boutique'] === USER_BOUTIQUE) ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($b['nom_boutique']) ?><?= ($b['code_boutique'] === USER_BOUTIQUE) ? ' (ma boutique)' : '' ?>
+                            </option>
                         <?php endforeach; ?>
                     </select>
-                <?php endif; ?>
+                </div>
                 <span class="text-muted small"><i class="bi bi-person"></i> <?= htmlspecialchars($userInfo['nom_prenom'] ?? '') ?></span>
-                <span class="badge bg-success-subtle text-success"><i class="bi bi-cash-stack"></i> Caisse ouverte</span>
+                <?php if ($caisse): ?>
+                    <span class="badge bg-success-subtle text-success"><i class="bi bi-cash-stack"></i> Caisse ouverte</span>
+                <?php else: ?>
+                    <span class="badge bg-warning-subtle text-warning" title="Vente cash indisponible — le bon de commande reste possible">
+                        <i class="bi bi-exclamation-triangle"></i> Aucune caisse ouverte
+                    </span>
+                <?php endif; ?>
             </div>
         </div>
         <div class="search-box">
@@ -751,22 +873,18 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             <h2><i class="bi bi-receipt"></i> Ticket <span class="cart-badge" id="cartCount">0</span></h2>
         </div>
         <div class="client-select-zone">
-            <div id="clientDisplay" style="display:none;">
-                <div class="client-display">
-                    <div>
-                        <div class="cl-name" id="clientName"></div>
-                        <div class="cl-code" id="clientCode"></div>
-                    </div>
-                    <button class="btn-change" onclick="resetClient()">Changer</button>
-                </div>
-            </div>
-            <div id="clientSelectWrapper">
-                <label class="form-label" style="font-size:11px;font-weight:600;color:var(--color-gray-500);text-transform:uppercase;">Client</label>
-                <select id="clientSelect" class="selectpicker" data-live-search="true" data-live-search-placeholder="Rechercher un client...">
-                    <option value="">-- Sélectionner un client --</option>
+            <label style="font-size:11px;font-weight:700;color:var(--color-gray-500);text-transform:uppercase;">Client</label>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <select id="clientSelect" class="form-select form-select-sm" style="flex:1;min-width:0;">
+                    <option value="">Client comptoir (par défaut)</option>
+                    <?php foreach ($clientsListe as $c): ?>
+                        <option value="<?= htmlspecialchars($c['code_contact']) ?>">
+                            <?= htmlspecialchars($c['nom_prenom_contact']) ?><?= $c['telephone_contact'] ? ' — ' . htmlspecialchars($c['telephone_contact']) : '' ?>
+                        </option>
+                    <?php endforeach; ?>
                 </select>
-                <button class="btn btn-sm btn-outline-primary mt-2 w-100" onclick="openModal('clientModal')">
-                    <i class="bi bi-plus"></i> Nouveau client
+                <button type="button" class="btn btn-sm btn-outline-primary flex-shrink-0" style="height:31px;white-space:nowrap;" onclick="openModal('clientModal')" title="Nouveau client">
+                    <i class="bi bi-plus-lg"></i>
                 </button>
             </div>
         </div>
@@ -799,8 +917,12 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             </div>
             <div class="actions-row">
                 <button class="btn-clear" id="btnClear"><i class="bi bi-trash3"></i> Vider</button>
-                <button class="btn-attente" id="btnAttente" disabled><i class="bi bi-clock"></i> En attente</button>
-                <button class="btn-pay" id="btnCheckout" disabled><i class="bi bi-credit-card-fill"></i> Encaisser</button>
+                <button class="btn-pay" id="btnCheckout" disabled <?= !$caisse ? 'title="Aucune caisse ouverte — encaissement indisponible"' : '' ?>><i class="bi bi-credit-card-fill"></i> Encaisser</button>
+            </div>
+            <div class="actions-row" style="margin-top:8px;">
+                <button class="btn-attente" id="btnBonCommande" disabled style="width:100%;justify-content:center;">
+                    <i class="bi bi-hourglass-split"></i> Bon de commande (en attente)
+                </button>
             </div>
         </div>
     </div>
@@ -821,14 +943,8 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             <div class="form-group">
                 <label>Mode de paiement</label>
                 <div class="pay-modes">
-                    <button class="pay-mode active" data-mode="Espece" onclick="selectPayMode(this)">
-                        <i class="bi bi-cash"></i><span>Espèces</span>
-                    </button>
-                    <button class="pay-mode" data-mode="Mobile" onclick="selectPayMode(this)">
-                        <i class="bi bi-phone"></i><span>Mobile</span>
-                    </button>
-                    <button class="pay-mode" data-mode="Cheque" onclick="selectPayMode(this)">
-                        <i class="bi bi-receipt"></i><span>Chèque</span>
+                    <button class="pay-mode active" type="button" disabled>
+                        <i class="bi bi-cash"></i><span>Espèces (comptant uniquement)</span>
                     </button>
                 </div>
             </div>
@@ -839,18 +955,6 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
             <div class="change-box" id="changeBox">
                 <div class="lbl" id="changeLbl">Monnaie à rendre</div>
                 <div class="val" id="changeAmount">0 FCFA</div>
-            </div>
-
-            <!-- SECTION LOTS -->
-            <div class="lots-section">
-                <div class="lots-title">
-                    <i class="bi bi-box-seam"></i> Configuration des lots (Bon de livraison)
-                </div>
-                <div id="lotsContainer"></div>
-                <div class="lots-total">
-                    <span class="label">Nombre total de lots :</span>
-                    <span class="value" id="totalLots">0</span>
-                </div>
             </div>
 
             <div class="mt-3 p-3 rounded" style="background:var(--color-gray-50);font-size:12px;">
@@ -871,36 +975,6 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
     </div>
 </div>
 
-<!-- Modal En attente (avec configuration des lots) -->
-<div class="modal-overlay" id="attenteModal">
-    <div class="modal-box">
-        <div class="modal-head">
-            <h3><i class="bi bi-clock"></i> Mise en attente</h3>
-            <button class="modal-close" onclick="closeModal('attenteModal')"><i class="bi bi-x"></i></button>
-        </div>
-        <div class="modal-body">
-            <div class="mt-3 p-3 rounded" style="background:var(--color-gray-50);font-size:12px;">
-                Vérifiez le nombre de produits par lot avant de mettre la commande en attente : c'est cette valeur qui déterminera le nombre de cartons à préparer pour la livraison.
-            </div>
-
-            <!-- SECTION LOTS -->
-            <div class="lots-section">
-                <div class="lots-title">
-                    <i class="bi bi-box-seam"></i> Configuration des lots (Bon de livraison)
-                </div>
-                <div id="lotsContainerAttente"></div>
-                <div class="lots-total">
-                    <span class="label">Nombre total de lots :</span>
-                    <span class="value" id="totalLotsAttente">0</span>
-                </div>
-            </div>
-        </div>
-        <div class="modal-foot">
-            <button class="btn btn-secondary" onclick="closeModal('attenteModal')">Annuler</button>
-            <button class="btn btn-primary" id="btnConfirmerAttente" onclick="confirmerAttente()"><i class="bi bi-check-lg"></i> Confirmer la mise en attente</button>
-        </div>
-    </div>
-</div>
 
 <!-- Modal Nouveau Client -->
 <div class="modal-overlay" id="clientModal">
@@ -912,7 +986,7 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
         <div class="modal-body">
             <form id="clientForm">
                 <div class="form-group">
-                    <label>Nom complet *</label>
+                    <label>Nom et prénoms *</label>
                     <input type="text" id="clientNom" required>
                 </div>
                 <div class="form-group">
@@ -923,6 +997,17 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
                     <label>Email</label>
                     <input type="email" id="clientEmail">
                 </div>
+                <div class="form-group">
+                    <label>Adresse</label>
+                    <input type="text" id="clientAdresse">
+                </div>
+                <div class="form-group">
+                    <label>Type</label>
+                    <select id="clientStatut">
+                        <option value="Particulier">Particulier</option>
+                        <option value="Société">Société</option>
+                    </select>
+                </div>
             </form>
         </div>
         <div class="modal-foot">
@@ -932,9 +1017,10 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
     </div>
 </div>
 
+
 <!-- Modal Ticket -->
 <div class="modal-overlay" id="ticketModal">
-    <div class="modal-box" style="width:400px;">
+    <div class="modal-box" style="width:300px;">
         <div class="modal-head">
             <h3><i class="bi bi-receipt"></i> Ticket</h3>
             <button class="modal-close" onclick="closeModal('ticketModal')"><i class="bi bi-x"></i></button>
@@ -943,6 +1029,23 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
         <div class="modal-foot">
             <button class="btn btn-secondary" onclick="closeModal('ticketModal');resetSale();">Nouvelle vente</button>
             <button class="btn btn-primary" onclick="window.print()"><i class="bi bi-printer"></i> Imprimer</button>
+        </div>
+    </div>
+</div>
+
+<!-- Modal Confirmation générique (remplace les confirm()/alert() JS) -->
+<div class="modal-overlay" id="confirmModal">
+    <div class="modal-box" style="width:360px;">
+        <div class="modal-head">
+            <h3><i class="bi bi-question-circle"></i> <span id="confirmModalTitle">Confirmation</span></h3>
+            <button class="modal-close" onclick="closeModal('confirmModal')"><i class="bi bi-x"></i></button>
+        </div>
+        <div class="modal-body">
+            <p id="confirmModalMsg" style="margin:0;font-size:14px;color:var(--text-secondary,#334155);"></p>
+        </div>
+        <div class="modal-foot">
+            <button class="btn btn-secondary" onclick="closeModal('confirmModal')">Annuler</button>
+            <button class="btn btn-primary" id="confirmModalOk">Confirmer</button>
         </div>
     </div>
 </div>
@@ -957,9 +1060,8 @@ $userInfo = $pdo->query("SELECT * FROM utilisateur WHERE id = '" . USER_ID . "'"
 <script>
 const BASE_URL = window.location.pathname;
 const CSRF_TOKEN = '<?= $csrf_token ?>';
+const CAISSE_OUVERTE = <?= $caisse ? 'true' : 'false' ?>;
 let cart = [];
-let selectedClient = null;
-let payMode = 'Espece';
 let currentProducts = [];
 let currentCategory = 'Tous';
 let searchTimer = null;
@@ -978,6 +1080,20 @@ function toast(msg, type = 'success') {
 function openModal(id) { gid(id).classList.add('show'); }
 function closeModal(id) { gid(id).classList.remove('show'); }
 
+// Remplace window.confirm() par la modal maison
+function confirmModal(message, onOk, title) {
+    gid('confirmModalTitle').textContent = title || 'Confirmation';
+    gid('confirmModalMsg').textContent = message;
+    const okBtn = gid('confirmModalOk');
+    const newOkBtn = okBtn.cloneNode(true); // évite l'empilement de handlers
+    okBtn.parentNode.replaceChild(newOkBtn, okBtn);
+    newOkBtn.addEventListener('click', function() {
+        closeModal('confirmModal');
+        onOk();
+    });
+    openModal('confirmModal');
+}
+
 // ===== TOUT EN POST, AUCUN GET =====
 function api(action, data) {
     return fetch(BASE_URL, {
@@ -990,52 +1106,38 @@ function api(action, data) {
     }).then(r => r.json()).catch(err => { throw new Error('Erreur connexion'); });
 }
 
-// Charger clients pour selectpicker
-async function loadClients() {
+async function createClient() {
+    const nom = gid('clientNom').value.trim();
+    if (!nom) { toast('Nom requis', 'error'); return; }
     try {
-        const res = await api('get_clients', { q: '' });
+        const res = await api('create_customer', {
+            nom,
+            tel: gid('clientTel').value,
+            email: gid('clientEmail').value,
+            adresse: gid('clientAdresse').value,
+            statut: gid('clientStatut').value,
+            csrf_token: CSRF_TOKEN
+        });
         if (res.success) {
+            closeModal('clientModal');
+            gid('clientForm').reset();
             const select = gid('clientSelect');
-            select.innerHTML = '<option value="">-- Sélectionner un client --</option>';
-            res.clients.forEach(c => {
-                const opt = document.createElement('option');
-                opt.value = c.code_contact;
-                opt.textContent = c.nom_prenom_contact + (c.telephone_contact ? ' (' + c.telephone_contact + ')' : '');
-                opt.dataset.name = c.nom_prenom_contact;
-                opt.dataset.code = c.code_contact;
-                select.appendChild(opt);
-            });
-            jQuery('.selectpicker').selectpicker('refresh');
+            const opt = document.createElement('option');
+            opt.value = res.code;
+            opt.textContent = res.nom;
+            select.appendChild(opt);
+            select.value = res.code;
+            toast('Client créé');
+        } else {
+            toast(res.message || 'Erreur', 'error');
         }
-    } catch (e) { console.error(e); }
-}
-
-// Recherche clients dans selectpicker
-jQuery('#clientSelect').on('changed.bs.select', function(e, clickedIndex) {
-    const opt = this.options[clickedIndex];
-    if (opt && opt.value) {
-        selectedClient = { code: opt.value, name: opt.dataset.name };
-        gid('clientDisplay').style.display = 'block';
-        gid('clientSelectWrapper').style.display = 'none';
-        gid('clientName').textContent = selectedClient.name;
-        gid('clientCode').textContent = selectedClient.code;
-        updateButtons();
-    }
-});
-
-function resetClient() {
-    selectedClient = null;
-    gid('clientDisplay').style.display = 'none';
-    gid('clientSelectWrapper').style.display = 'block';
-    gid('clientSelect').selectedIndex = 0;
-    jQuery('.selectpicker').selectpicker('refresh');
-    updateButtons();
+    } catch (e) { toast('Erreur connexion', 'error'); }
 }
 
 // Charger produits
 async function loadProducts(q = '') {
     try {
-        const res = await api('get_products', { q, categorie: currentCategory });
+        const res = await api('get_products', { q, categorie: currentCategory, boutique_id: gid('boutiqueSelect').value || '' });
         if (res.success) {
             currentProducts = res.products;
             renderProducts(currentProducts, q);
@@ -1059,7 +1161,7 @@ function renderProducts(products, q = '') {
         return `<div class="${cardClass}" onclick="addProduct(${i})">
             <div class="pc-title">${titleHTML}</div>
             <div class="pc-code">${esc(p.code_produit)}</div>
-            <div class="pc-price">${fmt(p.prix_fournisseur || 0)}</div>
+            <div class="pc-price">${fmt(p.prix_produit || 0)}</div>
             <div class="pc-stock ${stockClass}">${stockText}</div>
         </div>`;
     }).join('');
@@ -1077,6 +1179,10 @@ gid('searchInput').addEventListener('input', function() {
     searchTimer = setTimeout(() => loadProducts(this.value.trim()), 300);
 });
 
+gid('boutiqueSelect').addEventListener('change', function() {
+    loadProducts(gid('searchInput').value.trim());
+});
+
 async function addProduct(idx) {
     const p = currentProducts[idx];
     if (!p) return;
@@ -1088,18 +1194,18 @@ async function addProduct(idx) {
         existing.qte += 1;
         existing.montant = existing.qte * existing.prix;
     } else {
-        const prix = parseFloat(p.prix_fournisseur) || 0;
-        const premierLot = (p.lots && p.lots.length > 0) ? p.lots[0] : null;
+        const prix = parseFloat(p.prix_produit) || 0;
         cart.push({
             code: p.code_produit,
             nom: p.titre_produit,
             prix: prix,
-            prix_achat: parseFloat(p.prix_fournisseur) || 0,
+            prix_achat: parseFloat(p.prix_produit) || 0,
             qte: 1,
             stock: stock,
             montant: prix,
-            lot_id: premierLot ? premierLot.code_lot_produit : null,
-            produitsParLot: premierLot ? (parseInt(premierLot.unites_par_lot) || 0) : 0
+            lotConfigure: false,
+            unitesParLot: 2,
+            libelleLot: 'Unité'
         });
     }
     renderCart();
@@ -1157,10 +1263,19 @@ function renderCart() {
         gid('cartItems').innerHTML = '<div class="cart-empty"><i class="bi bi-cart-x"></i><p>Panier vide</p></div>';
         gid('cartCount').textContent = '0';
         gid('btnCheckout').disabled = true;
-        gid('btnAttente').disabled = true;
+        gid('btnBonCommande').disabled = true;
     } else {
         let html = '';
         cart.forEach(p => {
+            const unites = Math.max(1, parseInt(p.unitesParLot) || 1);
+            let apercu;
+            if (p.lotConfigure && unites > 1) {
+                const nbLots = Math.floor(p.qte / unites);
+                const reste = p.qte % unites;
+                apercu = reste > 0 ? `${nbLots} ${esc(p.libelleLot)}(s) et ${reste} Produit(s)` : `${nbLots} ${esc(p.libelleLot)}(s)`;
+            } else {
+                apercu = `${p.qte} Produit(s)`;
+            }
             html += `<div class="cart-line">
                 <div class="cl-info">
                     <div class="cl-name">${esc(p.nom)}</div>
@@ -1176,15 +1291,52 @@ function renderCart() {
                 </div>
                 <div class="cl-montant">${fmt(p.montant)}</div>
                 <button class="cl-remove" onclick="removeProduct('${p.code}')"><i class="bi bi-x-circle"></i></button>
+            </div>
+            <div class="cl-lot-config" style="padding:4px 10px 8px;font-size:11px;color:var(--color-gray-500);">
+                <label style="cursor:pointer;">
+                    <input type="checkbox" ${p.lotConfigure ? 'checked' : ''} onchange="toggleLotConfig('${p.code}', this.checked)">
+                    Configurer un lot
+                </label>
+                ${p.lotConfigure ? `
+                <span style="margin-left:8px;">
+                    <input type="number" min="2" step="1" value="${unites}" style="width:56px;" title="Unités par lot"
+                           onclick="event.stopPropagation()" onchange="setLotUnites('${p.code}', this.value)"> unité(s) par
+                    <select onclick="event.stopPropagation()" onchange="setLotLibelle('${p.code}', this.value)">
+                        ${['Boîte','Palette','Carton','Bidon','Unité'].map(l => `<option value="${l}" ${p.libelleLot === l ? 'selected' : ''}>${l}</option>`).join('')}
+                    </select>
+                    — <strong>${apercu}</strong>
+                </span>` : `<span style="margin-left:8px;">— ${apercu}</span>`}
             </div>`;
         });
         gid('cartItems').innerHTML = html;
         gid('cartCount').textContent = cart.reduce((s, p) => s + p.qte, 0);
-        gid('btnCheckout').disabled = !selectedClient;
-        gid('btnAttente').disabled = !selectedClient;
+        gid('btnCheckout').disabled = false;
+        gid('btnBonCommande').disabled = false;
     }
     calculateTotals();
 }
+
+window.toggleLotConfig = function(code, checked) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    item.lotConfigure = checked;
+    if (checked && (!item.unitesParLot || item.unitesParLot < 2)) item.unitesParLot = 2;
+    renderCart();
+};
+
+window.setLotUnites = function(code, value) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    item.unitesParLot = Math.max(2, parseInt(value, 10) || 2);
+    renderCart();
+};
+
+window.setLotLibelle = function(code, value) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    item.libelleLot = value;
+    renderCart();
+};
 
 function calculateTotals() {
     const ht = cart.reduce((s, p) => s + p.montant, 0);
@@ -1206,89 +1358,26 @@ function getTTC() {
 }
 
 function updateButtons() {
-    const hasItems = cart.length > 0;
-    gid('btnCheckout').disabled = !(hasItems && selectedClient);
-    gid('btnAttente').disabled = !(hasItems && selectedClient);
+    gid('btnCheckout').disabled = cart.length === 0 || !CAISSE_OUVERTE;
+    gid('btnBonCommande').disabled = cart.length === 0;
 }
 
 gid('btnClear').addEventListener('click', function() {
     if (cart.length === 0) return;
-    if (confirm('Vider le panier ?')) {
+    confirmModal('Vider le panier ?', function() {
         cart = [];
         renderCart();
         renderProducts(currentProducts, gid('searchInput').value.trim());
         toast('Panier vidé');
-    }
+    });
 });
 
-// ===== GESTION DES LOTS =====
-// containerId/totalId permettent de réutiliser cet écran depuis le modal
-// de paiement (payModal) OU le modal de mise en attente (attenteModal).
-let lotsRenderTarget = { containerId: 'lotsContainer', totalId: 'totalLots' };
-
-function renderLotsConfig(containerId, totalId) {
-    if (containerId) lotsRenderTarget = { containerId, totalId };
-    const container = gid(lotsRenderTarget.containerId);
-    const totalEl = gid(lotsRenderTarget.totalId);
-    if (cart.length === 0) {
-        container.innerHTML = '<div style="color: #64748b; font-style: italic; font-size: 12px;">Aucun produit dans le panier</div>';
-        totalEl.textContent = '0';
-        return;
-    }
-
-    let html = '';
-    let totalLots = 0;
-
-    cart.forEach((item, idx) => {
-        const produitsParLot = item.produitsParLot ?? 0;
-        const nombreLots = produitsParLot > 0 ? Math.floor(item.qte / produitsParLot) : 0;
-        const reste = produitsParLot > 0 ? (item.qte % produitsParLot) : item.qte;
-        totalLots += nombreLots;
-
-        let resultText;
-        if (produitsParLot === 0) {
-            resultText = 'Non configuré';
-        } else {
-            resultText = `${nombreLots} lot(s)`;
-            if (reste > 0) resultText += ` et ${reste} produit(s)`;
-        }
-
-        html += `
-            <div class="lot-item">
-                <div class="lot-info">
-                    <div class="lot-name">${esc(item.nom)}</div>
-                    <div class="lot-qty">Quantité: ${item.qte}</div>
-                </div>
-                <div class="lot-input-group">
-                    <label>Produits/lot:</label>
-                    <input type="number"
-                           min="0"
-                           max="${item.qte}"
-                           value="${produitsParLot}"
-                           onchange="updateProduitsParLot(${idx}, this.value)"
-                           onclick="event.stopPropagation()">
-                </div>
-                <div class="lot-result">${resultText}</div>
-            </div>
-        `;
-    });
-
-    container.innerHTML = html;
-    totalEl.textContent = totalLots;
-}
-
-function updateProduitsParLot(idx, value) {
-    const produitsParLot = Math.max(0, parseInt(value) || 0);
-    cart[idx].produitsParLot = produitsParLot;
-    renderLotsConfig();
-}
-
-// Encaisser
+// Encaisser — exige une caisse ouverte (vérifié aussi côté serveur)
 gid('btnCheckout').addEventListener('click', function() {
-    if (!selectedClient) { toast('Sélectionnez un client', 'error'); return; }
     if (cart.length === 0) { toast('Panier vide', 'error'); return; }
+    if (!CAISSE_OUVERTE) { toast("Aucune caisse ouverte : utilisez « Bon de commande (en attente) »", 'error'); return; }
 
-    // produitsParLot reste à 0 (non configuré) tant que l'utilisateur ne le renseigne pas
+    calculateTotals();
     gid('payAmount').textContent = fmt(getTTC());
     gid('receivedAmount').value = '';
     gid('changeAmount').textContent = '0 FCFA';
@@ -1297,31 +1386,64 @@ gid('btnCheckout').addEventListener('click', function() {
     gid('etatPreview').textContent = '-';
     gid('restePreview').textContent = '0 FCFA';
 
-    // Afficher la configuration des lots
-    renderLotsConfig('lotsContainer', 'totalLots');
-
     openModal('payModal');
 });
 
-// En attente
-gid('btnAttente').addEventListener('click', function() {
-    if (!selectedClient) { toast('Sélectionnez un client', 'error'); return; }
+// Bon de commande (en attente) — utilisable même sans caisse ouverte : pas de
+// modal, la boutique et le client sont pris directement dans les sélecteurs
+// du panier (par défaut : boutique connectée / client comptoir), le stock
+// n'est ni vérifié ni touché ici.
+gid('btnBonCommande').addEventListener('click', function() {
     if (cart.length === 0) { toast('Panier vide', 'error'); return; }
 
-    // produitsParLot reste à 0 (non configuré) tant que l'utilisateur ne le renseigne pas
-    renderLotsConfig('lotsContainerAttente', 'totalLotsAttente');
-    openModal('attenteModal');
+    confirmModal('Créer un bon de commande en attente pour ' + fmt(getTTC()) + ' FCFA ?', function() {
+        creerBonAttente();
+    });
 });
 
-function confirmerAttente() {
-    closeModal('attenteModal');
-    validateSale(true, 0);
-}
+async function creerBonAttente() {
+    const btn = gid('btnBonCommande');
+    btn.disabled = true;
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-spinner"></i> Création...';
 
-function selectPayMode(btn) {
-    document.querySelectorAll('.pay-mode').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    payMode = btn.dataset.mode;
+    const lotsData = cart
+        .filter(item => item.lotConfigure && (item.unitesParLot || 1) > 1)
+        .map(item => ({
+            code: item.code, nom: item.nom, qte: item.qte,
+            produitsParLot: item.unitesParLot || 1,
+            nombreLots: Math.floor(item.qte / (item.unitesParLot || 1))
+        }));
+
+    try {
+        const data = {
+            panier: JSON.stringify(cart.map(p => ({
+                code: p.code, prix: p.prix, prix_achat: p.prix_achat, qte: p.qte, montant: p.montant,
+                lot_configure: !!p.lotConfigure, unites_par_lot: p.unitesParLot || 1, libelle_lot: p.libelleLot || 'Unité'
+            }))),
+            client_id: gid('clientSelect').value || '',
+            boutique_id: gid('boutiqueSelect').value || '',
+            taux_tva: parseFloat(gid('taxRate').value) || 0,
+            taux_remise: parseFloat(gid('discountRate').value) || 0,
+            csrf_token: CSRF_TOKEN,
+            lots: JSON.stringify(lotsData)
+        };
+
+        const res = await api('creer_bon_attente', data);
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+
+        if (res.success) {
+            toast('Bon de commande créé : ' + res.document + ' (en attente)');
+            resetSale();
+        } else {
+            toast(res.message || 'Erreur', 'error');
+        }
+    } catch (err) {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        toast(err.message || 'Erreur connexion', 'error');
+    }
 }
 
 function calculateChange() {
@@ -1353,27 +1475,33 @@ function calculateChange() {
 
 function validatePayment() {
     const received = parseFloat(gid('receivedAmount').value) || 0;
-    validateSale(false, received);
+    const ttc = getTTC();
+    if (received < ttc) {
+        toast('Paiement insuffisant : la vente comptoir se règle intégralement en espèces', 'error');
+        return;
+    }
+    validateSale(received);
 }
 
-async function validateSale(enAttente = false, avance = 0) {
-    const btn = enAttente ? gid('btnAttente') : gid('btnValidatePay');
+async function validateSale(avance = 0) {
+    const btn = gid('btnValidatePay');
     btn.disabled = true;
     const originalText = btn.innerHTML;
     btn.innerHTML = '<i class="bi bi-spinner"></i> Validation...';
 
     try {
-        // Préparer les données de lots
-        const lotsData = cart.map(item => {
-            const ppl = item.produitsParLot ?? 0;
-            return {
+        // Préparer les données de lots — uniquement les lignes où un lot a
+        // réellement été configuré, sinon le ticket affichait à tort une
+        // section "lots" pour de simples produits vendus à l'unité.
+        const lotsData = cart
+            .filter(item => item.lotConfigure && (item.unitesParLot || 1) > 1)
+            .map(item => ({
                 code: item.code,
                 nom: item.nom,
                 qte: item.qte,
-                produitsParLot: ppl,
-                nombreLots: ppl > 0 ? Math.floor(item.qte / ppl) : 0
-            };
-        });
+                produitsParLot: item.unitesParLot || 1,
+                nombreLots: Math.floor(item.qte / (item.unitesParLot || 1))
+            }));
 
         const data = {
             panier: JSON.stringify(cart.map(p => ({
@@ -1382,15 +1510,15 @@ async function validateSale(enAttente = false, avance = 0) {
                 prix_achat: p.prix_achat,
                 qte: p.qte,
                 montant: p.montant,
-                lot_id: p.lot_id || null,
-                produits_par_lot: p.produitsParLot ?? 0
+                lot_configure: !!p.lotConfigure,
+                unites_par_lot: p.unitesParLot || 1,
+                libelle_lot: p.libelleLot || 'Unité'
             }))),
-            client_id: selectedClient.code,
-            mode_reglement: payMode,
-            avance: enAttente ? 0 : avance,
+            avance: avance,
+            client_id: gid('clientSelect').value || '',
+            boutique_id: gid('boutiqueSelect').value || '',
             taux_tva: parseFloat(gid('taxRate').value) || 0,
             taux_remise: parseFloat(gid('discountRate').value) || 0,
-            en_attente: enAttente,
             csrf_token: CSRF_TOKEN,
             lots: JSON.stringify(lotsData)
         };
@@ -1402,13 +1530,9 @@ async function validateSale(enAttente = false, avance = 0) {
 
         if (res.success) {
             closeModal('payModal');
-            if (enAttente) {
-                toast('Commande mise en attente : ' + res.document);
-            } else {
-                toast('Vente validée ! ' + res.type_document + ': ' + res.document + ' (' + res.etat + ')');
-                generateTicket(res);
-                openModal('ticketModal');
-            }
+            toast('Vente validée ! ' + res.type_document + ': ' + res.document + ' (' + res.etat + ')');
+            generateTicket(res);
+            openModal('ticketModal');
             resetSale();
         } else {
             toast(res.message || 'Erreur', 'error');
@@ -1429,9 +1553,8 @@ function generateTicket(res) {
     let html = `<div style="font-family:monospace;font-size:12px;">
         <div style="text-align:center;font-weight:700;font-size:16px;margin-bottom:4px;">VENTE COMPTOIR</div>
         <div style="text-align:center;font-size:11px;color:#64748b;margin-bottom:12px;">${dateStr} ${timeStr}</div>
-        <div style="font-size:11px;margin-bottom:8px;">Client: ${esc(selectedClient.name)} (${selectedClient.code})</div>
+        <div style="font-size:11px;margin-bottom:8px;">Client: Client comptoir</div>
         <div style="font-size:11px;margin-bottom:12px;">${res.type_document}: ${res.document}</div>
-        <div style="font-size:11px;margin-bottom:12px;">Bon livraison: ${res.bon_livraison}</div>
         <div style="font-size:11px;margin-bottom:12px;">État: <strong>${res.etat}</strong></div>
         <hr style="border:1px dashed #ccc;">`;
 
@@ -1450,20 +1573,21 @@ function generateTicket(res) {
         <div style="display:flex;justify-content:space-between;margin-top:8px;"><span>Avance payée</span><span>${fmt(t.avance)}</span></div>
         ${t.reste > 0 ? `<div style="display:flex;justify-content:space-between;color:#ef4444;"><span>Reste</span><span>${fmt(t.reste)}</span></div>` : ''}`;
 
-    // Section des lots
-    if (res.lots && res.lots.length > 0) {
+    // Section des lots — uniquement les produits pour lesquels un lot a été
+    // configuré (produitsParLot > 1) ; jamais de mention de "lot" sinon.
+    const lotsConfigures = (res.lots || []).filter(lot => (lot.produitsParLot || 1) > 1);
+    if (lotsConfigures.length > 0) {
         html += `<hr style="border:1px dashed #ccc;margin-top:8px;">
             <div style="font-weight:700;margin:8px 0;">CONFIGURATION DES LOTS</div>`;
-        res.lots.forEach(lot => {
-            const ppl = lot.produitsParLot || 0;
-            const nbLots = ppl > 0 ? Math.floor(lot.qte / ppl) : 0;
-            const reste = ppl > 0 ? (lot.qte % ppl) : lot.qte;
-            const resultText = ppl === 0 ? 'Non configuré' : (reste > 0 ? `${nbLots} lot(s) et ${reste} produit(s)` : `${nbLots} lot(s)`);
+        lotsConfigures.forEach(lot => {
+            const nbLots = Math.floor(lot.qte / lot.produitsParLot);
+            const reste = lot.qte % lot.produitsParLot;
+            const resultText = reste > 0 ? `${nbLots} lot(s) et ${reste} produit(s)` : `${nbLots} lot(s)`;
             html += `<div style="font-size:10px;margin-bottom:4px;">
-                ${esc(lot.nom)}: ${lot.qte} pcs / ${ppl} par lot = <strong>${resultText}</strong>
+                ${esc(lot.nom)}: ${lot.qte} pcs / ${lot.produitsParLot} par lot = <strong>${resultText}</strong>
             </div>`;
         });
-        const totalLots = res.lots.reduce((sum, l) => sum + ((l.produitsParLot || 0) > 0 ? Math.floor(l.qte / l.produitsParLot) : 0), 0);
+        const totalLots = lotsConfigures.reduce((sum, l) => sum + Math.floor(l.qte / l.produitsParLot), 0);
         html += `<div style="font-weight:700;margin-top:8px;">TOTAL: ${totalLots} lot(s)</div>`;
     }
 
@@ -1476,55 +1600,16 @@ function generateTicket(res) {
 
 function resetSale() {
     cart = [];
-    selectedClient = null;
     renderCart();
-    resetClient();
     loadProducts();
     gid('taxRate').value = '0';
     gid('discountRate').value = '0';
     calculateTotals();
 }
 
-async function createClient() {
-    const nom = gid('clientNom').value.trim();
-    if (!nom) { toast('Nom requis', 'error'); return; }
-    try {
-        const res = await api('create_customer', {
-            nom,
-            tel: gid('clientTel').value,
-            email: gid('clientEmail').value,
-            csrf_token: CSRF_TOKEN
-        });
-        if (res.success) {
-            closeModal('clientModal');
-            gid('clientForm').reset();
-            await loadClients();
-            setTimeout(() => {
-                const select = gid('clientSelect');
-                for (let i = 0; i < select.options.length; i++) {
-                    if (select.options[i].value === res.code) {
-                        select.selectedIndex = i;
-                        jQuery('.selectpicker').selectpicker('refresh');
-                        selectedClient = { code: res.code, name: res.nom };
-                        gid('clientDisplay').style.display = 'block';
-                        gid('clientSelectWrapper').style.display = 'none';
-                        gid('clientName').textContent = res.nom;
-                        gid('clientCode').textContent = res.code;
-                        updateButtons();
-                        break;
-                    }
-                }
-            }, 300);
-            toast('Client créé');
-        } else {
-            toast(res.message || 'Erreur', 'error');
-        }
-    } catch (e) { toast('Erreur connexion', 'error'); }
-}
-
 // Initialisation
 jQuery(document).ready(function() {
-    loadClients();
+    jQuery('.selectpicker').selectpicker();
     loadProducts();
 });
 </script>

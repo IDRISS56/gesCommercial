@@ -2,11 +2,6 @@
 ob_start();
 require 'databases/database.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: utilisateur/login');
-    exit;
-}
-
 function e($str) {
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
 }
@@ -108,7 +103,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 $csrf_token = $_SESSION['csrf_token'];
 
 function getTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
@@ -260,6 +257,8 @@ $associations = $pdo->query("SELECT COUNT(*) FROM contact WHERE type_contact = '
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gestion des fournisseurs</title>
@@ -923,11 +922,7 @@ $(document).ready(function() {
     }
     
     setTimeout(function() { $('.alert').alert('close'); }, 5000);
-    
-    <?php if ($message): ?>
-    showToast('<?= addslashes($message) ?>', '<?= $messageType === 'success' ? 'success' : ($messageType === 'danger' ? 'error' : 'info') ?>');
-    <?php endif; ?>
-    
+
     // Ajouter fournisseur
     $('#addBtn').click(function() {
         $('#formAction').val('add');

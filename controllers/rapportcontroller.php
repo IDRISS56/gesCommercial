@@ -21,4 +21,10 @@ class rapport
         include "views/rapport/mouvement_stock.php";
     }
 
+     public function historiqueProduit()
+    {
+        requirePermission(['Administrateur', 'Superviseur','Proprietaire']);
+        include "views/rapport/historique_produit.php";
+    }
+
 }

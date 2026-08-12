@@ -22,8 +22,9 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
         $facture = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$facture) die("Achat introuvable.");
 
-        $stmtCmd = $pdo->prepare("SELECT c.*, p.titre_produit, p.code_produit AS reference_produit
+        $stmtCmd = $pdo->prepare("SELECT c.*, p.titre_produit, p.code_produit AS reference_produit, l.libelle AS libelle_lot
             FROM commande c LEFT JOIN produit p ON c.produit_id = p.code_produit
+            LEFT JOIN lot l ON c.lot_id = l.code_lot
             WHERE c.facture_id = ?");
         $stmtCmd->execute([$id]);
         $commandes = $stmtCmd->fetchAll(PDO::FETCH_ASSOC);
@@ -85,7 +86,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $grey   = [242, 242, 242];
     $border = [190, 190, 190];
     $estValidee = ($facture['statut_facture'] ?? '') === 'Validee';
-    $titreDoc = strtoupper($estValidee ? 'Facture fournisseur' : 'Bon fournisseur (en attente)');
+    $titreDoc = strtoupper($estValidee ? 'Facture fournisseur' : 'Bon de commande');
 
     $pdf->SetTextColor($navy[0], $navy[1], $navy[2]);
     $pdf->SetFont('Arial', 'B', 20);
@@ -104,11 +105,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $pdf->Cell(130, 5, 'Date : ' . date('d/m/Y', strtotime($facture['date_facture'])), 0, 1, 'L');
     $pdf->SetX(10);
     $pdf->Cell(130, 5, 'Statut : ' . ($facture['statut_facture'] ?? '') . '   |   Reglement : ' . ($facture['etat_facture'] ?? ''), 0, 1, 'L');
-    $pdf->Ln(4);
-    $pdf->SetDrawColor(0, 0, 0);
-    $pdf->SetLineWidth(0.3);
-    $pdf->Line(10, $pdf->GetY(), 200, $pdf->GetY());
-    $pdf->Ln(6);
+    $pdf->Ln(16);
 
     // EXPEDITEUR = fournisseur / DESTINATAIRE = notre boutique (réception)
     $yBandeau = $pdf->GetY();
@@ -136,6 +133,9 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $pdf->SetFont('Arial', 'B', 9.5);
     $pdf->SetXY(110, $yBoxes);
     $pdf->MultiCell(90, 5.5, $nomBoutique, 0, 'L', true);
+    $pdf->SetFont('Arial', '', 10);
+    $pdf->SetXY(110, $pdf->GetY());
+    $pdf->MultiCell(90, 3.3, 'Distribution de Pièces Détachées de Motos et Moto', 0, 'L', true);
     $yBoutAfterNom = $pdf->GetY();
     $pdf->SetFont('Arial', '', 9);
     $pdf->SetXY(110, $yBoutAfterNom);
@@ -163,11 +163,26 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
         $nbLines = max(1, ceil(strlen($designation) / 35));
         $rowHeight = 7 * $nbLines;
         if ($pdf->GetY() + $rowHeight > 270) $pdf->AddPage();
+        // Quantité affichée : si aucun lot n'a été configuré à l'achat
+        // (produits_par_lot <= 1), on parle simplement de "Produit" — on ne mentionne le lot que lorsqu'il a réellement été configuré.
+        $produitsParLot = intval($cmd['produits_par_lot'] ?? 1);
+        if ($produitsParLot > 1) {
+            $libelleLot = !empty($cmd['libelle_lot']) ? $cmd['libelle_lot'] : 'Carton';
+            $nombreLots = intdiv($cmd['quantite_commande'], $produitsParLot);
+            $resteUnites = $cmd['quantite_commande'] % $produitsParLot;
+            $qteAffichee = $resteUnites > 0
+                ? ($nombreLots . ' ' . $libelleLot . '(s) et ' . $resteUnites . ' Pièce(s)')
+                : ($nombreLots . ' ' . $libelleLot . '(s)');
+        } else {
+            $qteAffichee = $cmd['quantite_commande'] . ' Pièce(s)';
+        }
         $x = $pdf->GetX(); $y = $pdf->GetY();
         $pdf->MultiCell(20, 7, $ref, 1, 'L');
         $pdf->SetXY($x + 20, $y); $pdf->MultiCell(75, 7, $designation, 1, 'L');
         $pdf->SetXY($x + 95, $y);
-        $pdf->Cell(30, $rowHeight, $cmd['quantite_commande'], 1, 0, 'C');
+        $pdf->SetFont('Arial', '', 7.5);
+        $pdf->Cell(30, $rowHeight, $qteAffichee, 1, 0, 'C');
+        $pdf->SetFont('Arial', '', 9);
         $pdf->Cell(30, $rowHeight, number_format($cmd['prix_achat'], 0, ',', ' '), 1, 0, 'R');
         $pdf->Cell(35, $rowHeight, number_format($montant_ligne, 0, ',', ' '), 1, 1, 'R');
     }
@@ -176,19 +191,13 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $montantTTC = $facture['montant_ttc'] ?? $total_ht;
     $reste = $facture['reste'] ?? $montantTTC;
     $avance = $facture['avance'] ?? 0;
+    $taxe = floatval($facture['taxe'] ?? 0);
+    $remise = floatval($facture['remise'] ?? 0);
 
     $yBloc = $pdf->GetY();
     $obsWidth = 100; $obsHeight = 26;
-    $pdf->SetDrawColor($border[0], $border[1], $border[2]);
-    $pdf->Rect(10, $yBloc, $obsWidth, $obsHeight);
-    $pdf->SetXY(12, $yBloc + 2);
-    $pdf->SetFont('Arial', 'B', 9);
-    $pdf->Cell($obsWidth - 4, 5, 'Observations :', 0, 1, 'L');
-    $pdf->SetX(12);
-    $pdf->SetFont('Arial', '', 9);
-    $pdf->MultiCell($obsWidth - 4, 5, "Marchandise receptionnee conformement au bon de\ncommande. Le reglement de ce fournisseur est suivi\ndans l'interface de reglement dediee.", 0, 'L');
 
-    $lignesTotaux = [['TOTAL HT', $total_ht], ['AVANCE VERSEE', $avance]];
+    $lignesTotaux = [['TOTAL HT', $total_ht], ['TVA', $taxe], ['REMISE', $remise], ['AVANCE VERSEE', $avance]];
     $totWidth = 80; $totX = 200 - $totWidth;
     $rowH = 7;
     $nbRows = count($lignesTotaux) + 1;
@@ -246,10 +255,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $id = $_POST['id'] ?? '';
         if (empty($id)) { echo json_encode(['success' => false, 'error' => 'ID manquant']); exit; }
         try {
-            $stmt = $pdo->prepare("UPDATE facture SET statut_facture = 'Validee' WHERE numero_facture = ? AND type_facture = 'Fournisseur'");
+            $pdo->beginTransaction();
+
+            $stmtF = $pdo->prepare("SELECT contact_id, avance, reste, statut_facture FROM facture WHERE numero_facture = ? AND type_facture = 'Fournisseur' FOR UPDATE");
+            $stmtF->execute([$id]);
+            $f = $stmtF->fetch(PDO::FETCH_ASSOC);
+            if (!$f) { $pdo->rollBack(); echo json_encode(['success' => false, 'error' => 'Facture introuvable']); exit; }
+
+            $stmt = $pdo->prepare("UPDATE facture SET statut_facture = 'Validee' WHERE numero_facture = ? AND type_facture = 'Fournisseur' AND statut_facture <> 'Validee'");
             $stmt->execute([$id]);
-            echo json_encode(['success' => $stmt->rowCount() > 0, 'message' => 'Achat validé']);
+            $factureTouchee = $stmt->rowCount() > 0;
+
+            if ($factureTouchee) {
+                // Recharge le solde du fournisseur, exactement comme le fichier vente
+                // le fait déjà pour le solde client lors de la validation d'une facture :
+                // on ajoute le montant dû (reste) au solde_contact du fournisseur, en
+                // tenant compte d'une éventuelle avance déjà versée (solde_contact < 0
+                // => le fournisseur nous doit / avance disponible, cf. convention plus
+                // haut : solde_contact > 0 => on doit ce montant au fournisseur).
+                $resteInitial = floatval($f['reste']);
+                if ($resteInitial != 0) {
+                    $stmtSoldeF = $pdo->prepare("SELECT solde_contact FROM contact WHERE code_contact = ? FOR UPDATE");
+                    $stmtSoldeF->execute([$f['contact_id']]);
+                    $soldeAvantF = floatval($stmtSoldeF->fetchColumn());
+                    $avanceDispoF = max(0, -$soldeAvantF);
+                    $avanceUtilisee = min($avanceDispoF, $resteInitial);
+                    $nouveauReste = round($resteInitial - $avanceUtilisee, 2);
+
+                    if ($nouveauReste <= 0) {
+                        $nouvelEtat = 'Payee';
+                    } elseif ($avanceUtilisee > 0) {
+                        $nouvelEtat = 'Partielle';
+                    } else {
+                        $nouvelEtat = 'Impayee';
+                    }
+
+                    $pdo->prepare("UPDATE facture SET etat_facture = ?, avance = avance + ?, reste = ? WHERE numero_facture = ?")
+                        ->execute([$nouvelEtat, $avanceUtilisee, $nouveauReste, $id]);
+                    $pdo->prepare("UPDATE contact SET solde_contact = solde_contact + ? WHERE code_contact = ?")
+                        ->execute([$resteInitial, $f['contact_id']]);
+                }
+            }
+
+            // Réception physique confirmée : on crédite le stock des lignes qui
+            // étaient encore "EN ATTENTE" (celles déjà "VALIDEE" ont déjà été
+            // créditées à la commande et ne doivent pas l'être une seconde fois).
+            $stmtLignes = $pdo->prepare("SELECT numero_commande, produit_id, boutique_id, quantite_commande FROM commande WHERE facture_id = ? AND etat_commande = 'EN ATTENTE'");
+            $stmtLignes->execute([$id]);
+            $lignes = $stmtLignes->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($lignes as $l) {
+                if (!empty($l['boutique_id'])) {
+                    $pdo->prepare("INSERT INTO stock (produit_id, boutique_id, quantite, stock_alerte)
+                                  VALUES (?, ?, ?, 10)
+                                  ON DUPLICATE KEY UPDATE quantite = quantite + VALUES(quantite)")
+                        ->execute([$l['produit_id'], $l['boutique_id'], $l['quantite_commande']]);
+                }
+                $pdo->prepare("UPDATE produit SET stock_produit = CAST(CAST(COALESCE(stock_produit,0) AS SIGNED) + ? AS CHAR) WHERE code_produit = ?")
+                    ->execute([$l['quantite_commande'], $l['produit_id']]);
+                $pdo->prepare("UPDATE produit SET etat_produit = CASE
+                                WHEN CAST(stock_produit AS SIGNED) <= 0 THEN 'RUPTURE'
+                                WHEN CAST(stock_produit AS SIGNED) <= COALESCE(stock_alerte,0) THEN 'ALERTE'
+                                ELSE 'DISPONIBLE' END WHERE code_produit = ?")
+                    ->execute([$l['produit_id']]);
+                $pdo->prepare("UPDATE commande SET etat_commande = 'VALIDEE' WHERE numero_commande = ?")
+                    ->execute([$l['numero_commande']]);
+            }
+
+            $pdo->commit();
+            echo json_encode(['success' => $factureTouchee, 'message' => 'Achat validé, stock réceptionné']);
         } catch (Exception $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         }
         exit;
@@ -263,13 +339,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $pdo->beginTransaction();
 
             // Réajuster le stock : on retire ce que cet achat avait fait entrer,
-            // puisque l'achat lui-même est annulé/supprimé.
-            $stmtLignes = $pdo->prepare("SELECT produit_id, boutique_id, quantite_commande FROM commande WHERE facture_id = ?");
+            // puisque l'achat lui-même est annulé/supprimé. Seules les lignes déjà
+            // "VALIDEE" (donc réellement créditées en stock) sont concernées ; les
+            // lignes encore "EN ATTENTE" n'ont jamais touché le stock.
+            $stmtLignes = $pdo->prepare("SELECT produit_id, boutique_id, quantite_commande FROM commande WHERE facture_id = ? AND etat_commande = 'VALIDEE'");
             $stmtLignes->execute([$id]);
             foreach ($stmtLignes->fetchAll(PDO::FETCH_ASSOC) as $l) {
                 if (!empty($l['boutique_id'])) {
-                    $pdo->prepare("UPDATE stock SET quantite = GREATEST(0, quantite - ?) WHERE produit_id = ? AND boutique_id = ?")
-                        ->execute([$l['quantite_commande'], $l['produit_id'], $l['boutique_id']]);
+                    $stmtLock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                    $stmtLock->execute([$l['produit_id'], $l['boutique_id']]);
+                    $stockActuel = $stmtLock->fetchColumn();
+                    $stockActuel = ($stockActuel === false) ? 0 : (int) $stockActuel;
+                    if ($stockActuel < $l['quantite_commande']) {
+                        throw new Exception(
+                            "Impossible de supprimer cet achat : le produit {$l['produit_id']} a déjà été partiellement " .
+                            "vendu/sorti depuis sa réception (stock actuel $stockActuel, à retirer {$l['quantite_commande']}). " .
+                            "Faites d'abord un ajustement de stock si nécessaire."
+                        );
+                    }
+                    $pdo->prepare("UPDATE stock SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
+                        ->execute([$stockActuel - $l['quantite_commande'], $l['produit_id'], $l['boutique_id']]);
                 }
                 $pdo->prepare("UPDATE produit SET stock_produit = CAST(GREATEST(0, CAST(COALESCE(stock_produit,0) AS SIGNED) - ?) AS CHAR) WHERE code_produit = ?")
                     ->execute([$l['quantite_commande'], $l['produit_id']]);
@@ -281,7 +370,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $pdo->commit();
             echo json_encode(['success' => $stmt->rowCount() > 0, 'message' => 'Achat supprimé, stock réajusté']);
         } catch (Exception $e) {
-            $pdo->rollBack();
+            if ($pdo->inTransaction()) $pdo->rollBack();
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
         }
         exit;
@@ -293,15 +382,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $stmt->execute([$id]);
         $facture = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$facture) { echo json_encode(['error' => 'Achat introuvable']); exit; }
-        $stmt2 = $pdo->prepare("SELECT c.*, p.titre_produit FROM commande c LEFT JOIN produit p ON c.produit_id = p.code_produit WHERE c.facture_id = ?");
+        $stmt2 = $pdo->prepare("SELECT c.*, p.titre_produit, l.libelle AS libelle_lot FROM commande c LEFT JOIN produit p ON c.produit_id = p.code_produit LEFT JOIN lot l ON c.lot_id = l.code_lot WHERE c.facture_id = ?");
         $stmt2->execute([$id]);
+        $commandesDetail = $stmt2->fetchAll(PDO::FETCH_ASSOC);
         $isLocked = in_array(strtolower($facture['etat_facture'] ?? ''), ['payee', 'payee cash'])
             && strtolower($facture['statut_facture'] ?? '') === 'validee';
+
+        // Boutique de réception de cet achat (pour associer correctement les
+        // nouvelles lignes ajoutées lors de la modification).
+        $boutiqueAchat = $commandesDetail[0]['boutique_id'] ?? null;
+        if (empty($boutiqueAchat) && !empty($facture['utilisateur_id'])) {
+            $stmtUb = $pdo->prepare("SELECT boutique_id FROM utilisateur WHERE id = ?");
+            $stmtUb->execute([$facture['utilisateur_id']]);
+            $boutiqueAchat = $stmtUb->fetchColumn() ?: null;
+        }
+
         echo json_encode([
             'facture' => $facture,
-            'commandes' => $stmt2->fetchAll(PDO::FETCH_ASSOC),
-            'is_locked' => $isLocked
+            'commandes' => $commandesDetail,
+            'is_locked' => $isLocked,
+            'boutique_id' => $boutiqueAchat
         ]);
+        exit;
+    }
+
+    if ($action === 'check_stock_produit') {
+        // Simple lecture informative du stock actuel d'un produit dans une
+        // boutique (un achat alimente le stock, il n'y a donc rien à bloquer ici,
+        // contrairement à une vente).
+        $produitId = trim($_POST['produit_id'] ?? '');
+        $boutiqueId = trim($_POST['boutique_id'] ?? '');
+        $response = ['success' => false, 'disponible' => 0, 'prix' => 0, 'titre' => ''];
+        if ($produitId !== '') {
+            $dispo = 0;
+            if ($boutiqueId !== '') {
+                $stmtS = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ?");
+                $stmtS->execute([$produitId, $boutiqueId]);
+                $d = $stmtS->fetchColumn();
+                $dispo = ($d !== false) ? (int) $d : 0;
+            }
+            $stmtP = $pdo->prepare("SELECT titre_produit, prix_fournisseur FROM produit WHERE code_produit = ?");
+            $stmtP->execute([$produitId]);
+            $rowP = $stmtP->fetch(PDO::FETCH_ASSOC);
+            if ($rowP) {
+                $response['success'] = true;
+                $response['disponible'] = $dispo;
+                $response['prix'] = (float) $rowP['prix_fournisseur'];
+                $response['titre'] = $rowP['titre_produit'];
+            }
+        }
+        echo json_encode($response);
         exit;
     }
 
@@ -310,7 +440,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     // par votre interface de règlement fournisseur dédiée.
     if ($action === 'update_achat') {
         $facture_id = $_POST['facture_id'];
-        $checkStmt = $pdo->prepare("SELECT etat_facture, statut_facture FROM facture WHERE numero_facture = ? AND type_facture = 'Fournisseur'");
+        $checkStmt = $pdo->prepare("SELECT contact_id, etat_facture, statut_facture FROM facture WHERE numero_facture = ? AND type_facture = 'Fournisseur'");
         $checkStmt->execute([$facture_id]);
         $fData = $checkStmt->fetch(PDO::FETCH_ASSOC);
         if (!$fData) { echo json_encode(['success' => false, 'error' => 'Achat introuvable']); exit; }
@@ -321,23 +451,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             exit;
         }
         $commandes_data = json_decode($_POST['commandes'], true);
+        $nouvelles_lignes_data = json_decode($_POST['nouvelles_lignes'] ?? '[]', true) ?: [];
+        $lignesAjoutees = 0;
         try {
             $pdo->beginTransaction();
             $nouveauTotal = 0;
             foreach ($commandes_data as $cmd) {
                 // Réajuster le stock selon la différence de quantité
-                $stmtOld = $pdo->prepare("SELECT produit_id, boutique_id, quantite_commande FROM commande WHERE numero_commande = ?");
+                $stmtOld = $pdo->prepare("SELECT produit_id, boutique_id, quantite_commande, etat_commande FROM commande WHERE numero_commande = ?");
                 $stmtOld->execute([$cmd['id']]);
                 $old = $stmtOld->fetch(PDO::FETCH_ASSOC);
+                // Le stock n'a été crédité que pour les lignes déjà "VALIDEE"
+                // (réceptionnées) ; une ligne encore "EN ATTENTE" n'a jamais
+                // touché le stock, donc on ne doit pas y toucher ici non plus.
+                $stockDejaCredite = $old && ($old['etat_commande'] === 'VALIDEE');
 
                 if ($cmd['supprimer']) {
                     if ($old) {
-                        if (!empty($old['boutique_id'])) {
-                            $pdo->prepare("UPDATE stock SET quantite = GREATEST(0, quantite - ?) WHERE produit_id = ? AND boutique_id = ?")
-                                ->execute([$old['quantite_commande'], $old['produit_id'], $old['boutique_id']]);
+                        if ($stockDejaCredite && !empty($old['boutique_id'])) {
+                            $stmtLock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                            $stmtLock->execute([$old['produit_id'], $old['boutique_id']]);
+                            $stockActuel = $stmtLock->fetchColumn();
+                            $stockActuel = ($stockActuel === false) ? 0 : (int) $stockActuel;
+                            if ($stockActuel < $old['quantite_commande']) {
+                                throw new Exception(
+                                    "Impossible de supprimer la ligne {$old['produit_id']} : stock actuel " .
+                                    "$stockActuel, insuffisant pour retirer {$old['quantite_commande']}."
+                                );
+                            }
+                            $pdo->prepare("UPDATE stock SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
+                                ->execute([$stockActuel - $old['quantite_commande'], $old['produit_id'], $old['boutique_id']]);
                         }
-                        $pdo->prepare("UPDATE produit SET stock_produit = CAST(GREATEST(0, CAST(COALESCE(stock_produit,0) AS SIGNED) - ?) AS CHAR) WHERE code_produit = ?")
-                            ->execute([$old['quantite_commande'], $old['produit_id']]);
+                        if ($stockDejaCredite) {
+                            $pdo->prepare("UPDATE produit SET stock_produit = CAST(GREATEST(0, CAST(COALESCE(stock_produit,0) AS SIGNED) - ?) AS CHAR) WHERE code_produit = ?")
+                                ->execute([$old['quantite_commande'], $old['produit_id']]);
+                        }
                     }
                     $pdo->prepare("DELETE FROM commande WHERE numero_commande = ?")->execute([$cmd['id']]);
                 } else {
@@ -345,17 +493,109 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $nouveauTotal += $montant;
                     if ($old) {
                         $diff = $cmd['quantite'] - $old['quantite_commande'];
-                        if ($diff != 0 && !empty($old['boutique_id'])) {
-                            $pdo->prepare("UPDATE stock SET quantite = GREATEST(0, quantite + ?) WHERE produit_id = ? AND boutique_id = ?")
-                                ->execute([$diff, $old['produit_id'], $old['boutique_id']]);
+                        if ($stockDejaCredite && $diff != 0 && !empty($old['boutique_id'])) {
+                            $stmtLock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                            $stmtLock->execute([$old['produit_id'], $old['boutique_id']]);
+                            $stockActuel = $stmtLock->fetchColumn();
+                            $stockActuel = ($stockActuel === false) ? 0 : (int) $stockActuel;
+                            $stockCible = $stockActuel + $diff;
+                            if ($stockCible < 0) {
+                                throw new Exception(
+                                    "Impossible de réduire la quantité de {$old['produit_id']} : stock actuel " .
+                                    "$stockActuel, réduction demandée " . abs($diff) . "."
+                                );
+                            }
+                            $pdo->prepare("UPDATE stock SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
+                                ->execute([$stockCible, $old['produit_id'], $old['boutique_id']]);
                         }
-                        if ($diff != 0) {
+                        if ($stockDejaCredite && $diff != 0) {
                             $pdo->prepare("UPDATE produit SET stock_produit = CAST(GREATEST(0, CAST(COALESCE(stock_produit,0) AS SIGNED) + ?) AS CHAR) WHERE code_produit = ?")
                                 ->execute([$diff, $old['produit_id']]);
                         }
                     }
                     $pdo->prepare("UPDATE commande SET quantite_commande = ?, prix_achat = ?, montant_commande = ? WHERE numero_commande = ?")
                         ->execute([$cmd['quantite'], $cmd['prix'], $montant, $cmd['id']]);
+                }
+            }
+
+            // ---- AJOUT DE NOUVELLES LIGNES (produits ajoutés pendant la modification) ----
+            if (!empty($nouvelles_lignes_data)) {
+                $factureEstValidee = (strtolower($fData['statut_facture'] ?? '') === 'validee');
+                // Statut à réutiliser : celui d'une ligne existante du même achat,
+                // pour rester cohérent avec le reste du document. Le lot, lui, est
+                // configurable indépendamment pour chaque nouvelle ligne (voir
+                // achat.php pour le même principe).
+                $stmtRef = $pdo->prepare("SELECT statut_id FROM commande WHERE facture_id = ? LIMIT 1");
+                $stmtRef->execute([$facture_id]);
+                $statutRef = $stmtRef->fetchColumn() ?: '011';
+                $libellesLotValides = ['Boîte', 'Palette', 'Carton', 'Bidon', 'Unité'];
+                $numBase = date('dmYHis');
+
+                foreach ($nouvelles_lignes_data as $i => $nl) {
+                    $produitId = trim($nl['produit_id'] ?? '');
+                    $boutiqueId = trim($nl['boutique_id'] ?? '');
+                    $quantite = max(0, intval($nl['quantite'] ?? 0));
+                    $prix = floatval($nl['prix'] ?? 0);
+                    if ($produitId === '' || $quantite <= 0) {
+                        continue;
+                    }
+
+                    // Configuration de lot (optionnelle, comme dans achat.php) : si
+                    // l'utilisateur n'a pas configuré de lot pour cette ligne, on reste
+                    // sur le comportement "produit simple" (lot_id NULL, produits_par_lot = 1).
+                    $lotConfigure = filter_var($nl['lot_configure'] ?? false, FILTER_VALIDATE_BOOLEAN);
+                    $unitesParLot = max(2, intval($nl['unites_par_lot'] ?? 2));
+                    $libelleLot = in_array($nl['libelle_lot'] ?? '', $libellesLotValides, true) ? $nl['libelle_lot'] : 'Unité';
+
+                    $lot_id = null;
+                    $produits_par_lot = 1;
+                    if ($lotConfigure) {
+                        $lot_id = 'LOT-' . date('YmdHis') . rand(100, 999) . '-' . $i;
+                        $produits_par_lot = $unitesParLot;
+                        $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, produit_id, quantite, etat_lot)
+                                      VALUES (?, ?, ?, ?, ?, 'Actif')")
+                            ->execute([$lot_id, $libelleLot, $unitesParLot, $produitId, $quantite]);
+                    }
+
+                    $montantNew = $quantite * $prix;
+                    $nouveauTotal += $montantNew;
+                    // Si l'achat est déjà validé (marchandise déjà réceptionnée), la
+                    // nouvelle ligne est considérée reçue immédiatement (comme ses
+                    // lignes sœurs déjà VALIDEE) et son stock est crédité tout de
+                    // suite — sinon elle ne serait jamais créditée automatiquement,
+                    // la validation globale de l'achat ne s'exécutant qu'une fois.
+                    // Sinon, elle reste EN ATTENTE comme les autres lignes du bon,
+                    // en attendant la validation/réception de l'ensemble.
+                    $etatLigne = $factureEstValidee ? 'VALIDEE' : 'EN ATTENTE';
+                    $numCmdNew = $numBase . str_pad((string)$i, 2, '0', STR_PAD_LEFT) . '-ADD';
+
+                    $pdo->prepare("
+                        INSERT INTO commande
+                        (numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id,
+                         date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, produits_par_lot,
+                         montant_commande, utilisateur_id, boutique_id, etat_commande)
+                        VALUES (?, ?, ?, ?, ?, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, ?)
+                    ")->execute([
+                        $numCmdNew, $produitId, $lot_id, $fData['contact_id'], $facture_id, $statutRef,
+                        $prix, $prix, $quantite, $produits_par_lot, $montantNew,
+                        ($_SESSION['user_id'] ?? null), $boutiqueId, $etatLigne
+                    ]);
+
+                    if ($factureEstValidee && !empty($boutiqueId)) {
+                        $pdo->prepare("INSERT INTO stock (produit_id, boutique_id, quantite, stock_alerte)
+                                      VALUES (?, ?, ?, 10)
+                                      ON DUPLICATE KEY UPDATE quantite = quantite + VALUES(quantite)")
+                            ->execute([$produitId, $boutiqueId, $quantite]);
+                        $pdo->prepare("UPDATE produit SET stock_produit = CAST(CAST(COALESCE(stock_produit,0) AS SIGNED) + ? AS CHAR) WHERE code_produit = ?")
+                            ->execute([$quantite, $produitId]);
+                        $pdo->prepare("UPDATE produit SET etat_produit = CASE
+                                        WHEN CAST(stock_produit AS SIGNED) <= 0 THEN 'RUPTURE'
+                                        WHEN CAST(stock_produit AS SIGNED) <= COALESCE(stock_alerte,0) THEN 'ALERTE'
+                                        ELSE 'DISPONIBLE' END WHERE code_produit = ?")
+                            ->execute([$produitId]);
+                    }
+
+                    $lignesAjoutees++;
                 }
             }
             // Recalcule le montant de la facture ; le reste suit automatiquement
@@ -368,7 +608,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 ->execute([$nouveauTotal, $nouveauTotal, $nouveauReste, $facture_id]);
 
             $pdo->commit();
-            echo json_encode(['success' => true]);
+            $message = $lignesAjoutees > 0
+                ? 'Achat mis à jour (' . $lignesAjoutees . ' nouvelle(s) ligne(s) ajoutée(s)).'
+                : 'Achat mis à jour, stock ajusté';
+            echo json_encode(['success' => true, 'message' => $message]);
         } catch (Exception $e) {
             $pdo->rollBack();
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
@@ -400,10 +643,20 @@ $partielles = $pdo->query("SELECT COUNT(*) FROM facture f INNER JOIN contact c O
 $impayees = $pdo->query("SELECT COUNT(*) FROM facture f INNER JOIN contact c ON f.contact_id = c.code_contact WHERE c.type_contact = 'Fournisseur' AND f.etat_facture = 'Impayee'")->fetchColumn();
 $totalMontant = $pdo->query("SELECT SUM(f.montant_ttc) FROM facture f INNER JOIN contact c ON f.contact_id = c.code_contact WHERE c.type_contact = 'Fournisseur'")->fetchColumn() ?? 0;
 $totalReste = $pdo->query("SELECT SUM(f.reste) FROM facture f INNER JOIN contact c ON f.contact_id = c.code_contact WHERE c.type_contact = 'Fournisseur'")->fetchColumn() ?? 0;
+
+// - Catégories actives et produits (pour l'ajout de nouvelles lignes lors de la
+//   modification d'un achat) : même logique que entree_stock.php. On utilise le
+//   prix_fournisseur (et non le prix de vente) puisqu'il s'agit d'un achat. -
+$categoriesAchat = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='ACTIF' ORDER BY titre_categorie")->fetchAll(PDO::FETCH_ASSOC);
+$produitsAchat = $pdo->query("SELECT code_produit, titre_produit, prix_fournisseur, etat_produit, categorie_id
+FROM produit
+ORDER BY CASE WHEN etat_produit = 'RUPTURE' THEN 1 ELSE 0 END, titre_produit")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Suivi des Achats Fournisseur</title>
@@ -728,12 +981,14 @@ $totalReste = $pdo->query("SELECT SUM(f.reste) FROM facture f INNER JOIN contact
                 </div>
                 <div class="fc-bottom">
                     <button class="icon-btn view voir-facture" data-id="<?= $row['numero_facture'] ?>" data-tooltip="Voir détails" title="Voir détails"><i class="bi bi-eye"></i></button>
+                    <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur'): ?>
                     <?php if (!$isValidee): ?>
                         <button class="icon-btn validate valider-facture" data-id="<?= $row['numero_facture'] ?>" data-tooltip="Valider" title="Valider"><i class="bi bi-check2-circle"></i></button>
                     <?php else: ?>
                         <button class="icon-btn validate validated" disabled data-tooltip="Validée" title="Validée"><i class="bi bi-check-circle-fill"></i></button>
                     <?php endif; ?>
                     <button class="icon-btn delete supprimer-facture" data-id="<?= $row['numero_facture'] ?>" data-tooltip="Supprimer" title="Supprimer"><i class="bi bi-trash"></i></button>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
@@ -756,9 +1011,11 @@ $totalReste = $pdo->query("SELECT SUM(f.reste) FROM facture f INNER JOIN contact
                 </div>
             </div>
             <div class="modal-footer">
+                <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur'): ?>
                 <button class="btn-chic btn-chic-modifier" id="btnModifier"><i class="bi bi-pencil-square"></i><span>Modifier</span></button>
+                <?php endif; ?>
                 <button class="btn-chic btn-chic-imprimer" id="btnImprimer"><i class="bi bi-printer-fill"></i><span>Imprimer</span></button>
-                <button class="btn-chic btn-chic-partager" id="btnPartager"><i class="bi bi-whatsapp"></i><span>Partager</span></button>
+                <button class="btn-chic btn-chic-partager" hidden id="btnPartager"><i class="bi bi-whatsapp"></i><span>Partager</span></button>
                 <button class="btn-chic btn-chic-fermer" data-bs-dismiss="modal"><i class="bi bi-x-lg"></i><span>Fermer</span></button>
             </div>
         </div>
@@ -776,6 +1033,23 @@ $totalReste = $pdo->query("SELECT SUM(f.reste) FROM facture f INNER JOIN contact
                 <div class="d-flex gap-2 justify-content-center">
                     <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">Annuler</button>
                     <button type="button" class="btn btn-danger rounded-3" id="confirmDeleteBtn"><i class="bi bi-trash3 me-1"></i> Supprimer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal confirmation générique (remplace window.confirm()) -->
+<div class="modal fade" id="genericConfirmModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="border-radius:16px;border:none;">
+            <div class="modal-body text-center p-4">
+                <div class="mb-3"><i class="bi bi-question-circle-fill text-primary" style="font-size: 3rem;"></i></div>
+                <h5 class="mb-2 fw-bold">Confirmation</h5>
+                <p class="text-muted small mb-4" id="genericConfirmMsg"></p>
+                <div class="d-flex gap-2 justify-content-center">
+                    <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">Annuler</button>
+                    <button type="button" class="btn btn-primary rounded-3" id="genericConfirmOkBtn">Confirmer</button>
                 </div>
             </div>
         </div>
@@ -811,8 +1085,32 @@ $(document).ready(function() {
     const toastEl = document.getElementById('toastMsg');
     const toast = new bootstrap.Toast(toastEl, { delay: 2500 });
     const baseUrl = window.location.pathname;
+    // Catégories et produits disponibles pour l'ajout de nouvelles lignes lors
+    // de la modification d'un achat (mêmes données que entree_stock.php).
+    const CATEGORIES_ACHAT = <?= json_encode($categoriesAchat, JSON_UNESCAPED_UNICODE) ?>;
+    const PRODUITS_ACHAT = <?= json_encode($produitsAchat, JSON_UNESCAPED_UNICODE) ?>;
+    function escHtml(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function(m) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m];
+        });
+    }
     const deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
     let factureToDelete = null;
+
+    // Remplace window.confirm() par la modal Bootstrap générique
+    const genericConfirmModalEl = document.getElementById('genericConfirmModal');
+    const genericConfirmModal = new bootstrap.Modal(genericConfirmModalEl);
+    function genericConfirm(message, onOk) {
+        $('#genericConfirmMsg').text(message);
+        const okBtn = document.getElementById('genericConfirmOkBtn');
+        const newOkBtn = okBtn.cloneNode(true);
+        okBtn.parentNode.replaceChild(newOkBtn, okBtn);
+        newOkBtn.addEventListener('click', function() {
+            genericConfirmModal.hide();
+            onOk();
+        });
+        genericConfirmModal.show();
+    }
 
     function showToast(msg, type = 'success') {
         const colors = { success: 'bg-success', error: 'bg-danger', info: 'bg-primary' };
@@ -826,7 +1124,7 @@ $(document).ready(function() {
     $(document).on('click', '.valider-facture', function(e) {
         e.stopPropagation();
         const btn = $(this), id = btn.data('id'), card = btn.closest('.facture-card');
-        if (!confirm('Valider l\'achat ' + id + ' ?')) return;
+        genericConfirm('Confirmer que la marchandise de l\'achat ' + id + ' a été physiquement reçue ? Cette action va créditer le stock.', function() {
         btn.prop('disabled', true).html('<i class="bi bi-hourglass-split"></i>');
         $.ajax({
             url: baseUrl, type: 'POST',
@@ -834,7 +1132,7 @@ $(document).ready(function() {
             dataType: 'json',
             success: function(resp) {
                 if (resp.success) {
-                    showToast('Achat ' + id + ' validé');
+                    showToast('Achat ' + id + ' validé — stock crédité');
                     card.addClass('validated');
                     card.find('.fc-badges .badge-pill').last().removeClass('bg-secondary-subtle text-secondary').addClass('bg-primary-subtle text-primary').html('<i class="bi bi-check2" style="font-size:8px;"></i> VALIDEE');
                     card.find('.fc-number').css('color', '#059669');
@@ -848,6 +1146,7 @@ $(document).ready(function() {
                 showToast('Erreur de communication', 'error');
                 btn.prop('disabled', false).html('<i class="bi bi-check2-circle"></i>');
             }
+        });
         });
     });
 
@@ -972,7 +1271,17 @@ $(document).ready(function() {
                         <div class="detail-section-title-chic box"><i class="bi bi-box-seam-fill"></i> LIGNES D'ACHAT (${data.commandes.length})</div>
                         <div class="table-responsive"><table class="modal-table"><thead><tr><th>Produit</th><th class="text-center">Qté</th><th class="text-end">Prix d'achat</th><th class="text-end">Montant</th></tr></thead><tbody>`;
                     data.commandes.forEach(c => {
-                        html += `<tr><td class="fw-semibold">${c.titre_produit}</td><td class="text-center">${c.quantite_commande}</td><td class="text-end">${Number(c.prix_achat).toLocaleString('fr-FR')} FCFA</td><td class="text-end fw-bold">${Number(c.montant_commande).toLocaleString('fr-FR')} FCFA</td></tr>`;
+                        const ppl = parseInt(c.produits_par_lot) || 1;
+                        let qteTxt;
+                        if (ppl > 1) {
+                            const nbLots = Math.floor(c.quantite_commande / ppl);
+                            const reste = c.quantite_commande % ppl;
+                            const lib = c.libelle_lot || 'Lot';
+                            qteTxt = reste > 0 ? `${nbLots} ${lib}(s) et ${reste} Pièce(s)` : `${nbLots} ${lib}(s)`;
+                        } else {
+                            qteTxt = `${c.quantite_commande} Pièce(s)`;
+                        }
+                        html += `<tr><td class="fw-semibold">${c.titre_produit}</td><td class="text-center">${qteTxt}</td><td class="text-end">${Number(c.prix_achat).toLocaleString('fr-FR')} FCFA</td><td class="text-end fw-bold">${Number(c.montant_commande).toLocaleString('fr-FR')} FCFA</td></tr>`;
                     });
                     html += '</tbody></table></div></div>';
                 }
@@ -1081,6 +1390,7 @@ $(document).ready(function() {
 
     function afficherFormulaireEdition(data) {
         const f = data.facture;
+        const avanceFixe = parseFloat(f.avance) || 0;
         let html = `<div class="row g-3 mb-4">
             <div class="col-md-4">
                 <label class="text-uppercase small fw-bold text-muted" style="font-size:10px;letter-spacing:.5px;">MONTANT TOTAL</label>
@@ -1092,14 +1402,14 @@ $(document).ready(function() {
             </div>
             <div class="col-md-4">
                 <label class="text-uppercase small fw-bold text-muted" style="font-size:10px;letter-spacing:.5px;">RESTE DÛ</label>
-                <input type="text" class="form-control form-control-lg" value="${Number(f.reste).toLocaleString('fr-FR')}" readonly style="background:#f8fafc;font-weight:700;color:#ef4444;">
+                <input type="text" class="form-control form-control-lg" id="edit_reste" value="${Number(f.reste).toLocaleString('fr-FR')}" readonly style="background:#f8fafc;font-weight:700;color:#ef4444;">
             </div>
             <div class="col-12"><div class="small text-muted"><i class="bi bi-info-circle"></i> Le règlement (avance/reste) se gère depuis votre interface dédiée. Ici, seules les lignes achetées sont modifiables — le montant total et le reste dû se recalculent automatiquement.</div></div>
         </div>
         <h6 class="mb-3 fw-bold" style="color:#1e293b;display:flex;align-items:center;gap:8px;"><i class="bi bi-box-seam-fill text-warning"></i> Lignes d'achat</h6>
         <div class="table-responsive">
             <table class="edit-table-chic" id="editLignesTable">
-                <thead><tr><th>Produit</th><th class="text-center">Qté</th><th class="text-end">Prix d'achat</th><th class="text-end">Montant</th><th class="text-center">Action</th></tr></thead>
+                <thead><tr><th>Pièce</th><th class="text-center">Qté</th><th class="text-end">Prix d'achat</th><th class="text-end">Montant</th><th class="text-center">Action</th></tr></thead>
                 <tbody>`;
         data.commandes.forEach(c => {
             html += `<tr class="ligne-commande" data-id="${c.numero_commande}">
@@ -1111,19 +1421,259 @@ $(document).ready(function() {
             </tr>`;
         });
         html += `</tbody></table></div>
+        <div class="mt-4 p-3" style="background:#f8fafc;border:1px dashed #cbd5e1;border-radius:10px;">
+            <h6 class="mb-3 fw-bold" style="color:#1e293b;display:flex;align-items:center;gap:8px;"><i class="bi bi-plus-circle text-primary"></i> Ajouter un produit</h6>
+            <div class="row g-2 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label small">Catégorie</label>
+                    <select id="newLigneCategorie" class="form-select selectpicker" data-live-search="true">
+                        <option value="">-- Catégorie --</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small">Produit</label>
+                    <select id="newLigneProduit" class="form-select selectpicker" data-live-search="true" disabled title="-- Choisir d'abord une catégorie --">
+                        <option value="">-- Produit --</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Quantité</label>
+                    <input type="number" id="newLigneQte" class="form-control" min="1" step="1" placeholder="0">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small">Prix d'achat</label>
+                    <input type="number" id="newLignePrix" class="form-control" min="0" step="0.01" placeholder="0.00">
+                </div>
+                <div class="col-md-2">
+                    <button type="button" class="btn-action-chic enregistrer w-100" id="btnAjouterLigne"><i class="bi bi-plus-lg"></i> Ajouter</button>
+                </div>
+            </div>
+            <div class="small text-muted mt-2" id="newLigneStockInfo">Stock actuel : —</div>
+            <div class="mt-2" style="font-size:12px;color:#64748b;">
+                <label style="cursor:pointer;">
+                    <input type="checkbox" id="newLigneLotConfigure"> Configurer un lot pour cette ligne
+                </label>
+                <span id="newLigneLotDetails" style="display:none;margin-left:10px;">
+                    <input type="number" id="newLigneLotUnites" min="2" step="1" value="2" style="width:56px;" title="Unités par lot"> unité(s) par
+                    <select id="newLigneLotLibelle" style="display:inline-block;width:auto;">
+                        ${['Boîte', 'Palette', 'Carton', 'Bidon', 'Unité'].map(l => `<option value="${l}">${l}</option>`).join('')}
+                    </select>
+                    — <strong id="newLigneLotApercu"></strong>
+                </span>
+            </div>
+        </div>
         <div class="mt-4 d-flex gap-2 justify-content-end">
             <button class="btn-action-chic annuler" id="btnAnnulerEdit"><i class="bi bi-x-lg"></i> Annuler</button>
             <button class="btn-action-chic enregistrer" id="btnEnregistrerEdit"><i class="bi bi-check-lg"></i> Enregistrer</button>
         </div>`;
-        $('#editContent').html(html).data('facture-id', f.numero_facture);
+        $('#editContent').html(html).data('facture-id', f.numero_facture).data('boutique-id', data.boutique_id || '');
+
+        // ------------------------------------------------------------
+        // Recalcul en direct du montant total et du reste (pas de taxe/remise
+        // ici : le montant d'un achat = somme brute des lignes).
+        // ------------------------------------------------------------
+        function recalculerTotaux() {
+            let totalLignes = 0;
+            $('#editLignesTable tbody tr').each(function() {
+                const row = $(this);
+                const qte = parseFloat(row.find('.qte').val()) || 0;
+                const prix = parseFloat(row.find('.prix').val()) || 0;
+                totalLignes += qte * prix;
+            });
+            $('#edit_montant_ttc').val(totalLignes.toLocaleString('fr-FR'));
+            $('#edit_reste').val(Math.max(0, Math.round((totalLignes - avanceFixe) * 100) / 100).toLocaleString('fr-FR'));
+        }
+
+        // ------------------------------------------------------------
+        // Panneau d'ajout de produit : catégorie -> produit (filtré).
+        // ------------------------------------------------------------
+        const $newCat = $('#newLigneCategorie');
+        const $newProd = $('#newLigneProduit');
+        CATEGORIES_ACHAT.forEach(function(c) {
+            $newCat.append($('<option>', { value: c.code_categorie, text: c.titre_categorie }));
+        });
+
+        function filtrerProduitsNouvelleLigne() {
+            const cat = String($newCat.val() || '').trim();
+            $newProd.empty();
+            $newProd.append($('<option>', { value: '', text: '-- Choisir un produit --' }));
+            if (cat === '') {
+                $newProd.prop('disabled', true).attr('title', "-- Choisir d'abord une catégorie --");
+            } else {
+                PRODUITS_ACHAT.forEach(function(p) {
+                    if (String(p.categorie_id || '') === cat) {
+                        const suffixe = (p.etat_produit === 'RUPTURE') ? ' (rupture)' : '';
+                        $newProd.append($('<option>', {
+                            value: p.code_produit,
+                            text: p.titre_produit + suffixe,
+                            'data-prix': p.prix_fournisseur || 0
+                        }));
+                    }
+                });
+                $newProd.prop('disabled', false).attr('title', '-- Choisir un produit --');
+            }
+            if ($newProd.hasClass('bs-select-hidden') || $newProd.data('selectpicker')) { $newProd.selectpicker('destroy'); }
+            $newProd.selectpicker();
+            $newProd.off('changed.bs.select change').on('changed.bs.select change', function() {
+                // Filet de sécurité : sur bootstrap-select 1.14 beta, après une
+                // reconstruction dynamique des options, le libellé du bouton ne se
+                // resynchronise pas toujours tout seul lors d'une sélection — on
+                // force le refresh ET on réécrit le texte affiché à la main.
+                $newProd.selectpicker('refresh');
+                const texteChoisi = $newProd.find('option:selected').text();
+                $newProd.parent().find('.filter-option-inner-inner').text(texteChoisi);
+                updateNouvelleLigneStock();
+            });
+            $('#newLigneStockInfo').text('Stock actuel : —');
+        }
+
+        function updateNouvelleLigneStock() {
+            const produit = $newProd.val();
+            const boutique = $('#editContent').data('boutique-id');
+            if (!produit) { $('#newLigneStockInfo').text('Stock actuel : —'); return; }
+            $.ajax({
+                url: baseUrl, type: 'POST', dataType: 'json',
+                data: { action: 'check_stock_produit', produit_id: produit, boutique_id: boutique },
+                success: function(resp) {
+                    if (resp.success) {
+                        $('#newLigneStockInfo').html('Stock actuel : <strong>' + resp.disponible + '</strong>' + (boutique ? '' : ' (boutique de réception inconnue)'));
+                        if (!$('#newLignePrix').val() && resp.prix > 0) $('#newLignePrix').val(resp.prix);
+                    } else {
+                        $('#newLigneStockInfo').text('Stock actuel : —');
+                    }
+                }
+            });
+        }
+
+        $newCat.selectpicker();
+        $newCat.on('changed.bs.select change', filtrerProduitsNouvelleLigne);
+        filtrerProduitsNouvelleLigne();
+
+        // ------------------------------------------------------------
+        // Configuration de lot pour la nouvelle ligne (même principe que
+        // dans achat.php) : optionnelle — si non cochée, comportement
+        // "produit simple" (pas de lot, produits_par_lot = 1).
+        // ------------------------------------------------------------
+        function majApercuLotNouvelleLigne() {
+            const qte = parseInt($('#newLigneQte').val()) || 0;
+            const unites = Math.max(2, parseInt($('#newLigneLotUnites').val()) || 2);
+            const libelle = $('#newLigneLotLibelle').val();
+            const nbLots = Math.floor(qte / unites);
+            const reste = qte % unites;
+            const apercu = reste > 0 ? `${nbLots} ${libelle}(s) et ${reste} Produit(s)` : `${nbLots} ${libelle}(s)`;
+            $('#newLigneLotApercu').text(apercu);
+        }
+        $('#newLigneLotConfigure').on('change', function() {
+            $('#newLigneLotDetails').toggle(this.checked);
+            if (this.checked) majApercuLotNouvelleLigne();
+        });
+        $('#newLigneLotUnites, #newLigneLotLibelle, #newLigneQte').on('input change', majApercuLotNouvelleLigne);
+
+        $('#btnAjouterLigne').click(function() {
+            const produit = $newProd.val();
+            const produitTexte = $newProd.find('option:selected').text();
+            const boutique = $('#editContent').data('boutique-id');
+            const qte = parseInt($('#newLigneQte').val()) || 0;
+            const prixSaisi = parseFloat($('#newLignePrix').val()) || 0;
+            const lotConfigure = $('#newLigneLotConfigure').is(':checked');
+            const unitesParLot = Math.max(2, parseInt($('#newLigneLotUnites').val()) || 2);
+            const libelleLot = $('#newLigneLotLibelle').val() || 'Unité';
+
+            if (!produit) { showToast('Choisissez une catégorie puis un produit.', 'error'); return; }
+            if (qte <= 0) { showToast('Saisissez une quantité valide (> 0).', 'error'); return; }
+
+            $.ajax({
+                url: baseUrl, type: 'POST', dataType: 'json',
+                data: { action: 'check_stock_produit', produit_id: produit, boutique_id: boutique },
+                success: function(resp) {
+                    const titreProduit = (resp.success && resp.titre) ? resp.titre : produitTexte;
+                    const prixFinal = prixSaisi > 0 ? prixSaisi : (resp.prix || 0);
+                    const montant = qte * prixFinal;
+                    let sousTitreLot = '';
+                    if (lotConfigure) {
+                        const nbLots = Math.floor(qte / unitesParLot);
+                        const resteLot = qte % unitesParLot;
+                        const apercuLot = resteLot > 0 ? `${nbLots} ${libelleLot}(s) et ${resteLot} Produit(s)` : `${nbLots} ${libelleLot}(s)`;
+                        sousTitreLot = `<br><span class="small text-muted">Lot : ${unitesParLot} unité(s) par ${libelleLot} — ${apercuLot}</span>`;
+                    }
+                    const row = `<tr class="ligne-commande ligne-nouvelle" data-id="" data-produit="${produit}" data-boutique="${boutique}"
+                        data-lot-configure="${lotConfigure ? '1' : '0'}" data-unites-par-lot="${unitesParLot}" data-libelle-lot="${escHtml(libelleLot)}">
+                        <td class="fw-semibold">${escHtml(titreProduit)} <span class="badge bg-primary-subtle text-primary" style="font-size:9px;">nouveau</span>${sousTitreLot}</td>
+                        <td class="text-center"><input type="number" class="form-control form-control-sm qte" value="${qte}" min="0" style="width:80px;display:inline-block;text-align:center;"></td>
+                        <td class="text-end"><input type="number" class="form-control form-control-sm prix" value="${prixFinal}" min="0" style="width:120px;display:inline-block;text-align:right;"></td>
+                        <td class="text-end montant-ligne fw-bold">${montant.toLocaleString('fr-FR')}</td>
+                        <td class="text-center"><button class="btn-delete-chic supprimer-ligne" title="Supprimer"><i class="bi bi-trash3"></i></button></td>
+                    </tr>`;
+                    $('#editLignesTable tbody').append(row);
+                    // On ne réinitialise QUE le produit / quantité / prix / lot : la
+                    // catégorie reste sélectionnée pour enchaîner rapidement l'ajout de
+                    // plusieurs lignes. On repasse par filtrerProduitsNouvelleLigne()
+                    // (reconstruction complète) plutôt que 'selectpicker(val, "")', qui
+                    // ne réaffiche pas toujours correctement le placeholder sur cette
+                    // version du plugin.
+                    $('#newLigneQte, #newLignePrix').val('');
+                    $('#newLigneLotConfigure').prop('checked', false);
+                    $('#newLigneLotDetails').hide();
+                    $('#newLigneLotUnites').val(2);
+                    $('#newLigneLotLibelle').val('Unité');
+                    filtrerProduitsNouvelleLigne();
+                    recalculerTotaux();
+                    showToast('Ligne ajoutée : ' + titreProduit + '. Vous pouvez continuer à ajouter d\'autres lignes.', 'success');
+                },
+                error: function() { showToast('Erreur lors de l\'ajout de la ligne.', 'error'); }
+            });
+        });
 
         $(document).on('change', '#editLignesTable .qte, #editLignesTable .prix', function() {
             const row = $(this).closest('tr');
             const montant = (parseFloat(row.find('.qte').val()) || 0) * (parseFloat(row.find('.prix').val()) || 0);
             row.find('.montant-ligne').text(montant.toLocaleString('fr-FR'));
+            recalculerTotaux();
         });
         $(document).on('click', '#editLignesTable .supprimer-ligne', function() {
-            if (confirm('Supprimer cette ligne ? Le stock correspondant sera retiré.')) $(this).closest('tr').remove();
+            const row = $(this).closest('tr');
+            const estNouvelle = row.hasClass('ligne-nouvelle');
+            genericConfirm('Supprimer cette ligne ? Le stock correspondant sera retiré.', function() {
+                if (estNouvelle) {
+                    // Ligne pas encore enregistrée en base : on peut la retirer
+                    // complètement, elle ne sera jamais envoyée au serveur.
+                    row.remove();
+                } else {
+                    // Ligne existante : on ne la retire PAS du DOM, sinon elle n'est
+                    // plus envoyée au serveur et n'est donc jamais supprimée en base
+                    // (le stock qu'elle avait crédité ne serait jamais retiré non plus).
+                    // On la marque à quantité 0 (convention déjà gérée côté serveur :
+                    // quantité 0 = suppression + retrait du stock), avec possibilité
+                    // d'annuler avant l'enregistrement.
+                    row.data('qte-avant-suppression', row.find('.qte').val());
+                    row.data('prix-avant-suppression', row.find('.prix').val());
+                    row.find('.qte').val(0);
+                    row.addClass('ligne-a-supprimer');
+                    row.css({ opacity: 0.5, textDecoration: 'line-through' });
+                    row.find('input').prop('disabled', true);
+                    row.find('.montant-ligne').text('0');
+                    row.find('.supprimer-ligne')
+                        .removeClass('supprimer-ligne').addClass('annuler-suppression-ligne')
+                        .attr('title', 'Annuler la suppression')
+                        .html('<i class="bi bi-arrow-counterclockwise"></i>');
+                }
+                recalculerTotaux();
+            });
+        });
+        $(document).on('click', '#editLignesTable .annuler-suppression-ligne', function() {
+            const row = $(this).closest('tr');
+            row.removeClass('ligne-a-supprimer').css({ opacity: '', textDecoration: '' });
+            row.find('input').prop('disabled', false);
+            row.find('.qte').val(row.data('qte-avant-suppression') || 0);
+            row.find('.prix').val(row.data('prix-avant-suppression') || 0);
+            const qte = parseFloat(row.find('.qte').val()) || 0;
+            const prix = parseFloat(row.find('.prix').val()) || 0;
+            row.find('.montant-ligne').text((qte * prix).toLocaleString('fr-FR'));
+            row.find('.annuler-suppression-ligne')
+                .removeClass('annuler-suppression-ligne').addClass('supprimer-ligne')
+                .attr('title', 'Supprimer')
+                .html('<i class="bi bi-trash3"></i>');
+            recalculerTotaux();
         });
         $('#btnAnnulerEdit').click(function() {
             $('#editSection').hide();
@@ -1132,26 +1682,43 @@ $(document).ready(function() {
         });
         $('#btnEnregistrerEdit').click(function() {
             const commandes = [];
+            const nouvellesLignes = [];
             $('#editLignesTable tbody tr').each(function() {
                 const row = $(this);
                 const qte = parseFloat(row.find('.qte').val()) || 0;
-                commandes.push({
-                    id: row.data('id'),
-                    quantite: qte,
-                    prix: parseFloat(row.find('.prix').val()) || 0,
-                    supprimer: qte === 0
-                });
+                const id = row.data('id');
+                if (row.hasClass('ligne-nouvelle') || !id) {
+                    if (qte > 0) {
+                        nouvellesLignes.push({
+                            produit_id: row.data('produit'),
+                            boutique_id: row.data('boutique'),
+                            quantite: qte,
+                            prix: parseFloat(row.find('.prix').val()) || 0,
+                            lot_configure: row.data('lot-configure') == 1 || row.data('lot-configure') === '1',
+                            unites_par_lot: row.data('unites-par-lot') || 1,
+                            libelle_lot: row.data('libelle-lot') || 'Unité'
+                        });
+                    }
+                } else {
+                    commandes.push({
+                        id: id,
+                        quantite: qte,
+                        prix: parseFloat(row.find('.prix').val()) || 0,
+                        supprimer: qte === 0
+                    });
+                }
             });
             $.ajax({
                 url: baseUrl, type: 'POST', dataType: 'json',
                 data: {
                     action: 'update_achat',
                     facture_id: $('#editContent').data('facture-id'),
-                    commandes: JSON.stringify(commandes)
+                    commandes: JSON.stringify(commandes),
+                    nouvelles_lignes: JSON.stringify(nouvellesLignes)
                 },
                 success: function(resp) {
                     if (resp.success) {
-                        showToast('Achat mis à jour, stock ajusté');
+                        showToast(resp.message || 'Achat mis à jour, stock ajusté');
                         setTimeout(() => location.reload(), 1000);
                     } else {
                         showToast('Erreur : ' + (resp.error || 'Inconnue'), 'error');

@@ -4,7 +4,7 @@ class caisse
     // Gestion des caisses (table `caisses`) - réservé aux administrateurs
     public function gestion()
     {
-        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire']);
+        requirePermission(['Administrateur', 'Superviseur']);
         include "views/caisse/index.php";
     }
 
@@ -12,7 +12,7 @@ class caisse
     // Accessible à tous les rôles habilités à encaisser
     public function journee()
     {
-        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire', 'Caisse', 'Assistant']);
+        requirePermission(['Administrateur', 'Superviseur', 'Caisse']);
         include "views/caisse/journee.php";
     }
 }

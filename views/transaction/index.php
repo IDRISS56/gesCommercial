@@ -1,21 +1,7 @@
 <?php
 // views/transaction/index.php – Historique des transactions
 ob_start();
-require __DIR__ . '/../../databases/database.php';
-
-if (!isset($_SESSION['user_id'])) {
-    header('Location: ../utilisateur/login');
-    exit;
-}
-
-$stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
-$stmt->execute([$_SESSION['user_id']]);
-$user = $stmt->fetch(PDO::FETCH_ASSOC);
-if (!$user) {
-    session_destroy();
-    header('Location: ../utilisateur/login');
-    exit;
-}
+require  'databases/database.php';
 
 function e($str) { return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8'); }
 function fmt($n) { return number_format(floatval($n), 0, ',', ' '); }
@@ -349,6 +335,8 @@ $initialData = getTableContent($pdo, $search, $filtres, 1);
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Historique des transactions</title>

@@ -8,15 +8,6 @@ if (!isset($_SESSION['user_id'])) {
 
 require 'databases/database.php';
 
-$stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
-$stmt->execute([$_SESSION['user_id']]);
-$user = $stmt->fetch(PDO::FETCH_ASSOC);
-if (!$user) {
-    session_destroy();
-    header('Location: ../utilisateur/login');
-    exit;
-}
-
 function e($str)
 {
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
@@ -196,8 +187,13 @@ foreach ($stockData as $row) {
 $stmt = $pdo->query("SELECT COUNT(*) FROM contact WHERE type_contact='Client' AND etat_contact='Actif'");
 $totalClients = intval($stmt->fetchColumn());
 
-// Solde des caisses ouvertes (table `caisse`, colonne `solde`)
-$stmt = $pdo->query("SELECT COALESCE(SUM(solde),0) FROM caisse WHERE statut='Ouverte'");
+// Solde des caisses actuellement en session ouverte (table `caisse`, colonne `solde`).
+// caisse.statut ('Actif'/'Inactif') indique si la caisse est activée, mais l'état
+// "ouverte maintenant" vient de journees_caisse.statut = 'OUVERTE'.
+$stmt = $pdo->query("SELECT COALESCE(SUM(c.solde),0)
+                     FROM caisse c
+                     WHERE c.statut = 'Actif'
+                     AND EXISTS (SELECT 1 FROM journees_caisse jc WHERE jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE')");
 $soldeCaisse = floatval($stmt->fetchColumn() ?? 0);
 
 // Commandes validées de la période (etat_commande = 'VALIDEE')
@@ -313,6 +309,8 @@ $spPct = function ($v, $t) {
 <html lang="fr">
 
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tableau de bord — <?= e($libelle_periode) ?></title>

@@ -2,11 +2,6 @@
 ob_start();
 require 'databases/database.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: utilisateur/login');
-    exit;
-}
-
 function e($str) {
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
 }
@@ -18,10 +13,25 @@ function fmt($n) {
 function generateContactId($pdo) {
     $date = date('Ymd');
     $prefix = 'CT-' . $date . '-';
+
     $stmt = $pdo->prepare("SELECT COUNT(*) FROM contact WHERE code_contact LIKE ?");
     $stmt->execute([$prefix . '%']);
-    $count = intval($stmt->fetchColumn()) + 1;
-    return $prefix . str_pad($count, 4, '0', STR_PAD_LEFT);
+    $countEnBase = intval($stmt->fetchColumn());
+
+    // Le compteur "en base" ne bouge que si un client a réellement été
+    // enregistré. Pour que le code proposé change à CHAQUE génération (même
+    // quand la modale est rouverte plusieurs fois sans validation), on
+    // retient en session le dernier numéro déjà proposé pour la journée et
+    // on prend le plus grand des deux.
+    if (!isset($_SESSION['last_client_seq']) || !is_array($_SESSION['last_client_seq'])) {
+        $_SESSION['last_client_seq'] = [];
+    }
+    $dernierPropose = intval($_SESSION['last_client_seq'][$prefix] ?? 0);
+
+    $next = max($countEnBase, $dernierPropose) + 1;
+    $_SESSION['last_client_seq'][$prefix] = $next;
+
+    return $prefix . str_pad($next, 4, '0', STR_PAD_LEFT);
 }
 
 $types_contact = ['Client'];
@@ -32,6 +42,20 @@ $message = '';
 $messageType = '';
 $action = $_POST['action'] ?? '';
 $csrf_token = $_POST['csrf_token'] ?? '';
+
+// ---- AJAX : génération d'un nouveau code client à la demande ----
+// Le code doit être recalculé à chaque ouverture de la modale "Ajouter",
+// pas seulement au chargement de la page (sinon il reste figé si on ouvre
+// la modale plusieurs fois sans recharger la page).
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'generate_code') {
+    header('Content-Type: application/json');
+    if (empty($csrf_token) || $csrf_token !== ($_SESSION['csrf_token'] ?? '')) {
+        echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
+        exit;
+    }
+    echo json_encode(['success' => true, 'code' => generateContactId($pdo)]);
+    exit;
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($csrf_token) || $csrf_token !== ($_SESSION['csrf_token'] ?? '')) {
@@ -108,7 +132,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 $csrf_token = $_SESSION['csrf_token'];
 
 function getTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
@@ -260,6 +286,8 @@ $associations = $pdo->query("SELECT COUNT(*) FROM contact WHERE type_contact = '
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gestion des clients</title>
@@ -792,7 +820,7 @@ h1, h2, h3, h4, h5, h6 {
                             <label class="form-label">Nom complet <span class="text-danger">*</span></label>
                             <div class="input-group">
                                 <span class="input-group-text"><i class="bi bi-person"></i></span>
-                                <input type="text" class="form-control" id="nom_prenom_contact" name="nom_prenom_contact" required placeholder="Jean Dupont" value="<?= e($editContact['nom_prenom_contact'] ?? '') ?>">
+                                <input type="text" class="form-control" id="nom_prenom_contact" name="nom_prenom_contact" required value="<?= e($editContact['nom_prenom_contact'] ?? '') ?>">
                             </div>
                         </div>
                     </div>
@@ -908,6 +936,7 @@ h1, h2, h3, h4, h5, h6 {
 $(document).ready(function() {
     $('.selectpicker').selectpicker();
     
+    const CSRF_TOKEN = '<?= $csrf_token ?>';
     const clientModalEl = document.getElementById('clientModal');
     const clientModal = new bootstrap.Modal(clientModalEl);
     const deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
@@ -923,21 +952,31 @@ $(document).ready(function() {
     }
     
     setTimeout(function() { $('.alert').alert('close'); }, 5000);
-    
-    <?php if ($message): ?>
-    showToast('<?= addslashes($message) ?>', '<?= $messageType === 'success' ? 'success' : ($messageType === 'danger' ? 'error' : 'info') ?>');
-    <?php endif; ?>
-    
-    // Ajouter client
+  
+    // Ajouter client : le code est régénéré côté serveur à chaque ouverture,
+    // pour ne jamais réutiliser un code déjà affiché plus tôt sur cette page.
     $('#addBtn').click(function() {
-        $('#formAction').val('add');
-        $('#formOldCode').val('');
-        $('#modalTitle i').attr('class', 'bi bi-person-plus-fill');
-        $('#modalTitleText').text('Nouveau client');
-        $('#clientForm')[0].reset();
-        $('#code_contact').val('<?= generateContactId($pdo) ?>');
-        $('#etat_contact').val('Actif');
-        clientModal.show();
+        const $btn = $(this);
+        $btn.prop('disabled', true);
+
+        $.post(window.location.href, {
+            action: 'generate_code',
+            csrf_token: CSRF_TOKEN
+        }, function(res) {
+            $btn.prop('disabled', false);
+
+            $('#formAction').val('add');
+            $('#formOldCode').val('');
+            $('#modalTitle i').attr('class', 'bi bi-person-plus-fill');
+            $('#modalTitleText').text('Nouveau client');
+            $('#clientForm')[0].reset();
+            $('#code_contact').val(res && res.success ? res.code : '');
+            $('#etat_contact').val('Actif');
+            clientModal.show();
+        }, 'json').fail(function() {
+            $btn.prop('disabled', false);
+            showToast('Erreur lors de la génération du code client.', 'error');
+        });
     });
     
     // Édition

@@ -26,12 +26,16 @@ $categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie
 $boutiquesActives = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
 $boutiquePrincipale = $boutiquesActives[0]['code_boutique'] ?? null;
 
-// Statistiques globales
-$totalProduits   = $pdo->query("SELECT COUNT(*) FROM produit")->fetchColumn() ?? 0;
-$enRupture       = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit = 'RUPTURE'")->fetchColumn() ?? 0;
-$enAlerte        = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit = 'ALERTE'")->fetchColumn() ?? 0;
-$disponibles     = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit = 'DISPONIBLE'")->fetchColumn() ?? 0;
-$valeurStock     = $pdo->query("SELECT COALESCE(SUM(prix_fournisseur * stock_produit), 0) FROM produit")->fetchColumn() ?? 0;
+// ==========================================
+// Statistiques globales (etat_produit = 'Actif'/'Inactif')
+// NB : "<> 'Inactif'" pour inclure aussi les anciennes lignes à ''
+// ==========================================
+$totalProduits    = $pdo->query("SELECT COUNT(*) FROM produit")->fetchColumn() ?? 0;
+$produitsActifs   = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit <> 'Inactif'")->fetchColumn() ?? 0;
+$produitsInactifs = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit = 'Inactif'")->fetchColumn() ?? 0;
+$enRupture        = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit <> 'Inactif' AND stock_produit <= 0")->fetchColumn() ?? 0;
+$enAlerte         = $pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit <> 'Inactif' AND stock_produit > 0 AND stock_produit <= stock_alerte")->fetchColumn() ?? 0;
+$valeurStock      = $pdo->query("SELECT COALESCE(SUM(prix_fournisseur * stock_produit), 0) FROM produit WHERE etat_produit <> 'Inactif'")->fetchColumn() ?? 0;
 
 // ==========================================
 // 3. TRAITEMENT CRUD (POST)
@@ -52,17 +56,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
             $prix_fournisseur  = floatval($_POST['prix_fournisseur'] ?? 0);
             $prix_produit      = floatval($_POST['prix_produit'] ?? 0);
             $stock_alerte      = intval($_POST['stock_alerte'] ?? 10);
-            $stock_produit     = intval($_POST['stock_produit'] ?? 0);
             $categorie_id      = trim($_POST['categorie_id'] ?? '');
             $description       = trim($_POST['description_produit'] ?? '');
             $oldCode           = trim($_POST['old_code'] ?? $code);
 
-            $benefice = $prix_produit - $prix_fournisseur;
+            // ✅ État Actif/Inactif saisi manuellement (plus de calcul auto)
+            $etat_input = trim($_POST['etat_produit'] ?? 'Actif');
+            $etat = in_array($etat_input, ['Actif', 'Inactif'], true) ? $etat_input : 'Actif';
 
-            // Calcul automatique de l'état
-            if ($stock_produit <= 0) $etat = 'RUPTURE';
-            elseif ($stock_produit <= $stock_alerte) $etat = 'ALERTE';
-            else $etat = 'DISPONIBLE';
+            // Le stock ne se modifie JAMAIS depuis la fiche produit
+            if ($action === 'edit') {
+                $stmtStockActuel = $pdo->prepare("SELECT stock_produit FROM produit WHERE code_produit = ?");
+                $stmtStockActuel->execute([$oldCode]);
+                $stock_produit = (int) ($stmtStockActuel->fetchColumn() ?: 0);
+            } else {
+                $stock_produit = intval($_POST['stock_produit'] ?? 0);
+            }
+
+            $benefice = $prix_produit - $prix_fournisseur;
 
             $photo = null;
             $type_photo = null;
@@ -164,7 +175,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
     }
 }
 
-$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 $csrf_token = $_SESSION['csrf_token'];
 
 // ==========================================
@@ -184,8 +197,12 @@ function getTableContent($pdo, $search, $categorie_filter, $etat_filter, $page, 
         $params[] = $categorie_filter;
     }
     if (!empty($etat_filter)) {
-        $where .= " AND p.etat_produit = ?";
-        $params[] = $etat_filter;
+        // "Actif" = tout sauf Inactif (inclut les anciennes lignes à '')
+        if ($etat_filter === 'Inactif') {
+            $where .= " AND p.etat_produit = 'Inactif'";
+        } else {
+            $where .= " AND p.etat_produit <> 'Inactif'";
+        }
     }
 
     $countSql = "SELECT COUNT(*) FROM produit p $where";
@@ -213,12 +230,23 @@ function getTableContent($pdo, $search, $categorie_filter, $etat_filter, $page, 
     <?php else: ?>
         <?php foreach ($produits as $p): ?>
             <?php
-                $etatBadgeClass = ['RUPTURE'=>'danger','ALERTE'=>'warning','DISPONIBLE'=>'success'][$p['etat_produit']] ?? 'secondary';
-                $etatIcon = ['RUPTURE'=>'x-circle-fill','ALERTE'=>'exclamation-triangle-fill','DISPONIBLE'=>'check-circle-fill'][$p['etat_produit']] ?? 'question-circle';
+                // ✅ Normalisation : tout ce qui n'est pas 'Inactif' est affiché 'Actif'
+                $etatVal        = ($p['etat_produit'] === 'Inactif') ? 'Inactif' : 'Actif';
+                $etatBadgeClass = ($etatVal === 'Actif') ? 'success' : 'secondary';
+                $etatIcon       = ($etatVal === 'Actif') ? 'check-circle-fill' : 'x-circle-fill';
+                // Indicateur visuel de stock (indépendant de l'état)
+                $stockClass = '';
+                if ((int)$p['stock_produit'] <= 0) $stockClass = 'text-danger fw-bold';
+                elseif ((int)$p['stock_produit'] <= (int)$p['stock_alerte']) $stockClass = 'text-warning fw-bold';
             ?>
-            <tr class="produit-item" data-etat="<?= htmlspecialchars($p['etat_produit']) ?>">
+            <tr class="produit-item" data-etat="<?= htmlspecialchars($etatVal) ?>">
                 <td class="td-bold"><?= htmlspecialchars($p['code_produit']) ?></td>
-                <td class="td-semi"><?= htmlspecialchars($p['titre_produit']) ?></td>
+                <td class="td-semi">
+                    <?= htmlspecialchars($p['titre_produit']) ?>
+                    <?php if ($etatVal === 'Inactif'): ?>
+                        <span class="text-muted small fst-italic">(inactif)</span>
+                    <?php endif; ?>
+                </td>
                 <td>
                     <?php if (!empty($p['photo'])): ?>
                         <img src="data:<?= htmlspecialchars($p['type_photo'] ?? 'image/jpeg') ?>;base64,<?= base64_encode($p['photo']) ?>"
@@ -231,11 +259,11 @@ function getTableContent($pdo, $search, $categorie_filter, $etat_filter, $page, 
                 <td><?= number_format($p['prix_fournisseur'], 0, ',', ' ') ?></td>
                 <td><?= number_format($p['prix_produit'], 0, ',', ' ') ?></td>
                 <td class="text-success fw-bold"><?= number_format($p['benefice_produit'], 0, ',', ' ') ?></td>
-                <td><span class="<?= ($p['stock_produit'] <= $p['stock_alerte']) ? 'text-danger fw-bold' : '' ?>"><?= (int)$p['stock_produit'] ?></span></td>
+                <td><span class="<?= $stockClass ?>"><?= (int)$p['stock_produit'] ?></span></td>
                 <td><?= htmlspecialchars($p['titre_categorie'] ?? '—') ?></td>
                 <td>
                     <span class="badge-pill bg-<?= $etatBadgeClass ?>-subtle text-<?= $etatBadgeClass ?>">
-                        <i class="bi bi-<?= $etatIcon ?>" style="font-size:8px;"></i> <?= htmlspecialchars($p['etat_produit'] ?: 'RUPTURE') ?>
+                        <i class="bi bi-<?= $etatIcon ?>" style="font-size:8px;"></i> <?= htmlspecialchars($etatVal) ?>
                     </span>
                 </td>
                 <td class="text-end">
@@ -316,6 +344,8 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gestion des Produits</title>
@@ -324,7 +354,6 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-/* ===== VARIABLES (cohérent avec vente.php) ===== */
 :root {
     --color-primary: #4f46e5;
     --color-primary-dark: #3730a3;
@@ -363,7 +392,6 @@ body {
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
 .W { max-width: 1400px; margin: 0 auto; }
 
-/* ===== STATS CARDS ===== */
 .stat-card {
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
@@ -380,7 +408,6 @@ body {
 .stat-label { font-size: 10px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: .5px; }
 .stat-value { font-size: 18px; font-weight: 800; color: var(--text-primary); font-family: 'Outfit', sans-serif; }
 
-/* ===== TABLE ===== */
 .data-table-wrap {
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
@@ -409,7 +436,6 @@ body {
 .td-bold { font-weight: 700; color: var(--text-primary); }
 .td-semi { font-weight: 500; }
 
-/* ===== BADGES ===== */
 .badge-pill {
     display: inline-flex; align-items: center; gap: 4px;
     padding: 3px 9px; border-radius: 999px;
@@ -417,7 +443,6 @@ body {
     text-transform: uppercase; letter-spacing: .3px;
 }
 
-/* ===== BOUTONS ICONES ===== */
 .icon-btn {
     width: 32px; height: 32px; border-radius: 6px;
     border: 1.5px solid transparent;
@@ -437,7 +462,6 @@ body {
 }
 .icon-btn:hover::before { opacity: 1; }
 
-/* ===== BOUTONS PRINCIPAUX ===== */
 .btn-go {
     background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
     color: #fff; border: none; padding: 10px 18px; border-radius: 8px;
@@ -455,7 +479,6 @@ body {
 }
 .btn-go-outline:hover { background: var(--color-gray-100); color: var(--text-primary); }
 
-/* ===== FILTRES ===== */
 .pbar {
     background: var(--bg-surface);
     border: 1px solid var(--border-color);
@@ -477,7 +500,6 @@ body {
     box-shadow: 0 0 0 3px var(--color-primary-soft);
 }
 
-/* ===== MODAL CHIC ===== */
 .modal-chic .modal-content {
     border: none; border-radius: var(--radius-lg);
     box-shadow: 0 25px 60px rgba(15,23,42,.15); overflow: hidden;
@@ -501,6 +523,7 @@ body {
 .section-title.price i { color: var(--color-success); }
 .section-title.stock i { color: var(--color-warning); }
 .section-title.cat i { color: var(--color-info); }
+.section-title.status i { color: var(--color-purple); }
 
 .form-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
 .form-control, .form-select {
@@ -513,7 +536,6 @@ body {
     box-shadow: 0 0 0 3px var(--color-primary-soft);
 }
 
-/* Preview image */
 .img-placeholder {
     width: 100%; height: 140px;
     background: var(--color-gray-100);
@@ -524,10 +546,8 @@ body {
 }
 .preview-img { width: 100%; height: 140px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border-color); }
 
-/* Toast */
 .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
 
-/* Pagination */
 .page-link {
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
@@ -540,7 +560,6 @@ body {
     color: #fff;
 }
 
-/* ===== BADGE COMPTEUR (style catégorie) ===== */
 .hdr-badge-chic {
     background: #e0e7ff;
     border: 1.5px solid #a5b4fc;
@@ -561,7 +580,6 @@ body {
     color: #4f46e5;
 }
 
-/* ===== BOUTON NOUVEAU PRODUIT (style violet indigo) ===== */
 .btn-go-chic {
     background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%);
     color: #fff;
@@ -593,7 +611,6 @@ body {
     justify-content: center;
 }
 
-/* Animations */
 @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 .table tbody tr { animation: fadeUp .3s ease both; }
 
@@ -629,10 +646,10 @@ body {
     <div class="row g-3 mb-4">
         <?php
         $stats = [
-            ['success', 'box-seam-fill', 'Disponibles', number_format($disponibles, 0, ',', ' '), 'produits'],
-            ['warning', 'exclamation-triangle-fill', 'En alerte', number_format($enAlerte, 0, ',', ' '), 'produits'],
-            ['danger', 'x-circle-fill', 'En rupture', number_format($enRupture, 0, ',', ' '), 'produits'],
-            ['info', 'cash-stack', 'Valeur stock', number_format($valeurStock, 0, ',', ' '), 'FCFA'],
+            ['success', 'check-circle-fill', 'Actifs', number_format($produitsActifs, 0, ',', ' '), 'produits'],
+            ['danger',  'x-circle-fill', 'Inactifs', number_format($produitsInactifs, 0, ',', ' '), 'produits'],
+            ['warning', 'exclamation-triangle-fill', 'Stock faible', number_format($enAlerte + $enRupture, 0, ',', ' '), 'produits'],
+            ['info',    'cash-stack', 'Valeur stock', number_format($valeurStock, 0, ',', ' '), 'FCFA'],
         ];
         $colorMap = [
             'primary' => ['var(--color-primary-soft)', 'var(--color-primary)'],
@@ -691,9 +708,8 @@ body {
                     <label><i class="bi bi-funnel"></i> État</label>
                     <select id="etatFilter" class="form-select form-select-sm">
                         <option value="">Tous</option>
-                        <option value="DISPONIBLE">Disponible</option>
-                        <option value="ALERTE">En alerte</option>
-                        <option value="RUPTURE">En rupture</option>
+                        <option value="Actif" <?= $etat_filter === 'Actif' ? 'selected' : '' ?>>Actif</option>
+                        <option value="Inactif" <?= $etat_filter === 'Inactif' ? 'selected' : '' ?>>Inactif</option>
                     </select>
                 </div>
                 <button type="button" class="btn-go" id="filterBtn"><i class="bi bi-funnel"></i> Filtrer</button>
@@ -748,6 +764,9 @@ body {
                     <input type="hidden" name="action" id="formAction" value="add">
                     <input type="hidden" name="old_code" id="oldCode" value="">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
+                    <input type="hidden" name="categorie_filter" id="formCategorieFilter" value="<?= htmlspecialchars($categorie_filter) ?>">
+                    <input type="hidden" name="etat_filter" id="formEtatFilter" value="<?= htmlspecialchars($etat_filter) ?>">
+                    <input type="hidden" name="search" id="formSearch" value="<?= htmlspecialchars($search) ?>">
 
                     <!-- Identification -->
                     <div class="section-title ident"><i class="bi bi-tag-fill"></i> IDENTIFICATION</div>
@@ -830,6 +849,19 @@ body {
                         </div>
                     </div>
 
+                    <!-- État Actif / Inactif -->
+                    <div class="section-title status"><i class="bi bi-toggle-on"></i> ÉTAT DU PRODUIT</div>
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-4">
+                            <label class="form-label">État</label>
+                            <select class="form-select" id="etat_produit" name="etat_produit">
+                                <option value="Actif" selected>Actif</option>
+                                <option value="Inactif">Inactif</option>
+                            </select>
+                            <small class="text-muted">Un produit inactif n'apparaît plus dans les ventes.</small>
+                        </div>
+                    </div>
+
                     <!-- Photo -->
                     <div class="section-title ident"><i class="bi bi-image"></i> PHOTO</div>
                     <div class="row g-3 mb-4">
@@ -842,7 +874,6 @@ body {
                         </div>
                     </div>
                 </div>
-                <!-- MODAL FOOTER OPTIMISÉ -->
                 <div class="modal-footer">
                     <button type="button" class="btn-go-outline" data-bs-dismiss="modal">
                         <i class="bi bi-x"></i> Annuler
@@ -872,6 +903,9 @@ body {
                     <input type="hidden" name="btn_supprimer" value="1">
                     <input type="hidden" name="sai_supprimer_id" id="deleteFormId">
                     <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
+                    <input type="hidden" name="categorie_filter" id="deleteFormCategorieFilter" value="<?= htmlspecialchars($categorie_filter) ?>">
+                    <input type="hidden" name="etat_filter" id="deleteFormEtatFilter" value="<?= htmlspecialchars($etat_filter) ?>">
+                    <input type="hidden" name="search" id="deleteFormSearch" value="<?= htmlspecialchars($search) ?>">
                     <div class="d-flex gap-2 justify-content-center">
                         <button type="button" class="btn btn-light" data-bs-dismiss="modal">Annuler</button>
                         <button type="submit" class="btn btn-danger" id="confirmDeleteBtn"><i class="bi bi-trash3"></i> Supprimer</button>
@@ -897,6 +931,7 @@ body {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script>
 const baseUrl = window.location.pathname;
+const CSRF_TOKEN = <?= json_encode($csrf_token) ?>;
 const produitModal = new bootstrap.Modal(document.getElementById('produitModal'));
 const deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
 const toastEl = document.getElementById('liveToast');
@@ -908,6 +943,16 @@ function showToast(msg, type = 'success') {
     $('#toastBody').html(`<i class="bi ${icons[type]} me-2"></i>${msg}`);
     toastEl.className = `toast align-items-center text-white border-0 ${colors[type]}`;
     toast.show();
+}
+
+// ✅ CONTOURNEMENT BUG bootstrap-select 1.14.0-beta3 :
+//    refresh() duplique les options et casse le libellé du bouton
+//    (ex: "ToutesAPSONICKALDIN", ancien choix conservé)
+function reinit($sel) {
+    if ($sel.data('selectpicker')) {
+        $sel.selectpicker('destroy');
+    }
+    $sel.selectpicker(); // reconstruit bouton + menu à partir du <select> natif
 }
 
 function calculBenefice() {
@@ -927,6 +972,16 @@ $('#photo_produit').on('change', function() {
         $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>');
     }
 });
+
+// Filtres actuellement affichés (source fiable : ce que l'utilisateur voit,
+// même si la page n'a pas été rechargée depuis le dernier "Filtrer").
+function filtresActuels() {
+    return {
+        categorie_filter: $('#categorieFilter').val() || '',
+        etat_filter: $('#etatFilter').val() || '',
+        search: $('#searchInput').val() || ''
+    };
+}
 
 // Recherche AJAX
 function rechercher(page = 1) {
@@ -953,7 +1008,9 @@ function rechercher(page = 1) {
 $('#filterBtn').on('click', () => rechercher(1));
 $('#resetBtn').on('click', function() {
     $('#searchInput').val('');
-    $('#categorieFilter').val('').selectpicker('refresh');
+    const $cf = $('#categorieFilter');
+    $cf.val('');      // valeur native = "Toutes"
+    reinit($cf);      // ✅ reconstruit l'affichage (destroy + re-init, pas de refresh)
     $('#etatFilter').val('');
     rechercher(1);
     showToast('Filtres réinitialisés', 'info');
@@ -967,6 +1024,16 @@ $(document).on('click', '.page-link', function(e) {
     if (page && page >= 1) rechercher(page);
 });
 
+// Avant chaque vrai envoi (POST classique) du formulaire produit, on
+// reporte le filtre actuellement affiché dans les champs cachés pour
+// qu'il soit conservé après le rechargement de page.
+$('#produitForm').on('submit', function() {
+    const f = filtresActuels();
+    $('#formCategorieFilter').val(f.categorie_filter);
+    $('#formEtatFilter').val(f.etat_filter);
+    $('#formSearch').val(f.search);
+});
+
 // Ajout
 $('#addBtn').on('click', function() {
     $('#formAction').val('add');
@@ -977,22 +1044,27 @@ $('#addBtn').on('click', function() {
     $('#benefice_estime').val('');
     $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>');
     $('#stock_alerte').val(10);
+    $('#stock_initial').prop('readonly', false).val(0);
+    $('#blocStockInitial small').text('Stock global du produit');
+    $('#boutique_initiale').closest('.col-md-4').show();
     $('#blocStockInitial').show();
-    $('.selectpicker').selectpicker('refresh');
+    $('#etat_produit').val('Actif');
     produitModal.show();
 });
 
 // Édition
 $(document).on('click', '.editBtn', function() {
     const code = $(this).data('code');
-    $.post(baseUrl, { action: 'load_edit', edit_code: code }, function(html) {
-        // On soumet un formulaire caché pour récupérer les données
-        const form = $('<form>', { method: 'post', action: baseUrl, style: 'display:none' });
-        form.append($('<input>', { name: 'action', value: 'load_edit' }));
-        form.append($('<input>', { name: 'edit_code', value: code }));
-        $('body').append(form);
-        form.submit();
-    });
+    const f = filtresActuels();
+    const form = $('<form>', { method: 'post', action: baseUrl, style: 'display:none' });
+    form.append($('<input>', { name: 'action', value: 'load_edit' }));
+    form.append($('<input>', { name: 'edit_code', value: code }));
+    form.append($('<input>', { name: 'csrf_token', value: CSRF_TOKEN }));
+    form.append($('<input>', { name: 'categorie_filter', value: f.categorie_filter }));
+    form.append($('<input>', { name: 'etat_filter', value: f.etat_filter }));
+    form.append($('<input>', { name: 'search', value: f.search }));
+    $('body').append(form);
+    form.submit();
 });
 
 // Pré-remplissage si édition (côté serveur)
@@ -1008,13 +1080,18 @@ $(function() {
     $('#prix_produit').val(p.prix_produit);
     $('#stock_alerte').val(p.stock_alerte);
     $('#stock_initial').val(p.stock_produit);
+    $('#stock_initial').prop('readonly', true);
+    $('#blocStockInitial small').text('Le stock ne se modifie pas ici : utilisez Entrée / Sortie / Ajustement / Transfert.');
+    $('#boutique_initiale').closest('.col-md-4').hide();
     $('#categorie_id').val(p.categorie_id);
     $('#description_produit').val(p.description_produit);
+    $('#etat_produit').val(p.etat_produit === 'Inactif' ? 'Inactif' : 'Actif');
     $('#benefice_estime').val((parseFloat(p.prix_produit) - parseFloat(p.prix_fournisseur)).toLocaleString('fr-FR'));
     if (p.photo) {
         $('#photoPreviewContainer').html(`<img src="data:${p.type_photo||'image/jpeg'};base64,${p.photo}" class="preview-img">`);
+    } else {
+        $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>');
     }
-    $('.selectpicker').selectpicker('refresh');
     produitModal.show();
 });
 <?php endif; ?>
@@ -1027,11 +1104,17 @@ $(document).on('click', '.deleteBtn', function() {
     $('#deleteFormId').val(code);
     deleteModal.show();
 });
+$('#deleteForm').on('submit', function() {
+    const f = filtresActuels();
+    $('#deleteFormCategorieFilter').val(f.categorie_filter);
+    $('#deleteFormEtatFilter').val(f.etat_filter);
+    $('#deleteFormSearch').val(f.search);
+});
 
 // Auto-close alertes
 setTimeout(() => $('.alert').alert('close'), 5000);
 
-// Init selectpicker
+// Init selectpicker (une seule fois au chargement)
 $(document).ready(() => $('.selectpicker').selectpicker());
 </script>
 </body>

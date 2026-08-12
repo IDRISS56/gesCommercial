@@ -1,10 +1,5 @@
 <?php
-require __DIR__ . '/../../databases/database.php';
-
-if (!isset($_SESSION['user_id'])) {
-    header('Location: ../utilisateur/login');
-    exit;
-}
+require 'databases/database.php';
 
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
@@ -35,6 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
         $messageType = 'danger';
     } else {
         $numero_facture = trim($_POST['numero_facture'] ?? '');
+        $client_id = trim($_POST['client_id'] ?? '');
         $montant = floatval(str_replace(',', '.', $_POST['montant'] ?? 0));
         $mode_reglement = trim($_POST['mode_reglement'] ?? 'Espece');
         $numero_reglement = trim($_POST['numero_reglement'] ?? '');
@@ -56,12 +52,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
 
             $pdo->beginTransaction();
 
-            $stmt = $pdo->prepare("SELECT * FROM facture WHERE numero_facture = ? AND type_facture = 'Client' FOR UPDATE");
-            $stmt->execute([$numero_facture]);
-            $facture = $stmt->fetch(PDO::FETCH_ASSOC);
-            if (!$facture) throw new Exception("Facture introuvable.");
-            if ($facture['statut_facture'] !== 'Validee') throw new Exception("Seule une facture validée peut recevoir un règlement.");
-            if ($montant > floatval($facture['reste'])) throw new Exception("Le montant dépasse le reste à payer (" . fmt($facture['reste']) . " F).");
+            // Deux cas : un règlement sur une facture précise, OU un versement
+            // sans facture (le client ne doit rien pour l'instant mais veut
+            // payer d'avance). Dans les deux cas, le montant s'applique d'abord
+            // aux éventuelles factures impayées/partielles du client (la
+            // sélectionnée en premier s'il y en a une, puis les autres de la
+            // plus ancienne à la plus récente), et le reliquat part en avance
+            // sur son solde (contact.solde_contact).
+            $facture = null;
+            if (!empty($numero_facture)) {
+                $stmt = $pdo->prepare("SELECT * FROM facture WHERE TRIM(numero_facture) = TRIM(?) AND type_facture = 'Client' FOR UPDATE");
+                $stmt->execute([$numero_facture]);
+                $facture = $stmt->fetch(PDO::FETCH_ASSOC);
+                if (!$facture) throw new Exception("Facture introuvable (numéro reçu : \"" . $numero_facture . "\"). Vérifiez qu'une facture est bien sélectionnée dans la liste.");
+                if ($facture['statut_facture'] !== 'Validee') throw new Exception("Seule une facture validée peut recevoir un règlement.");
+                $client_id = $facture['contact_id'];
+            } else {
+                if (empty($client_id)) throw new Exception("Veuillez sélectionner un client.");
+                $stmtC = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ? AND type_contact = 'Client' FOR UPDATE");
+                $stmtC->execute([$client_id]);
+                if (!$stmtC->fetch()) throw new Exception("Client introuvable.");
+            }
 
             $stmt = $pdo->prepare("SELECT * FROM caisse WHERE statut = 'Actif' AND (boutique_id = ? OR boutique_id IS NULL) ORDER BY boutique_id IS NULL LIMIT 1 FOR UPDATE");
             $stmt->execute([$user['boutique_id']]);
@@ -75,17 +86,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
             $soldeAvant = floatval($caisse['solde']);
             $soldeApres = $soldeAvant + $montant;
             $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
+            $objetTransaction = $facture ? 'Règlement facture client' : 'Avance / versement client';
 
             $stmtTr = $pdo->prepare("INSERT INTO transaction
                 (numero_transaction, date_transaction, heure_transaction, montant_transaction,
                  frais_transaction, montant_total, type_transaction, objet_transaction,
                  caisse_id, facture_id, mode_reglement, numero_reglement, reference_reglement,
                  utilisateur_id, etat_transaction)
-                VALUES (?, ?, CURTIME(), ?, 0, ?, 'Entree', 'Règlement facture client',
+                VALUES (?, ?, CURTIME(), ?, 0, ?, 'Entree', ?,
                         ?, ?, ?, ?, ?, ?, 'Succes')");
             $stmtTr->execute([
-                $numTrans, $date_reglement, $montant, $montant,
-                $caisse['caisse_id'], $numero_facture, $mode_reglement_mapped,
+                $numTrans, $date_reglement, $montant, $montant, $objetTransaction,
+                $caisse['caisse_id'], ($facture ? $numero_facture : null), $mode_reglement_mapped,
                 $numero_reglement, $reference_reglement, $user['id']
             ]);
 
@@ -93,16 +105,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
             $stmtMaj->execute([$soldeApres, $caisse['caisse_id']]);
             if ($stmtMaj->rowCount() === 0) throw new Exception("La mise à jour du solde de la caisse n'a affecté aucune ligne (caisse devenue inactive entre-temps ?).");
 
-            $nouvelleAvance = floatval($facture['avance']) + $montant;
-            $nouveauReste = round(floatval($facture['montant_ttc']) - $nouvelleAvance, 2);
-            if ($nouveauReste < 0) $nouveauReste = 0;
-            $nouvelEtat = ($nouveauReste <= 0) ? 'Payee' : (($nouvelleAvance > 0) ? 'Partielle' : 'Impayee');
+            // Ce que ce règlement rembourse sur la facture SÉLECTIONNÉE (s'il y en a
+            // une) est calculé puis plafonné à son reste. Le reliquat — surplus sur
+            // la facture sélectionnée, ou montant total s'il n'y avait pas de facture
+            // — est ensuite automatiquement affecté aux AUTRES factures impayées/
+            // partielles de ce même client, de la plus ancienne à la plus récente,
+            // jusqu'à épuisement — chacune passant à son tour à Payée (si totalement
+            // couverte) ou Partielle (si couverte en partie). Ce qui n'est absorbé
+            // par aucune facture part en avance sur le solde global du client
+            // (contact.solde_contact, cf. plus bas).
+            $autresFacturesSoldees = 0;
+            $surplus = $montant;
 
-            $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
-                ->execute([$nouvelleAvance, $nouveauReste, $nouvelEtat, $numero_facture]);
+            if ($facture) {
+                $avanceAvant = floatval($facture['avance']);
+                $nouvelleAvance = min($avanceAvant + $montant, floatval($facture['montant_ttc']));
+                $montantApplique = $nouvelleAvance - $avanceAvant;
+                $nouveauReste = round(floatval($facture['montant_ttc']) - $nouvelleAvance, 2);
+                if ($nouveauReste < 0) $nouveauReste = 0;
+                $nouvelEtat = ($nouveauReste <= 0) ? 'Payee' : (($nouvelleAvance > 0) ? 'Partielle' : 'Impayee');
+
+                $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
+                    ->execute([$nouvelleAvance, $nouveauReste, $nouvelEtat, $numero_facture]);
+
+                $surplus = round($montant - $montantApplique, 2);
+            }
+
+            if ($surplus > 0) {
+                $stmtAutres = $pdo->prepare("SELECT * FROM facture
+                                              WHERE type_facture = 'Client' AND contact_id = ?
+                                                AND numero_facture <> ? AND categorie_facture <> 'Avoir'
+                                                AND statut_facture = 'Validee' AND etat_facture IN ('Impayee','Partielle')
+                                              ORDER BY date_facture ASC, numero_facture ASC
+                                              FOR UPDATE");
+                $stmtAutres->execute([$client_id, $numero_facture]);
+                $autresFactures = $stmtAutres->fetchAll(PDO::FETCH_ASSOC);
+
+                foreach ($autresFactures as $autre) {
+                    if ($surplus <= 0) break;
+                    $resteAvantAutre = floatval($autre['reste']);
+                    $montantApplicable = min($surplus, $resteAvantAutre);
+                    if ($montantApplicable <= 0) continue;
+
+                    $nouvelleAvanceAutre = round(floatval($autre['avance']) + $montantApplicable, 2);
+                    $nouveauResteAutre = round(floatval($autre['montant_ttc']) - $nouvelleAvanceAutre, 2);
+                    if ($nouveauResteAutre < 0) $nouveauResteAutre = 0;
+                    $nouvelEtatAutre = ($nouveauResteAutre <= 0) ? 'Payee' : 'Partielle';
+
+                    $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
+                        ->execute([$nouvelleAvanceAutre, $nouveauResteAutre, $nouvelEtatAutre, $autre['numero_facture']]);
+
+                    $autresFacturesSoldees++;
+                    $surplus = round($surplus - $montantApplicable, 2);
+                }
+            }
+
+            // SOLDE DU CONTACT (compte client) : on retire le montant total versé.
+            // Convention :
+            //   solde_contact > 0 => le client doit encore ce montant
+            //   solde_contact < 0 => le client est en avance (avoir à valoir)
+            // S'il ne devait rien du tout, ce versement rend directement son solde
+            // négatif : c'est exactement l'avance qu'il souhaite constituer.
+            $pdo->prepare("SELECT solde_contact FROM contact WHERE code_contact = ? FOR UPDATE")
+                ->execute([$client_id]);
+            $pdo->prepare("UPDATE contact SET solde_contact = solde_contact - ? WHERE code_contact = ?")
+                ->execute([$montant, $client_id]);
 
             $pdo->commit();
             $message = "Règlement de " . fmt($montant) . " F enregistré avec succès.";
+            if ($autresFacturesSoldees > 0) {
+                $message .= " Le surplus a mis à jour " . $autresFacturesSoldees . " autre(s) facture(s) du client.";
+            } elseif (!$facture) {
+                $message .= " Ce montant a été enregistré comme avance sur le compte du client.";
+            }
             $messageType = 'success';
         } catch (Exception $ex) {
             if ($pdo->inTransaction()) $pdo->rollBack();
@@ -115,11 +190,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
 // ============================================================
 // RÉCUPÉRATION DES DONNÉES
 // ============================================================
-$stmt = $pdo->prepare("SELECT code_contact, nom_prenom_contact FROM contact WHERE type_contact = 'Client' AND etat_contact = 'Actif' ORDER BY nom_prenom_contact");
+$stmt = $pdo->prepare("SELECT code_contact, nom_prenom_contact, solde_contact FROM contact WHERE type_contact = 'Client' AND etat_contact = 'Actif' ORDER BY nom_prenom_contact");
 $stmt->execute();
 $clients = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// ✅ REQUÊTE CORRIGÉE : uniquement factures VALIDÉES + IMPAYÉES/PARTIELLES
 $stmt = $pdo->prepare("SELECT f.numero_facture, f.date_facture, f.montant_ttc, f.avance, f.reste, f.etat_facture, f.statut_facture, c.nom_prenom_contact, c.code_contact
                        FROM facture f
                        LEFT JOIN contact c ON c.code_contact = f.contact_id
@@ -135,6 +209,8 @@ $factures_json = json_encode($factures_clients);
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Règlement Facture Client</title>
@@ -168,6 +244,7 @@ $factures_json = json_encode($factures_clients);
         .champ-lecture { background: var(--bg) !important; font-weight: 700; color: var(--dk); }
         .montant-du { color: var(--suc) !important; }
         .reste-a-payer { color: var(--dng) !important; }
+        .reste-a-payer.reste-negatif { color: var(--suc) !important; }
         .btn-valider { background: var(--suc); color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13px; font-weight: 700; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
         .btn-valider:hover:not(:disabled) { background: #059669; }
         .btn-valider:disabled { opacity: .5; cursor: not-allowed; }
@@ -215,23 +292,25 @@ $factures_json = json_encode($factures_clients);
                     <select class="form-select selectpicker" id="selectClient" data-live-search="true" data-live-search-placeholder="Rechercher un client..." required>
                         <option value="">-- Sélectionner un client --</option>
                         <?php foreach ($clients as $c): ?>
-                            <option value="<?= e($c['code_contact']) ?>" data-nom="<?= e($c['nom_prenom_contact']) ?>"><?= e($c['nom_prenom_contact']) ?></option>
+                            <option value="<?= e($c['code_contact']) ?>" data-nom="<?= e($c['nom_prenom_contact']) ?>" data-solde="<?= e($c['solde_contact']) ?>"><?= e($c['nom_prenom_contact']) ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div class="col-md-6">
-                    <label class="form-label">Facture</label>
-                    <select class="form-select selectpicker" id="selectFacture" data-live-search="true" data-live-search-placeholder="Rechercher une facture..." required disabled>
+                    <label class="form-label">Facture <span style="font-weight:400; text-transform:none;">(facultatif)</span></label>
+                    <select class="form-select selectpicker" id="selectFacture" data-live-search="true" data-live-search-placeholder="Rechercher une facture..." disabled>
                         <option value="">-- Sélectionner d'abord un client --</option>
                     </select>
+                    <div class="help-text">Laissez sur « Aucune facture » pour un simple versement d'avance si le client ne doit rien.</div>
                 </div>
             </div>
+            <input type="hidden" name="client_id" id="clientId">
 
             <hr style="border-color: var(--brd); margin: 20px 0;">
 
             <div class="row g-3 mb-3">
                 <div class="col-md-6">
-                    <label class="form-label">Montant dû</label>
+                    <label class="form-label">Solde client</label>
                     <input type="text" class="form-control champ-lecture montant-du" id="montantDu" value="0 F" readonly>
                 </div>
                 <div class="col-md-6">
@@ -289,77 +368,102 @@ $factures_json = json_encode($factures_clients);
 <script>
 const facturesData = <?= $factures_json ?>;
 
-$(document).ready(function() {
+$(document).ready(function () {
     $('.selectpicker').selectpicker();
 
-    const selectClient = document.getElementById('selectClient');
-    const selectFacture = document.getElementById('selectFacture');
-    const montantDuEl = document.getElementById('montantDu');
+    const selectFacture  = document.getElementById('selectFacture');
+    const montantDuEl    = document.getElementById('montantDu');
     const montantVerseEl = document.getElementById('montantVerse');
-    const resteAPayerEl = document.getElementById('resteAPayer');
-    const btnValider = document.getElementById('btnValider');
-    let montantDuValue = 0;
+    const resteAPayerEl  = document.getElementById('resteAPayer');
+    const btnValider     = document.getElementById('btnValider');
+    let soldeClientValue = 0;
 
-    $('#selectClient').on('changed.bs.select', function() {
-        const clientCode = this.value;
-        selectFacture.innerHTML = '<option value="">-- Sélectionner une facture --</option>';
-        montantDuValue = 0;
-        updateCalculs();
+    // ============================================================
+    // ✅ CONTOURNEMENT BUG bootstrap-select 1.14.0-beta3 :
+    //    refresh() duplique les options -> on utilise destroy + re-init
+    // ============================================================
+    function reinit($sel) {
+        if ($sel.data('selectpicker')) {
+            $sel.selectpicker('destroy');
+        }
+        $sel.selectpicker(); // relit les data-* (live-search, placeholder...)
+    }
+
+    // Reconstruction complète du select Facture selon le client choisi.
+    // Une option "Aucune facture" est toujours proposée en premier : elle
+    // permet un versement d'avance même si le client ne doit rien pour
+    // l'instant (ou en plus des factures en cours, en supplément).
+    function rebuildFactures(clientCode) {
+        const $sf = $('#selectFacture');
+        $sf.empty();
 
         if (!clientCode) {
-            $('#selectFacture').selectpicker('refresh');
-            $('#selectFacture').prop('disabled', true);
-            return;
+            $sf.append('<option value="">-- Sélectionner d\'abord un client --</option>');
+            $sf.prop('disabled', true);
+        } else {
+            $sf.append('<option value="">Aucune facture — Versement en avance</option>');
+            const facturesClient = facturesData.filter(f => f.code_contact === clientCode);
+            facturesClient.forEach(f => {
+                const opt = document.createElement('option');
+                opt.value = f.numero_facture;
+                opt.textContent = f.numero_facture + ' — ' + fmt2(f.montant_ttc) + ' F (Reste: ' + fmt2(f.reste) + ' F) — ' + f.etat_facture;
+                opt.dataset.reste = f.reste;
+                opt.dataset.montant = f.montant_ttc;
+                $sf[0].appendChild(opt);
+            });
+            $sf.prop('disabled', false);
         }
 
-        const facturesClient = facturesData.filter(f => f.code_contact === clientCode);
-        if (facturesClient.length === 0) {
-            selectFacture.innerHTML = '<option value="">Aucune facture validée impayée</option>';
-            $('#selectFacture').selectpicker('refresh');
-            $('#selectFacture').prop('disabled', true);
-            return;
-        }
+        reinit($sf); // ⛔ JAMAIS selectpicker('refresh') avec la beta3
+        updateCalculs();
+    }
 
-        facturesClient.forEach(f => {
-            const opt = document.createElement('option');
-            opt.value = f.numero_facture;
-            opt.textContent = `${f.numero_facture} — ${fmt2(f.montant_ttc)} F (Reste: ${fmt2(f.reste)} F) — ${f.etat_facture}`;
-            opt.dataset.reste = f.reste;
-            opt.dataset.montant = f.montant_ttc;
-            selectFacture.appendChild(opt);
-        });
-
-        $('#selectFacture').prop('disabled', false);
-        $('#selectFacture').selectpicker('refresh');
+    $('#selectClient').on('changed.bs.select', function () {
+        soldeClientValue = parseFloat(this.selectedOptions[0]?.dataset.solde || 0);
+        montantDuEl.value = fmt2(soldeClientValue) + ' F';
+        document.getElementById('clientId').value = this.value;
+        rebuildFactures(this.value);
     });
 
-    $('#selectFacture').on('changed.bs.select', function() {
+    $('#selectFacture').on('changed.bs.select', function () {
         const reste = parseFloat(this.selectedOptions[0]?.dataset.reste || 0);
-        montantDuValue = reste;
         document.getElementById('numeroFacture').value = this.value;
-        montantDuEl.value = fmt2(montantDuValue) + ' F';
-        montantVerseEl.value = montantDuValue;
+        if (this.value) montantVerseEl.value = reste;
         updateCalculs();
     });
 
     $('#montantVerse').on('input', updateCalculs);
 
+    // Filet de sécurité : quel que soit l'état de l'événement changed.bs.select,
+    // on resynchronise les champs cachés depuis la vraie valeur des <select>
+    // juste avant l'envoi du formulaire (les <select> natifs reflètent toujours
+    // le choix fait dans le picker, même si notre propre listener n'a pas été
+    // déclenché).
+    $('#formReglement').on('submit', function () {
+        document.getElementById('numeroFacture').value = selectFacture.value;
+        document.getElementById('clientId').value = document.getElementById('selectClient').value;
+    });
+
     function updateCalculs() {
         const verse = parseFloat(montantVerseEl.value) || 0;
-        let reste = montantDuValue - verse;
-        if (reste < 0) reste = 0;
-        resteAPayerEl.value = fmt2(reste) + ' F';
-        btnValider.disabled = !(selectFacture.value && verse > 0);
+        const reste = soldeClientValue - verse;
+        resteAPayerEl.value = fmt2(reste) + ' F' + (reste > 0 ? ' (client doit)' : (reste < 0 ? ' (client en avance)' : ' (soldé)'));
+        resteAPayerEl.classList.toggle('reste-negatif', reste < 0);
+        // La facture est facultative : un client peut verser une avance sans
+        // en sélectionner une (il ne doit rien, ou verse plus que son dû).
+        btnValider.disabled = !(document.getElementById('selectClient').value && verse > 0);
     }
 
-    window.resetForm = function() {
+    window.resetForm = function () {
         document.getElementById('formReglement').reset();
-        selectFacture.innerHTML = '<option value="">-- Sélectionner d\'abord un client --</option>';
-        $('#selectFacture').selectpicker('refresh');
-        $('#selectFacture').prop('disabled', true);
-        $('#selectClient').selectpicker('val', '');
+        rebuildFactures('');
+        const $sc = $('#selectClient');
+        $sc.val('');
+        reinit($sc); // remet à jour le bouton affiché du client
         document.getElementById('numeroFacture').value = '';
-        montantDuValue = 0;
+        document.getElementById('clientId').value = '';
+        soldeClientValue = 0;
+        montantDuEl.value = '0 F';
         updateCalculs();
     };
 });

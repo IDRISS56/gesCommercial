@@ -4,7 +4,7 @@ class facture
     // Suivi et enregistrement des règlements des factures CLIENTS
     public function reglementClient()
     {
-        requirePermission(['Administrateur', 'Superviseur', 'Vendeur', 'Caisse']);
+        requirePermission(['Administrateur', 'Superviseur', 'Caisse']);
         include "views/facture/reglement_client.php";
     }
 
@@ -20,4 +20,18 @@ class facture
         requirePermission(['Administrateur', 'Superviseur',  'Caisse', 'Vendeur']);
         include "views/facture/bon_livraison.php";
     }
+
+    // Émission des avoirs clients
+    // public function avoirClient()
+    // {
+    //     requirePermission(['Administrateur', 'Superviseur', 'Vendeur', 'Caisse']);
+    //     include "views/facture/avoir_client.php";
+    // }
+
+    // Émission des avoirs fournisseurs
+    // public function avoirFournisseur()
+    // {
+    //     requirePermission(['Administrateur', 'Superviseur', 'Caisse']);
+    //     include "views/facture/avoir_fournisseur.php";
+    // }
 }

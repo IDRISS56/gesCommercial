@@ -107,11 +107,11 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $pdf->Cell(130, 5, 'Facture : ' . ($bon['facture_id'] ?? ''), 0, 1, 'L');
     $pdf->SetX(10);
     $pdf->Cell(130, 5, 'Statut : ' . ($bon['statut'] ?? ''), 0, 1, 'L');
-    $pdf->Ln(4);
-    $pdf->SetDrawColor(0, 0, 0);
-    $pdf->SetLineWidth(0.3);
-    $pdf->Line(10, $pdf->GetY(), 200, $pdf->GetY());
-    $pdf->Ln(6);
+    $pdf->Ln(10);
+    // $pdf->SetDrawColor(0, 0, 0);
+    // $pdf->SetLineWidth(0.3);
+    // $pdf->Line(10, $pdf->GetY(), 200, $pdf->GetY());
+    // $pdf->Ln(6);
 
     $yBandeau = $pdf->GetY();
     $pdf->SetFillColor($navy[0], $navy[1], $navy[2]);
@@ -127,6 +127,8 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $pdf->SetFillColor($grey[0], $grey[1], $grey[2]);
     $pdf->SetXY(10, $yBoxes);
     $pdf->MultiCell(90, 5.5, $nomBoutique, 0, 'L', true);
+    $pdf->SetFont('Arial', '', 10);
+    $pdf->MultiCell(90, 3.3, 'Distribution de Pièces Détachées de Motos et Moto', 0, 'L', true);
     $yExpAfterNom = $pdf->GetY();
     $pdf->SetFont('Arial', '', 9);
     $pdf->SetXY(10, $yExpAfterNom);
@@ -150,7 +152,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $pdf->SetFont('Arial', 'B', 8);
     $pdf->Cell($widths['ref'], 7, 'REF.', 0, 0, 'C', true);
     $pdf->Cell($widths['design'], 7, 'DESIGNATION', 0, 0, 'C', true);
-    $pdf->Cell($widths['lot'], 7, 'LOT/UNITE', 0, 0, 'C', true);
+    $pdf->Cell($widths['lot'], 7, 'CARTON/UNITE', 0, 0, 'C', true);
     $pdf->Cell($widths['qte'], 7, 'QUANTITE', 0, 0, 'C', true);
     $pdf->Cell($widths['livreur'], 7, 'LIVREUR', 0, 0, 'C', true);
     $pdf->Cell($widths['controleur'], 7, 'CONTROLEUR', 0, 0, 'C', true);
@@ -163,14 +165,15 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     foreach ($commandes as $cmd) {
         $ref = $cmd['reference_produit'] ?? '';
         $designation = $cmd['titre_produit'] ?? '';
-        $produitsParLot = intval($cmd['produits_par_lot'] ?? 0);
-        $libelleLot = !empty($cmd['libelle_lot']) ? $cmd['libelle_lot'] : ($produitsParLot > 0 ? $produitsParLot . '/lot' : 'Unite');
-        if ($produitsParLot > 0) {
+        $produitsParLot = intval($cmd['produits_par_lot'] ?? 1);
+        if ($produitsParLot > 1) {
+            $libelleLot = !empty($cmd['libelle_lot']) ? $cmd['libelle_lot'] : 'Carton';
             $nombreLots = intdiv($cmd['quantite_commande'], $produitsParLot);
             $reste = $cmd['quantite_commande'] % $produitsParLot;
-            $qteAffichee = $reste > 0 ? ($nombreLots . ' lot(s) et ' . $reste . ' produit(s)') : ($nombreLots . ' lot(s)');
+            $qteAffichee = $reste > 0 ? ($nombreLots . ' ' . $libelleLot . '(s) et ' . $reste . ' Pièce(s)') : ($nombreLots . ' ' . $libelleLot . '(s)');
         } else {
-            $qteAffichee = (string)$cmd['quantite_commande'];
+            $libelleLot = 'Unité';
+            $qteAffichee = $cmd['quantite_commande'] . ' Pièce(s)';
         }
         $totalBase += $cmd['quantite_commande'];
         $nbLines = max(1, ceil(strlen($designation) / 22));
@@ -204,7 +207,8 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
         $pdf->SetFont('Arial', '', 9);
         $pdf->MultiCell(0, 5, $bon['commentaire'], 0, 'L');
     }
-    $pdf->Output('I', 'Bon_Livraison_' . $id . '.pdf');
+    $modePdf = (isset($_POST['mode']) && $_POST['mode'] === 'D') ? 'D' : 'I';
+    $pdf->Output($modePdf, 'Bon_Livraison_' . $id . '.pdf');
     exit;
 }
 
@@ -332,6 +336,8 @@ $livres = count(array_filter($bons, fn($b) => $b['statut'] === 'Livré'));
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bons de Livraison</title>
@@ -731,16 +737,13 @@ $livres = count(array_filter($bons, fn($b) => $b['statut'] === 'Livré'));
                 </div>
                 <div class="bc-bottom">
                     <button class="icon-btn view voir-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="Voir détails" title="Voir détails"><i class="bi bi-eye"></i></button>
-                    <?php if (!$isLocked): ?>
-                    <button class="icon-btn edit modifier-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="Modifier" title="Modifier"><i class="bi bi-pencil-square"></i></button>
-                    <?php else: ?>
-                    <button class="icon-btn edit" disabled data-tooltip="Verrouillé" title="Verrouillé (facture payée)" style="opacity:0.4;cursor:not-allowed;"><i class="bi bi-lock-fill"></i></button>
-                    <?php endif; ?>
                     <button class="icon-btn pdf pdf-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="PDF" title="PDF"><i class="bi bi-file-pdf"></i></button>
+                    <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur'): ?>
                     <?php if (!$isLocked): ?>
                     <button class="icon-btn delete supprimer-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="Supprimer" title="Supprimer"><i class="bi bi-trash"></i></button>
                     <?php else: ?>
                     <button class="icon-btn delete" disabled data-tooltip="Verrouillé" title="Verrouillé (facture payée)" style="opacity:0.4;cursor:not-allowed;"><i class="bi bi-lock-fill"></i></button>
+                    <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
@@ -764,9 +767,12 @@ $livres = count(array_filter($bons, fn($b) => $b['statut'] === 'Livré'));
                 </div>
             </div>
             <div class="modal-footer">
+                <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur'): ?>
                 <button class="btn-chic btn-chic-modifier" id="btnModifier"><i class="bi bi-pencil-square"></i><span>Modifier</span></button>
+                <?php endif; ?>
                 <button class="btn-chic btn-chic-imprimer" id="btnImprimer"><i class="bi bi-printer-fill"></i><span>Imprimer PDF</span></button>
-                <button class="btn-chic btn-chic-partager" id="btnPartager"><i class="bi bi-whatsapp"></i><span>Partager</span></button>
+                <button class="btn-chic btn-chic-imprimer" id="btnTelecharger"><i class="bi bi-download"></i><span>Télécharger PDF</span></button>
+                <button class="btn-chic btn-chic-partager" hidden id="btnPartager"><i class="bi bi-whatsapp"></i><span>Partager</span></button>
                 <button class="btn-chic btn-chic-fermer" data-bs-dismiss="modal"><i class="bi bi-x-lg"></i><span>Fermer</span></button>
             </div>
         </div>
@@ -904,23 +910,32 @@ $(document).ready(function() {
         }
     });
 
+    function submitBonPdfPost(id, mode, targetSelf) {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = baseUrl;
+        if (targetSelf) form.target = '_self';
+        const addField = (name, value) => {
+            const input = document.createElement('input');
+            input.type = 'hidden'; input.name = name; input.value = value;
+            form.appendChild(input);
+        };
+        addField('action', 'pdf');
+        addField('id', id);
+        addField('mode', mode);
+        document.body.appendChild(form);
+        form.submit();
+        form.remove();
+    }
+
     $('#btnImprimer').click(function() {
         const id = $('#bonDetails').data('bon-id');
-        if (id) {
-            const form = document.createElement('form');
-            form.method = 'POST';
-            form.action = baseUrl;
-            form.target = '_self';
-            const input = document.createElement('input');
-            input.type = 'hidden'; input.name = 'action'; input.value = 'pdf';
-            form.appendChild(input);
-            const input2 = document.createElement('input');
-            input2.type = 'hidden'; input2.name = 'id'; input2.value = id;
-            form.appendChild(input2);
-            document.body.appendChild(form);
-            form.submit();
-            form.remove();
-        }
+        if (id) submitBonPdfPost(id, 'I', true);
+    });
+
+    $('#btnTelecharger').click(function() {
+        const id = $('#bonDetails').data('bon-id');
+        if (id) submitBonPdfPost(id, 'D', false);
     });
 
     $('#btnPartager').click(async function() {

@@ -44,9 +44,16 @@ if (!function_exists('requirePermission')) {
         checkAccessConditions();
         
         if (!userHasPermission($rolesAutorises)) {
+            $pwaProtocol = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' && $_SERVER['HTTPS'] !== '') ? 'https://' : 'http://';
+            $pwaBase = $pwaProtocol . $_SERVER['HTTP_HOST'] . rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
             echo '<!DOCTYPE html>
             <html lang="fr">
             <head>
+                <link rel="manifest" href="' . $pwaBase . '/manifest.json">
+                <meta name="theme-color" content="#5ba140">
+                <meta name="mobile-web-app-capable" content="yes">
+                <meta name="apple-mobile-web-app-capable" content="yes">
+                <link rel="apple-touch-icon" href="' . $pwaBase . '/assets/icons/apple-touch-icon.png">
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <title>Accès Refusé</title>

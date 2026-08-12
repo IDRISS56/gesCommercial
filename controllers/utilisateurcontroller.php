@@ -5,7 +5,7 @@ class utilisateur
 {
     public function gestion()
     {
-        requirePermission(['Administrateur', 'Superviseur','Proprietaire']);
+        requirePermission(['Administrateur', 'Superviseur']);
         include "views/utilisateur/index.php";
     }
     public function login()
@@ -14,7 +14,7 @@ class utilisateur
     }
     public function profil()
     {
-        requirePermission(['Administrateur', 'Superviseur','Proprietaire']);
+        // requirePermission(['Administrateur', 'Superviseur','Proprietaire']);
         include "views/utilisateur/profil.php";
     }
     public function deconnexion()

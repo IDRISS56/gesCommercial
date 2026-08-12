@@ -2,27 +2,14 @@
 ob_start();
 require 'databases/database.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: utilisateur/login');
-    exit;
-}
-
-$stmt = $pdo->prepare("SELECT id, nom_prenom, role FROM utilisateur WHERE id = ? AND etat = 'Actif'");
-$stmt->execute([$_SESSION['user_id']]);
-$user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-if (!$user) {
-    session_destroy();
-    header('Location: utilisateur/login');
-    exit;
-}
-
 function e($str) {
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
 }
 
 $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
-$roles = ['Superviseur', 'Proprietaire', 'Caisse', 'Vendeur', 'Administrateur'];
+
+// ===== EXCLURE LE RÔLE ADMINISTRATEUR =====
+$roles = ['Superviseur', 'Caisse', 'Vendeur']; // Administrateur retiré
 $sexes = ['Masculin', 'Feminin'];
 $etats = ['Actif', 'Inactif'];
 
@@ -70,6 +57,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (empty($nom_prenom)) $errors[] = 'Le nom est requis.';
             if (empty($login)) $errors[] = 'Le login est requis.';
             if (empty($role)) $errors[] = 'Le rôle est requis.';
+            
+            // Empêcher la création/modification d'un utilisateur avec le rôle Administrateur
+            if ($role === 'Administrateur') {
+                $errors[] = "Le rôle Administrateur n'est pas autorisé.";
+            }
             
             if (($role === 'Vendeur' || $role === 'Caisse') && empty($boutique_id)) {
                 $errors[] = "La boutique est obligatoire pour le rôle $role.";
@@ -147,14 +139,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
 $csrf_token = $_SESSION['csrf_token'];
 
 function getTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
+    // Exclure les administrateurs de la liste
     $sql = "SELECT u.*, b.nom_boutique
             FROM utilisateur u
             LEFT JOIN boutique b ON u.boutique_id = b.code_boutique
-            WHERE 1=1";
+            WHERE u.role != 'Administrateur'";
     $params = [];
     
     if (!empty($search)) {
@@ -182,8 +177,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
     $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
     ob_start();
-    if (empty($users)):
-    ?>
+    if (empty($users)): ?>
     <tr><td colspan="10" class="text-center py-5 text-muted"><i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>Aucun utilisateur trouvé</td></tr>
     <?php else: foreach ($users as $u): ?>
     <tr>
@@ -211,8 +205,7 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
     $tableHtml = ob_get_clean();
     
     ob_start();
-    if ($totalPages > 1):
-    ?>
+    if ($totalPages > 1): ?>
     <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-top bg-light">
         <span class="text-muted small">Affichage de <?= (($page - 1) * $perPage + 1) ?> à <?= min($page * $perPage, $total) ?> sur <?= $total ?></span>
         <nav><ul class="pagination pagination-sm mb-0">
@@ -249,9 +242,10 @@ if ($action === 'load_edit' && isset($_POST['edit_id'])) {
     $editUser = $stmt->fetch(PDO::FETCH_ASSOC);
 }
 
-$totalUsers = $pdo->query("SELECT COUNT(*) FROM utilisateur")->fetchColumn();
-$actifs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE etat = 'Actif'")->fetchColumn();
-$inactifs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE etat = 'Inactif'")->fetchColumn();
+// Statistiques excluant les administrateurs
+$totalUsers = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role != 'Administrateur'")->fetchColumn();
+$actifs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE etat = 'Actif' AND role != 'Administrateur'")->fetchColumn();
+$inactifs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE etat = 'Inactif' AND role != 'Administrateur'")->fetchColumn();
 $vendeurs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role = 'Vendeur'")->fetchColumn();
 $caisses = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role = 'Caisse'")->fetchColumn();
 $superviseurs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role = 'Superviseur'")->fetchColumn();
@@ -259,6 +253,8 @@ $superviseurs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role = 'Supe
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gestion des utilisateurs</title>
@@ -289,14 +285,12 @@ body { font-family: 'Inter', sans-serif; background: var(--bg-body); color: var(
 h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; letter-spacing: -0.02em; }
 .W { max-width: 1400px; margin: 0 auto; }
 
-/* ===== STATS ===== */
 .stat-card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 14px 16px; transition: var(--transition-base); }
 .stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
 .stat-icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; }
 .stat-label { font-size: 10px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
 .stat-value { font-size: 18px; font-weight: 800; color: var(--text-primary); font-family: 'Outfit', sans-serif; line-height: 1; }
 
-/* ===== TABLE ===== */
 .data-table-wrap { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: var(--radius-sm); overflow: hidden; box-shadow: var(--shadow-sm); animation: fadeUp .4s ease both; }
 .table { margin: 0; }
 .table thead th { background: var(--color-gray-100); color: var(--text-tertiary); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; padding: 12px 14px; border-bottom: 2px solid var(--border-color); }
@@ -305,14 +299,12 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
 .table tbody td { padding: 12px 14px; vertical-align: middle; color: var(--text-primary); font-size: 13px; }
 .td-bold { color: var(--text-primary) !important; font-weight: 700; }
 
-/* ===== STATUS BADGE ===== */
 .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
 .status-badge .sdot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 2s infinite; }
 .status-badge.on { background: var(--color-success-soft); color: #065f46; }
 .status-badge.off { background: var(--color-danger-soft); color: #991b1b; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-/* ===== ACTION BUTTONS ===== */
 .act-btn { width: 32px; height: 32px; border-radius: 6px; border: 1.5px solid transparent; background: transparent; display: inline-flex; align-items: center; justify-content: center; transition: all .2s; font-size: 14px; cursor: pointer; padding: 0; }
 .act-btn:hover { transform: scale(1.1); }
 .act-btn.e { color: var(--color-warning); border-color: rgba(245, 158, 11, 0.2); }
@@ -320,7 +312,6 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
 .act-btn.d { color: var(--color-danger); border-color: rgba(239, 68, 68, 0.2); }
 .act-btn.d:hover { color: #b91c1c; background: var(--color-danger-soft); border-color: var(--color-danger); }
 
-/* ===== BUTTONS ===== */
 .btn-chic { padding: 10px 18px; border-radius: 10px; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 8px; border: none; cursor: pointer; transition: all .25s cubic-bezier(0.4, 0, 0.2, 1); position: relative; overflow: hidden; letter-spacing: -0.01em; }
 .btn-chic::before { content: ''; position: absolute; top: 50%; left: 50%; width: 0; height: 0; background: rgba(255,255,255,0.3); border-radius: 50%; transform: translate(-50%, -50%); transition: width .4s, height .4s; }
 .btn-chic:hover::before { width: 300px; height: 300px; }
@@ -331,22 +322,9 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
 .btn-go-outline { background: transparent; color: var(--text-tertiary); border: 1.5px solid var(--border-color); padding: 7px 14px; border-radius: 8px; font-size: 12px; font-weight: 600; transition: all .2s; cursor: pointer; }
 .btn-go-outline:hover { background: var(--color-gray-100); border-color: var(--color-gray-300); }
 
-/* ===== MODAL CHIC - STRUCTURE CORRIGÉE ===== */
-.modal-chic .modal-content {
-    border: none !important;
-    border-radius: 20px !important;
-    box-shadow: 0 25px 60px rgba(15, 23, 42, 0.15) !important;
-    overflow: hidden !important;
-    animation: modalSlideIn .4s cubic-bezier(0.16, 1, 0.3, 1);
-    display: flex !important;
-    flex-direction: column !important;
-    max-height: 90vh !important;
-}
+.modal-chic .modal-content { border: none !important; border-radius: 20px !important; box-shadow: 0 25px 60px rgba(15, 23, 42, 0.15) !important; overflow: hidden !important; animation: modalSlideIn .4s cubic-bezier(0.16, 1, 0.3, 1); display: flex !important; flex-direction: column !important; max-height: 90vh !important; }
 @keyframes modalSlideIn { from { opacity: 0; transform: translateY(30px) scale(0.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
-.modal-chic .modal-header {
-    background: linear-gradient(135deg, #1e293b 0%, #334155 50%, #475569 100%);
-    color: #fff; border: none; padding: 22px 28px; position: relative; overflow: hidden; flex-shrink: 0 !important;
-}
+.modal-chic .modal-header { background: linear-gradient(135deg, #1e293b 0%, #334155 50%, #475569 100%); color: #fff; border: none; padding: 22px 28px; position: relative; overflow: hidden; flex-shrink: 0 !important; }
 .modal-chic .modal-header::before { content: ''; position: absolute; top: -50%; right: -20%; width: 200px; height: 200px; background: radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%); border-radius: 50%; }
 .modal-chic .modal-title { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 12px; position: relative; z-index: 1; }
 .modal-chic .modal-title i { font-size: 22px; background: rgba(255,255,255,0.15); width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; }
@@ -361,7 +339,6 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
     min-height: 0 !important;
 }
 
-/* ===== MODAL FOOTER - FORCÉ VISIBLE ===== */
 .modal-chic .modal-footer {
     background: #ffffff !important;
     border-top: 2px solid var(--border-color) !important;
@@ -377,7 +354,6 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
     position: relative !important;
 }
 
-/* ===== FORM ===== */
 .form-label { font-size: 10px; font-weight: 700; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
 .form-control, .form-select { border-radius: 10px; border: 1.5px solid var(--border-color); padding: 10px 14px; font-size: 13px; transition: all .2s; }
 .form-control:focus, .form-select:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-soft); }
@@ -501,12 +477,11 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
 </div>
 
 <!-- ========================================================= -->
-<!-- MODAL FORMULAIRE - STRUCTURE CORRIGÉE -->
+<!-- MODAL FORMULAIRE -->
 <!-- ========================================================= -->
 <div class="modal fade modal-chic" id="userModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content">
-            <!-- HEADER -->
             <div class="modal-header">
                 <h5 class="modal-title" id="modalTitle">
                     <i class="bi bi-person-plus-fill"></i>
@@ -515,13 +490,11 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             
-            <!-- FORM englobe body + footer -->
             <form method="post" id="userForm" style="display: flex; flex-direction: column; flex: 1; min-height: 0;">
                 <input type="hidden" name="action" id="formAction" value="add">
                 <input type="hidden" name="old_id" id="formOldId" value="">
                 <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
                 
-                <!-- BODY -->
                 <div class="modal-body">
                     <h6 class="text-uppercase fw-bold mb-3" style="font-size:11px;letter-spacing:0.8px;color:var(--color-primary);display:flex;align-items:center;gap:8px;">
                         <i class="bi bi-person-fill"></i> Identité
@@ -627,7 +600,6 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
                     </div>
                 </div>
                 
-                <!-- ===== FOOTER - TOUJOURS VISIBLE ===== -->
                 <div class="modal-footer">
                     <button type="button" class="btn-chic" style="background:var(--color-gray-100);color:var(--text-secondary);" data-bs-dismiss="modal">
                         <i class="bi bi-x-lg"></i><span>Annuler</span>
@@ -703,12 +675,6 @@ $(document).ready(function() {
         toast.show();
     }
     
-    setTimeout(function() { $('.alert').alert('close'); }, 5000);
-    
-    <?php if ($message): ?>
-    showToast('<?= addslashes($message) ?>', '<?= $messageType === 'success' ? 'success' : ($messageType === 'danger' ? 'error' : 'info') ?>');
-    <?php endif; ?>
-    
     window.toggleBoutiqueRequired = function(role) {
         if (role === 'Vendeur' || role === 'Caisse') $('#boutiqueRequiredMsg').show();
         else $('#boutiqueRequiredMsg').hide();
@@ -720,7 +686,6 @@ $(document).ready(function() {
     toggleBoutiqueRequired('');
     <?php endif; ?>
     
-    // ===== BOUTON NOUVEL UTILISATEUR =====
     $('#addUserBtn').click(function() {
         $('#formAction').val('add');
         $('#formOldId').val('');
@@ -735,7 +700,6 @@ $(document).ready(function() {
         userModal.show();
     });
     
-    // ===== BOUTON MODIFIER - OUVERTURE DU MODAL =====
     $(document).on('click', '.editBtn', function(e) {
         e.preventDefault();
         e.stopPropagation();
@@ -745,7 +709,6 @@ $(document).ready(function() {
         $('#actionForm').submit();
     });
     
-    // ===== OUVRIR LE MODAL AUTOMATIQUEMENT APRÈS CHARGEMENT DES DONNÉES D'ÉDITION =====
     <?php if (isset($editUser) && $action === 'load_edit'): ?>
     $(function() {
         $('#formAction').val('edit');
@@ -755,15 +718,12 @@ $(document).ready(function() {
         $('#mdpFieldWrapper').hide();
         $('#boutique_id').selectpicker('val', '<?= e($editUser['boutique_id'] ?? '') ?>');
         toggleBoutiqueRequired('<?= e($editUser['role']) ?>');
-        
-        // Ouvrir le modal
         setTimeout(function() {
             userModal.show();
         }, 100);
     });
     <?php endif; ?>
     
-    // ===== SUPPRESSION =====
     let userIdToDelete = null;
     $(document).on('click', '.deleteBtn', function() {
         userIdToDelete = $(this).data('id');
@@ -777,7 +737,6 @@ $(document).ready(function() {
         $('#deleteForm').submit();
     });
     
-    // ===== RECHERCHE ET FILTRES =====
     $('#resetBtn').click(function() {
         $('#searchInput').val('');
         $('#boutiqueFilter').selectpicker('val', '');

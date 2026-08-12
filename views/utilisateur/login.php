@@ -39,9 +39,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <html lang="fr">
 
 <head>
+<?php include "includes/pwa_head.php"; ?>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Connexion</title>
+    <script>
+        // Si la session a expiré (ou l'utilisateur a été déconnecté) pendant que
+        // l'app tournait dans un iframe, on sort directement de l'iframe pour
+        // afficher la page de connexion en plein écran, plutôt que de l'afficher
+        // coincée à l'intérieur du cadre.
+        if (window.top !== window.self) {
+            window.top.location.href = window.location.href;
+        }
+    </script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
