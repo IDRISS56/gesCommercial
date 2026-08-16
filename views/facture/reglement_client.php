@@ -69,9 +69,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 $client_id = $facture['contact_id'];
             } else {
                 if (empty($client_id)) throw new Exception("Veuillez sélectionner un client.");
-                $stmtC = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ? AND type_contact = 'Client' FOR UPDATE");
+                $stmtC = $pdo->prepare("SELECT code_contact, nom_prenom_contact FROM contact WHERE code_contact = ? AND type_contact = 'Client' FOR UPDATE");
                 $stmtC->execute([$client_id]);
-                if (!$stmtC->fetch()) throw new Exception("Client introuvable.");
+                $contactSansFacture = $stmtC->fetch(PDO::FETCH_ASSOC);
+                if (!$contactSansFacture) throw new Exception("Client introuvable.");
             }
 
             $stmt = $pdo->prepare("SELECT * FROM caisse WHERE statut = 'Actif' AND (boutique_id = ? OR boutique_id IS NULL) ORDER BY boutique_id IS NULL LIMIT 1 FOR UPDATE");
@@ -86,7 +87,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
             $soldeAvant = floatval($caisse['solde']);
             $soldeApres = $soldeAvant + $montant;
             $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
-            $objetTransaction = $facture ? 'Règlement facture client' : 'Avance / versement client';
+            $objetTransaction = $facture ? 'Règlement facture client' : ('Avance / versement client — ' . $contactSansFacture['nom_prenom_contact']);
 
             $stmtTr = $pdo->prepare("INSERT INTO transaction
                 (numero_transaction, date_transaction, heure_transaction, montant_transaction,

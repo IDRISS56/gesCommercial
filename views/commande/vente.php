@@ -181,12 +181,12 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $pdf->SetFillColor($navy[0], $navy[1], $navy[2]);
     $pdf->SetTextColor(255, 255, 255);
     $pdf->SetFont('Arial', 'B', 9);
-    $pdf->Cell(25, 7, 'REF.', 0, 0, 'C', true);
-    $pdf->Cell(75, 7, 'DESIGNATION', 0, 0, 'C', true);
-    // $pdf->Cell(25, 7, 'LOT/UNITE', 0, 0, 'C', true);
-    $pdf->Cell(40, 7, 'QUANTITE', 0, 0, 'C', true);
-    $pdf->Cell(25, 7, 'P.U.(FCFA)', 0, 0, 'C', true);
-    $pdf->Cell(25, 7, 'MONTANT(FCFA)', 0, 1, 'C', true);
+    $pdf->Cell(20, 7, 'REF.', 0, 0, 'C', true);
+    $pdf->Cell(60, 7, 'DESIGNATION', 0, 0, 'C', true);
+    $pdf->Cell(25, 7, 'QUANTITE', 0, 0, 'C', true);
+    $pdf->Cell(20, 7, 'CARTON', 0, 0, 'C', true);
+    $pdf->Cell(30, 7, 'P.U.(FCFA)', 0, 0, 'C', true);
+    $pdf->Cell(35, 7, 'MONTANT(FCFA)', 0, 1, 'C', true);
     $pdf->SetTextColor(0, 0, 0);
     $pdf->SetDrawColor($border[0], $border[1], $border[2]);
     $pdf->SetFont('Arial', '', 9);
@@ -199,27 +199,24 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
         $nbLines = max(1, ceil(strlen($designation) / 25));
         $rowHeight = 7 * $nbLines;
         if ($pdf->GetY() + $rowHeight > 270) $pdf->AddPage();
-        // Quantité affichée : on ne parle de "lot" que si un lot a réellement été
-        // configuré à la vente (produits_par_lot > 1). Sinon, quantité simple en "Produit".
+        // Quantité = nombre d'unités (pièces) livrées, toujours. Carton = nombre
+        // de cartons complets, uniquement si un lot a réellement été configuré
+        // à la vente (produits_par_lot > 1) ; vide sinon (produit vendu à la pièce).
         $produitsParLot = intval($cmd['produits_par_lot'] ?? 1);
-        if ($produitsParLot > 1) {
-            $libelleLot = !empty($cmd['libelle_lot']) ? $cmd['libelle_lot'] : 'Carton';
-            $nombreLots = intdiv($cmd['quantite_commande'], $produitsParLot);
-            $reste = $cmd['quantite_commande'] % $produitsParLot;
-            $qteAffichee = $reste > 0 ? ($nombreLots . ' ' . $libelleLot . '(s) et ' . $reste . ' Pièce(s)') : ($nombreLots . ' ' . $libelleLot . '(s)');
-        } else {
-            $qteAffichee = $cmd['quantite_commande'] . ' Pièce(s)';
-        }
+        $carton = $produitsParLot > 1 ? intdiv($cmd['quantite_commande'], $produitsParLot) : '';
         $x = $pdf->GetX(); $y = $pdf->GetY();
-        $pdf->MultiCell(25, 7, $ref, 1, 'L');
-        $pdf->SetXY($x + 25, $y); $pdf->MultiCell(75, 7, $designation, 1, 'L');
-        // $pdf->SetXY($x + 75, $y); $pdf->MultiCell(25, 7, $libelleLot, 1, 'C');
-        $pdf->SetXY($x + 100, $y);
-        $pdf->SetFont('Arial', '', 7.5);
-        $pdf->Cell(40, $rowHeight, $qteAffichee, 1, 0, 'C');
-        $pdf->SetFont('Arial', '', 9);
-        $pdf->Cell(25, $rowHeight, number_format($cmd['prix_commande'], 0, ',', ' '), 1, 0, 'R');
-        $pdf->Cell(25, $rowHeight, number_format($montant_ligne, 0, ',', ' '), 1, 1, 'R');
+        $pdf->MultiCell(20, 7, $ref, 1, 'L');
+        $pdf->SetXY($x + 20, $y); $pdf->MultiCell(60, 7, $designation, 1, 'L');
+        $pdf->SetXY($x + 80, $y);
+        $pdf->Cell(25, $rowHeight, $cmd['quantite_commande'], 1, 0, 'C');
+        $pdf->Cell(20, $rowHeight, $carton, 1, 0, 'C');
+        // "P.U." imprimé : le prix DU LOT tel que saisi à la vente si cette ligne
+        // en a un (colonne dédiée prix_lot_ligne, jamais recalculé), sinon le
+        // prix/unité classique. Le montant reste toujours qté(unités) × prix/unité.
+        $aPrixLot = isset($cmd['prix_lot_ligne']) && $cmd['prix_lot_ligne'] !== null && $cmd['prix_lot_ligne'] !== '';
+        $prixUnitImprime = $aPrixLot ? $cmd['prix_lot_ligne'] : $cmd['prix_commande'];
+        $pdf->Cell(30, $rowHeight, number_format($prixUnitImprime, 0, ',', ' '), 1, 0, 'R');
+        $pdf->Cell(35, $rowHeight, number_format($montant_ligne, 0, ',', ' '), 1, 1, 'R');
     }
     $pdf->Ln(6);
 
@@ -397,10 +394,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                                 ->execute([$l['produit_id']]);
 
                             if (!empty($l['lot_id'])) {
+                                // Le lot reste Actif même à quantité 0 : un lot déjà
+                                // configuré ne doit jamais être désactivé ni supprimé
+                                // automatiquement.
                                 $pdo->prepare("UPDATE lot SET quantite = quantite - ? WHERE code_lot = ? AND quantite >= ?")
                                     ->execute([$l['quantite_commande'], $l['lot_id'], $l['quantite_commande']]);
-                                $pdo->prepare("UPDATE lot SET etat_lot = 'Inactif' WHERE code_lot = ? AND quantite <= 0")
-                                    ->execute([$l['lot_id']]);
                             }
                         }
                     }
@@ -417,9 +415,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         foreach ($lignesBon as $i => $l) {
                             $numCmd = $numBase . str_pad((string)$i, 2, '0', STR_PAD_LEFT) . '-BL';
 
-                            $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
-                                           VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, 'EN ATTENTE')")
-                                ->execute([$numCmd, $l['produit_id'], $l['lot_id'], $l['contact_id'], $numBL, $l['prix_achat'], $l['prix_commande'], $l['quantite_commande'], $l['produits_par_lot'], $l['montant_commande'], $l['utilisateur_id'], $l['boutique_id']]);
+                            $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, prix_lot_ligne, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
+                                           VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, ?, 'EN ATTENTE')")
+                                ->execute([$numCmd, $l['produit_id'], $l['lot_id'], $l['contact_id'], $numBL, $l['prix_achat'], $l['prix_commande'], $l['prix_lot_ligne'], $l['quantite_commande'], $l['produits_par_lot'], $l['montant_commande'], $l['utilisateur_id'], $l['boutique_id']]);
                         }
                     }
                 }
@@ -590,12 +588,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         // utilisé lors de l'ajout d'une nouvelle ligne à un bon en modification.
         $produitId = trim($_POST['produit_id'] ?? '');
         $boutiqueId = trim($_POST['boutique_id'] ?? '');
-        $response = ['success' => false, 'disponible' => 0, 'prix' => 0, 'titre' => ''];
+        $response = ['success' => false, 'disponible' => 0, 'prix' => 0, 'titre' => '', 'lots' => [], 'saisie_par_carton' => 0];
         if ($produitId !== '' && $boutiqueId !== '') {
             $stmtS = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ?");
             $stmtS->execute([$produitId, $boutiqueId]);
             $dispo = $stmtS->fetchColumn();
-            $stmtP = $pdo->prepare("SELECT titre_produit, prix_produit FROM produit WHERE code_produit = ?");
+            $stmtP = $pdo->prepare("SELECT titre_produit, prix_produit, saisie_par_carton FROM produit WHERE code_produit = ?");
             $stmtP->execute([$produitId]);
             $rowP = $stmtP->fetch(PDO::FETCH_ASSOC);
             if ($rowP) {
@@ -603,6 +601,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $response['disponible'] = (int) ($dispo !== false ? $dispo : 0);
                 $response['prix'] = (float) $rowP['prix_produit'];
                 $response['titre'] = $rowP['titre_produit'];
+                $response['saisie_par_carton'] = (int) $rowP['saisie_par_carton'];
+
+                // Prix de lot éventuellement configurés pour ce produit (menu
+                // "Configuration des lots") : permet de pré-remplir le prix de
+                // la ligne sans que la caisse ait à le connaître par cœur.
+                $stmtLots = $pdo->prepare("SELECT libelle, unites_par_lot, prix_lot FROM lot WHERE produit_id = ? AND etat_lot = 'Actif'");
+                $stmtLots->execute([$produitId]);
+                $response['lots'] = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
             }
         }
         echo json_encode($response);
@@ -679,8 +685,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
                     $montant = $nouvelleQte * $cmd['prix'];
                     $produits_par_lot = max(1, intval($cmd['produits_par_lot'] ?? 1));
-                    $pdo->prepare("UPDATE commande SET quantite_commande = ?, prix_commande = ?, produits_par_lot = ?, montant_commande = ? WHERE numero_commande = ?")
-                        ->execute([$nouvelleQte, $cmd['prix'], $produits_par_lot, $montant, $cmd['id']]);
+                    $prixLotLigne = (isset($cmd['prix_lot']) && $cmd['prix_lot'] !== null && $cmd['prix_lot'] !== '') ? round((float)$cmd['prix_lot'], 2) : null;
+                    $pdo->prepare("UPDATE commande SET quantite_commande = ?, prix_commande = ?, prix_lot_ligne = ?, produits_par_lot = ?, montant_commande = ? WHERE numero_commande = ?")
+                        ->execute([$nouvelleQte, $cmd['prix'], $prixLotLigne, $produits_par_lot, $montant, $cmd['id']]);
                 }
             }
 
@@ -745,24 +752,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $libelleLot = in_array($nl['libelle_lot'] ?? '', $libellesLotValides, true) ? $nl['libelle_lot'] : 'Unité';
                     $lot_id = null;
                     if ($lotConfigure) {
-                        $lot_id = 'LOT-' . date('YmdHis') . rand(100, 999) . '-' . $i;
-                        $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, produit_id, quantite, etat_lot)
-                                      VALUES (?, ?, ?, ?, ?, 'Actif')")
-                            ->execute([$lot_id, $libelleLot, $produitsParLot, $produitId, $quantite]);
+                        // Un lot est déjà configuré pour ce produit (même libellé) ?
+                        // On le réutilise — le lot ne doit être créé qu'une seule fois,
+                        // pas à chaque nouvelle vente du même produit.
+                        $stmtLotExist = $pdo->prepare("SELECT code_lot FROM lot WHERE produit_id = ? AND libelle = ? AND etat_lot = 'Actif' LIMIT 1");
+                        $stmtLotExist->execute([$produitId, $libelleLot]);
+                        $lotExistant = $stmtLotExist->fetchColumn();
+
+                        if ($lotExistant) {
+                            $lot_id = $lotExistant;
+                        } else {
+                            $lot_id = 'LOT-' . date('YmdHis') . rand(100, 999) . '-' . $i;
+                            $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, produit_id, quantite, etat_lot)
+                                          VALUES (?, ?, ?, ?, ?, 'Actif')")
+                                ->execute([$lot_id, $libelleLot, $produitsParLot, $produitId, $quantite]);
+                        }
                     }
 
                     $numCmdNew = $numBase . str_pad((string)$i, 2, '0', STR_PAD_LEFT) . '-ADD';
                     $montantNew = $quantite * $prix;
+                    $prixLotLigne = (isset($nl['prix_lot']) && $nl['prix_lot'] !== null && $nl['prix_lot'] !== '') ? round((float)$nl['prix_lot'], 2) : null;
 
                     $pdo->prepare("
                         INSERT INTO commande
                         (numero_commande, produit_id, lot_id, produits_par_lot, contact_id, facture_id, statut_id,
-                         date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, montant_commande,
+                         date_commande, heure_commande, prix_achat, prix_commande, prix_lot_ligne, quantite_commande, montant_commande,
                          utilisateur_id, boutique_id, etat_commande)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, ?)
                     ")->execute([
                         $numCmdNew, $produitId, $lot_id, $produitsParLot, $fData['contact_id'], $facture_id, $statutRef,
-                        $prix, $prix, $quantite, $montantNew,
+                        $prix, $prix, $prixLotLigne, $quantite, $montantNew,
                         USER_ID, $boutiqueId, $etatRef
                     ]);
 
@@ -1580,7 +1599,14 @@ $(document).ready(function() {
                         } else {
                             composition = `${qte} Pièce(s)`;
                         }
-                        html += `<tr><td class="fw-semibold">${c.titre_produit}</td><td class="text-center">${qte}</td><td class="text-center fw-bold">${composition}</td><td class="text-end">${Number(c.prix_commande).toLocaleString('fr-FR')} FCFA</td><td class="text-end fw-bold">${Number(c.montant_commande).toLocaleString('fr-FR')} FCFA</td></tr>`;
+                        // Le "Prix unit." affiché est le prix DU LOT tel qu'il a été saisi
+                        // à la vente (colonne dédiée prix_lot_ligne, jamais recalculé —
+                        // donc jamais d'arrondi du type "416,67" au lieu de "10 000").
+                        // Repli sur prix_commande (prix/unité) pour les lignes à l'unité
+                        // ou les anciennes lignes sans prix de lot enregistré.
+                        const aPrixLot = c.prix_lot_ligne !== null && c.prix_lot_ligne !== undefined && c.prix_lot_ligne !== '';
+                        const prixAffiche = aPrixLot ? c.prix_lot_ligne : c.prix_commande;
+                        html += `<tr><td class="fw-semibold">${c.titre_produit}</td><td class="text-center">${qte}</td><td class="text-center fw-bold">${composition}</td><td class="text-end">${Number(prixAffiche).toLocaleString('fr-FR')} FCFA</td><td class="text-end fw-bold">${Number(c.montant_commande).toLocaleString('fr-FR')} FCFA</td></tr>`;
                     });
                     html += '</tbody></table></div></div>';
                 }
@@ -1719,12 +1745,16 @@ $(document).ready(function() {
         data.commandes.forEach(c => {
             const ppl = parseInt(c.produits_par_lot) || 1;
             const nbLots = Math.floor((parseInt(c.quantite_commande) || 0) / ppl);
-            html += `<tr class="ligne-commande" data-id="${c.numero_commande}">
-                <td class="fw-semibold">${c.titre_produit}</td>
+            // prix_lot_ligne (colonne dédiée) dit sans ambiguïté si cette ligne a été
+            // vendue par lot : si oui, on affiche/édite directement ce prix de lot
+            // (jamais de reconstruction par multiplication, jamais d'arrondi introduit).
+            const aPrixLot = c.prix_lot_ligne !== null && c.prix_lot_ligne !== undefined && c.prix_lot_ligne !== '';
+            const prixAffiche = aPrixLot ? c.prix_lot_ligne : c.prix_commande;
+            html += `<tr class="ligne-commande" data-id="${c.numero_commande}" data-produit="${c.produit_id}" data-prix-est-lot="${aPrixLot ? '1' : '0'}">                <td class="fw-semibold">${c.titre_produit}</td>
                 <td class="text-center"><input type="number" class="form-control form-control-sm qte" value="${c.quantite_commande}" min="0" style="width:80px;display:inline-block;text-align:center;"></td>
                 <td class="text-center"><input type="number" class="form-control form-control-sm produits-par-lot" value="${ppl}" min="1" style="width:90px;display:inline-block;text-align:center;"></td>
                 <td class="text-center nb-lots-ligne fw-bold">${nbLots}</td>
-                <td class="text-end"><input type="number" class="form-control form-control-sm prix" value="${c.prix_commande}" min="0" style="width:120px;display:inline-block;text-align:right;"></td>
+                <td class="text-end"><input type="number" class="form-control form-control-sm prix" value="${prixAffiche}" min="0" style="width:120px;display:inline-block;text-align:right;"></td>
                 <td class="text-end montant-ligne fw-bold">${Number(c.montant_commande).toLocaleString('fr-FR')}</td>
                 <td class="text-center"><button class="btn-delete-chic supprimer-ligne" title="Supprimer"><i class="bi bi-trash3"></i></button></td>
             </tr>`;
@@ -1746,11 +1776,11 @@ $(document).ready(function() {
                     </select>
                 </div>
                 <div class="col-md-2">
-                    <label class="form-label small">Quantité</label>
+                    <label class="form-label small" id="newLigneQteLabel">Quantité</label>
                     <input type="number" id="newLigneQte" class="form-control" min="1" step="1" placeholder="0">
                 </div>
                 <div class="col-md-2">
-                    <label class="form-label small">Prix unit.</label>
+                    <label class="form-label small" id="newLignePrixLabel">Prix unit.</label>
                     <input type="number" id="newLignePrix" class="form-control" min="0" step="0.01" placeholder="0.00">
                 </div>
                 <div class="col-md-2">
@@ -1758,7 +1788,26 @@ $(document).ready(function() {
                 </div>
             </div>
             <div class="small text-muted mt-2" id="newLigneStockInfo">Stock disponible : —</div>
-            <div class="mt-2" style="font-size:12px;color:#64748b;">
+
+            <!-- Produit déjà catalogué (menu "Configuration des lots") : on choisit
+                 juste le mode de vente, seul le prix du lot reste modifiable ici. -->
+            <div class="mt-2" id="newLigneVenteCatalogue" style="display:none;font-size:12px;color:#64748b;">
+                Vendre par :
+                <select id="newLigneModeVente" style="display:inline-block;width:auto;">
+                    <option value="unite">Unité</option>
+                </select>
+                <span id="newLigneModeVenteLotWrap" style="display:none;margin-left:8px;">
+                    <span id="newLigneModeVentePrixLotZone" style="display:none;">
+                        Prix du lot pour cette vente : <input type="number" id="newLigneModeVentePrixLot" min="0" step="0.01" style="width:110px;">
+                        —
+                    </span>
+                    <strong id="newLigneModeVenteApercu"></strong>
+                </span>
+            </div>
+
+            <!-- Produit pas encore catalogué : ancien système, configuration
+                 libre (à retirer une fois tous les produits catalogués). -->
+            <div class="mt-2" style="font-size:12px;color:#64748b;" id="newLigneVenteAdHoc">
                 <label style="cursor:pointer;">
                     <input type="checkbox" id="newLigneLotConfigure"> Configurer un lot pour cette ligne
                 </label>
@@ -1770,6 +1819,8 @@ $(document).ready(function() {
                     — <strong id="newLigneLotApercu"></strong>
                 </span>
             </div>
+
+            <div id="newLigneLotPrixInfo" class="mt-1" style="display:none;color:#0f766e;font-weight:600;"></div>
         </div>
         <div class="mt-4 d-flex gap-2 justify-content-end">
             <button class="btn-action-chic annuler" id="btnAnnulerEdit"><i class="bi bi-x-lg"></i> Annuler</button>
@@ -1789,10 +1840,7 @@ $(document).ready(function() {
         function recalculerTotaux() {
             let totalLignes = 0;
             $('#editLignesTable tbody tr').each(function() {
-                const row = $(this);
-                const qte = parseFloat(row.find('.qte').val()) || 0;
-                const prix = parseFloat(row.find('.prix').val()) || 0;
-                totalLignes += qte * prix;
+                totalLignes += montantLigne($(this));
             });
             const montantTtc = totalLignes + offsetTaxeRemise;
             $('#edit_montant_ttc').val(montantTtc.toLocaleString('fr-FR'));
@@ -1832,12 +1880,12 @@ $(document).ready(function() {
             if ($newProd.hasClass('bs-select-hidden') || $newProd.data('selectpicker')) { $newProd.selectpicker('destroy'); }
             $newProd.selectpicker();
             $newProd.off('changed.bs.select change').on('changed.bs.select change', function() {
-                // Filet de sécurité : sur cette version de bootstrap-select, après une
-                // reconstruction dynamique des options (destroy + réinit), le libellé
-                // affiché sur le bouton ne se resynchronise pas toujours tout seul lors
-                // d'une sélection — on force le refresh ET on réécrit le texte affiché
-                // à la main pour être certain qu'il corresponde au produit choisi.
-                $newProd.selectpicker('refresh');
+                // ⚠️ NE PAS appeler .selectpicker('refresh') ici : sur cette version
+                // de bootstrap-select, refresh() après un destroy()+réinit dynamique
+                // duplique les éléments internes du bouton (ex. "ProduitProduitProduit").
+                // Le destroy()+réinit fait juste au-dessus suffit déjà à resynchroniser
+                // le picker ; on réécrit simplement le texte affiché à la main pour
+                // garantir qu'il corresponde bien au produit choisi.
                 const texteChoisi = $newProd.find('option:selected').text();
                 $newProd.parent().find('.filter-option-inner-inner').text(texteChoisi);
                 updateNouvelleLigneStock();
@@ -1845,10 +1893,43 @@ $(document).ready(function() {
             $('#newLigneStockInfo').text('Stock disponible : —');
         }
 
+        function reinitialiserLabelsQteEtPrix() {
+            $('#newLigneQteLabel').text('Quantité');
+            $('#newLigneQte').attr('placeholder', '0');
+            $('#newLignePrixLabel').text('Prix unit.');
+        }
+
+        function appliquerModeVenteProduit(lots) {
+            const $sel = $('#newLigneModeVente');
+            $sel.find('option:not([value="unite"])').remove();
+            if (lots.length > 0) {
+                lots.forEach(function(l) {
+                    $sel.append(
+                        '<option value="' + escHtml(l.libelle) + '" data-unites="' + l.unites_par_lot +
+                        '" data-prix-lot="' + (l.prix_lot !== null ? l.prix_lot : '') + '">' +
+                        escHtml(l.libelle) + ' — ' + l.unites_par_lot + ' unité(s)</option>'
+                    );
+                });
+                $sel.val('unite');
+                $('#newLigneModeVenteLotWrap').hide();
+                $('#newLigneVenteCatalogue').show();
+                $('#newLigneVenteAdHoc').hide();
+                $('#newLigneLotConfigure').prop('checked', false);
+                $('#newLigneLotDetails').hide();
+            } else {
+                $('#newLigneVenteCatalogue').hide();
+                $('#newLigneVenteAdHoc').show();
+            }
+            reinitialiserLabelsQteEtPrix();
+            $('#newLigneLotPrixInfo').hide();
+        }
+
         function updateNouvelleLigneStock() {
             const produit = $newProd.val();
             const boutique = $('#editContent').data('boutique-id');
             $newProd.data('dispo', 0);
+            $newProd.data('lots', []);
+            appliquerModeVenteProduit([]);
             if (!produit || !boutique) {
                 $('#newLigneStockInfo').text(boutique ? 'Stock disponible : —' : 'Boutique du bon introuvable : vérifiez le stock manuellement.');
                 return;
@@ -1859,8 +1940,12 @@ $(document).ready(function() {
                 success: function(resp) {
                     if (resp.success) {
                         $newProd.data('dispo', resp.disponible);
+                        $newProd.data('prix-unitaire', resp.prix);
+                        $newProd.data('lots', resp.lots || []);
+                        $newProd.data('saisie-carton', !!resp.saisie_par_carton);
                         $('#newLigneStockInfo').html('Stock disponible : <strong>' + resp.disponible + '</strong>');
                         if (!$('#newLignePrix').val() && resp.prix > 0) $('#newLignePrix').val(resp.prix);
+                        appliquerModeVenteProduit(resp.lots || []);
                     } else {
                         $('#newLigneStockInfo').text('Stock disponible : —');
                     }
@@ -1891,35 +1976,193 @@ $(document).ready(function() {
         // Configuration de lot pour la nouvelle ligne (même principe que
         // dans achat.php) : optionnelle — si non cochée, comportement
         // "produit simple" (pas de lot, produits_par_lot = 1).
+        //
+        // Si le lot choisi correspond à un lot du catalogue (menu "Configuration
+        // des lots") ayant un prix de lot défini, on suggère automatiquement le
+        // prix correspondant. Sinon (produit sans prix de lot configuré, ou
+        // caissier qui a modifié "unités par lot" à la main), le prix reste
+        // celui du produit — comportement strictement inchangé.
         // ------------------------------------------------------------
+        function trouverLotCatalogue(libelle) {
+            const lots = $newProd.data('lots') || [];
+            return lots.find(l => l.libelle === libelle) || null;
+        }
+
+        // ----- Mode "produit catalogué" : structure du lot fixe (venant de
+        // "Configuration des lots"). La quantité saisie est TOUJOURS le nombre
+        // de pièces. Le prix saisi est le prix unitaire du produit tant qu'aucun
+        // prix n'est configuré pour ce lot ; s'il y en a un, le prix saisi
+        // devient le prix DU LOT (modifiable, utilisé pour le calcul). -----
+        function majModeVenteCatalogue() {
+            const $sel = $('#newLigneModeVente');
+            const opt = $sel.find('option:selected');
+            const libelle = $sel.val();
+            if (libelle === 'unite') {
+                reinitialiserLabelsQteEtPrix();
+                $('#newLigneLotPrixInfo').hide();
+                return;
+            }
+            const unites = parseInt(opt.data('unites')) || 1;
+            const enCarton = !!$newProd.data('saisie-carton');
+            const qteSaisie = parseInt($('#newLigneQte').val()) || 0;
+            const qte = enCarton ? qteSaisie * unites : qteSaisie; // qte = toujours en pièces
+            const nbLots = enCarton ? qteSaisie : Math.floor(qte / unites);
+            const reste = enCarton ? 0 : qte % unites;
+            const prixLotCatalogue = opt.data('prix-lot');
+            const aPrixLot = (prixLotCatalogue !== '' && prixLotCatalogue !== undefined && prixLotCatalogue !== null);
+
+            $('#newLigneQteLabel').text(enCarton ? 'Quantité (cartons)' : 'Quantité (pièces)');
+            $('#newLigneQte').attr('placeholder', enCarton ? 'Nombre de cartons' : 'Nombre de pièces');
+            $('#newLignePrixLabel').text(aPrixLot ? ('Prix du ' + libelle.toLowerCase()) : 'Prix unitaire');
+            $('#newLigneModeVenteApercu').text(reste > 0 ? (nbLots + ' ' + libelle + '(s) et ' + reste + ' pièce(s)') : (nbLots + ' ' + libelle + '(s)'));
+            $('#newLigneModeVentePrixLotZone').toggle(aPrixLot);
+
+            if (!aPrixLot || qte <= 0) { $('#newLigneLotPrixInfo').hide(); return; }
+
+            let prixLotSaisi = parseFloat($('#newLigneModeVentePrixLot').val());
+            if (isNaN(prixLotSaisi)) {
+                prixLotSaisi = parseFloat(prixLotCatalogue);
+                $('#newLigneModeVentePrixLot').val(prixLotSaisi);
+            }
+
+            // Le prix affiché/modifiable dans "Prix du <lot>" EST directement
+            // le prix par lot.
+            const $prix = $('#newLignePrix');
+            if ($prix.val() === '' || parseFloat($prix.val()) === $prix.data('derniere-suggestion')) {
+                $prix.val(prixLotSaisi);
+                $prix.data('derniere-suggestion', prixLotSaisi);
+            }
+            const prixUnitEffectif = Math.round(((parseFloat($prix.val()) || 0) / unites) * 100) / 100;
+            const total = Math.floor(qte / unites) * (parseFloat($prix.val()) || 0);
+            $('#newLigneLotPrixInfo').text(
+                qte + ' pièce(s), soit ' + prixUnitEffectif.toLocaleString('fr-FR') + ' F/pièce (dérivé du prix du lot) = ' +
+                total.toLocaleString('fr-FR') + ' F.'
+            ).show();
+        }
+        $('#newLigneModeVente').on('change', function() {
+            const opt = $(this).find('option:selected');
+            if ($(this).val() === 'unite') {
+                $('#newLigneModeVenteLotWrap').hide();
+                reinitialiserLabelsQteEtPrix();
+                $('#newLigneLotPrixInfo').hide();
+            } else {
+                const prixLotCatalogue = opt.data('prix-lot');
+                const aPrixLot = (prixLotCatalogue !== '' && prixLotCatalogue !== undefined && prixLotCatalogue !== null);
+                if (aPrixLot) {
+                    $('#newLigneModeVentePrixLot').val(prixLotCatalogue);
+                    $('#newLignePrix').val('').removeData('derniere-suggestion');
+                } else {
+                    // Pas de prix de lot configuré : le champ "Prix" reste le
+                    // prix unitaire du produit, déjà pré-rempli plus haut.
+                    $('#newLigneModeVentePrixLot').val('');
+                }
+                $('#newLigneModeVenteLotWrap').show();
+                majModeVenteCatalogue();
+            }
+        });
+        $('#newLigneModeVentePrixLot').on('input change', majModeVenteCatalogue);
+
+        // ----- Mode "ad-hoc" (produit pas encore catalogué) : configuration
+        // libre. La quantité saisie est TOUJOURS le nombre de pièces ; le prix
+        // reste le prix unitaire (pas de prix de lot ad-hoc). -----
+        let derniereLibelleLotNouvelleLigne = null;
         function majApercuLotNouvelleLigne() {
-            const qte = parseInt($('#newLigneQte').val()) || 0;
-            const unites = Math.max(2, parseInt($('#newLigneLotUnites').val()) || 2);
             const libelle = $('#newLigneLotLibelle').val();
+            if (libelle !== derniereLibelleLotNouvelleLigne) {
+                derniereLibelleLotNouvelleLigne = libelle;
+                const lc = trouverLotCatalogue(libelle);
+                if (lc) $('#newLigneLotUnites').val(lc.unites_par_lot);
+            }
+            const unites = Math.max(2, parseInt($('#newLigneLotUnites').val()) || 2);
+            const qte = parseInt($('#newLigneQte').val()) || 0;
             const nbLots = Math.floor(qte / unites);
             const reste = qte % unites;
-            const apercu = reste > 0 ? `${nbLots} ${libelle}(s) et ${reste} Produit(s)` : `${nbLots} ${libelle}(s)`;
-            $('#newLigneLotApercu').text(apercu);
+            $('#newLigneQteLabel').text('Quantité (pièces)');
+            $('#newLignePrixLabel').text('Prix unitaire');
+            $('#newLigneLotApercu').text(reste > 0 ? (nbLots + ' ' + libelle + '(s) et ' + reste + ' pièce(s)') : (nbLots + ' ' + libelle + '(s)'));
+            $('#newLigneLotPrixInfo').hide(); // pas de prix de lot pour ce produit
         }
         $('#newLigneLotConfigure').on('change', function() {
-            $('#newLigneLotDetails').toggle(this.checked);
-            if (this.checked) majApercuLotNouvelleLigne();
+            if (this.checked) { $('#newLigneLotDetails').show(); majApercuLotNouvelleLigne(); }
+            else { $('#newLigneLotDetails').hide(); reinitialiserLabelsQteEtPrix(); $('#newLigneLotPrixInfo').hide(); }
         });
-        $('#newLigneLotUnites, #newLigneLotLibelle, #newLigneQte').on('input change', majApercuLotNouvelleLigne);
+        $('#newLigneLotUnites, #newLigneLotLibelle').on('input change', majApercuLotNouvelleLigne);
+
+        // La quantité peut alimenter l'un ou l'autre mode selon celui actif.
+        $('#newLigneQte').on('input change', function() {
+            if ($('#newLigneVenteCatalogue').is(':visible') && $('#newLigneModeVente').val() !== 'unite') {
+                majModeVenteCatalogue();
+            } else if ($('#newLigneLotConfigure').is(':checked')) {
+                majApercuLotNouvelleLigne();
+            }
+        });
 
         $('#btnAjouterLigne').click(function() {
             const produit = $newProd.val();
             const produitTexte = $newProd.find('option:selected').text();
             const boutique = $('#editContent').data('boutique-id');
-            const qte = parseInt($('#newLigneQte').val()) || 0;
             const prixSaisi = parseFloat($('#newLignePrix').val()) || 0;
-            const lotConfigure = $('#newLigneLotConfigure').is(':checked');
-            const unitesParLot = Math.max(2, parseInt($('#newLigneLotUnites').val()) || 2);
-            const libelleLot = $('#newLigneLotLibelle').val() || 'Unité';
+
+            // Le lot vient soit du mode catalogue (structure fixe), soit du mode
+            // ad-hoc (produit pas encore catalogué). Le prix saisi est le prix du
+            // lot uniquement si un prix de lot est configuré en catalogue pour ce
+            // type ; sinon (ad-hoc, ou lot catalogue sans prix configuré), c'est
+            // le prix unitaire classique.
+            let lotConfigure, unitesParLot, libelleLot, prixEstLot;
+            const modeCatalogueActif = $('#newLigneVenteCatalogue').is(':visible');
+            if (modeCatalogueActif && $('#newLigneModeVente').val() !== 'unite') {
+                lotConfigure = true;
+                const opt = $('#newLigneModeVente').find('option:selected');
+                unitesParLot = parseInt(opt.data('unites')) || 2;
+                libelleLot = $('#newLigneModeVente').val();
+                const prixLotCatalogue = opt.data('prix-lot');
+                prixEstLot = (prixLotCatalogue !== '' && prixLotCatalogue !== undefined && prixLotCatalogue !== null);
+            } else if (!modeCatalogueActif && $('#newLigneLotConfigure').is(':checked')) {
+                lotConfigure = true;
+                unitesParLot = Math.max(2, parseInt($('#newLigneLotUnites').val()) || 2);
+                libelleLot = $('#newLigneLotLibelle').val() || 'Unité';
+                prixEstLot = false;
+            } else {
+                lotConfigure = false;
+                unitesParLot = 1;
+                libelleLot = 'Unité';
+                prixEstLot = false;
+            }
+
+            // Saisie : nombre de CARTONS pour un produit "saisie_par_carton"
+            // (fiche produit) tant qu'un mode lot catalogue est actif ; nombre
+            // de PIÈCES dans tous les autres cas (comportement standard,
+            // inchangé). qte reste TOUJOURS en pièces en interne (payload,
+            // contrôle de stock, ligne insérée).
+            const enModeCarton = modeCatalogueActif && $('#newLigneModeVente').val() !== 'unite' && !!$newProd.data('saisie-carton');
+            const qteSaisie = parseInt($('#newLigneQte').val()) || 0;
+            const qte = enModeCarton ? qteSaisie * unitesParLot : qteSaisie;
 
             if (!produit) { showToast('Choisissez une catégorie puis un produit.', 'error'); return; }
             if (!boutique) { showToast('Boutique du bon introuvable : ajout impossible.', 'error'); return; }
             if (qte <= 0) { showToast('Saisissez une quantité valide (> 0).', 'error'); return; }
+
+            function reinitialiserFormulaireNouvelleLigne() {
+                $('#newLigneQte, #newLignePrix').val('');
+                $('#newLigneLotConfigure').prop('checked', false);
+                $('#newLigneLotDetails').hide();
+                $('#newLigneLotUnites').val(2);
+                $('#newLigneLotLibelle').val('Unité');
+                $('#newLigneModeVente').val('unite');
+                $('#newLigneModeVenteLotWrap').hide();
+                $('#newLigneModeVentePrixLotZone').hide();
+                $('#newLigneModeVentePrixLot').val('');
+                $('#newLigneLotPrixInfo').hide();
+                appliquerModeVenteProduit([]);
+                filtrerProduitsNouvelleLigne();
+            }
+
+            // Le produit est-il déjà présent dans ce bon (ligne existante ou déjà
+            // ajoutée dans cette session) ? Si oui, on augmente simplement sa
+            // quantité au lieu de dupliquer une ligne pour le même produit.
+            const ligneExistante = $('#editLignesTable tbody tr').filter(function() {
+                return String($(this).data('produit')) === String(produit) && !$(this).hasClass('ligne-a-supprimer');
+            }).first();
 
             $.ajax({
                 url: baseUrl, type: 'POST', dataType: 'json',
@@ -1929,18 +2172,29 @@ $(document).ready(function() {
                     const dejaAjoute = qteDejaAjouteePourProduit(produit, boutique);
                     const disponibleRestant = resp.disponible - dejaAjoute;
                     if (disponibleRestant < qte) {
-                        showToast('Stock insuffisant pour « ' + resp.titre + ' » : disponible ' + disponibleRestant + (dejaAjoute > 0 ? ' (après ' + dejaAjoute + ' déjà ajouté(s) dans ce bon)' : '') + ', demandé ' + qte + '.', 'error');
+                        showToast('Stock insuffisant pour « ' + resp.titre + ' » : disponible ' + disponibleRestant + (dejaAjoute > 0 ? ' (après ' + dejaAjoute + ' déjà ajouté(s) dans ce bon)' : '') + ', demandé ' + qte + ' unité(s).', 'error');
                         return;
                     }
+
+                    if (ligneExistante.length) {
+                        const qteActuelle = parseFloat(ligneExistante.find('.qte').val()) || 0;
+                        const nouvelleQte = qteActuelle + qte;
+                        ligneExistante.find('.qte').val(nouvelleQte).trigger('change');
+                        reinitialiserFormulaireNouvelleLigne();
+                        showToast((resp.titre || produitTexte) + ' est déjà dans ce bon : quantité augmentée à ' + nouvelleQte + ' pièce(s) sur la ligne existante.', 'success');
+                        return;
+                    }
+
                     const prixFinal = prixSaisi > 0 ? prixSaisi : resp.prix;
-                    const montant = qte * prixFinal;
-                    const pplInitial = lotConfigure ? unitesParLot : 1;
-                    const nbLotsInitial = Math.floor(qte / pplInitial);
+                    const nbLotsInitial = Math.floor(qte / unitesParLot);
+                    // Montant : nb de lots complets × prix DU LOT si un prix de lot
+                    // est configuré, qté (pièces) × prix unitaire sinon.
+                    const montant = (prixEstLot && unitesParLot > 1) ? nbLotsInitial * prixFinal : qte * prixFinal;
                     const row = `<tr class="ligne-commande ligne-nouvelle" data-id="" data-produit="${produit}" data-boutique="${boutique}"
-                        data-lot-configure="${lotConfigure ? '1' : '0'}" data-libelle-lot="${escHtml(libelleLot)}">
+                        data-lot-configure="${lotConfigure ? '1' : '0'}" data-prix-est-lot="${prixEstLot ? '1' : '0'}" data-libelle-lot="${escHtml(libelleLot)}">
                         <td class="fw-semibold">${escHtml(resp.titre || produitTexte)} <span class="badge bg-primary-subtle text-primary" style="font-size:9px;">nouveau</span></td>
                         <td class="text-center"><input type="number" class="form-control form-control-sm qte" value="${qte}" min="0" style="width:80px;display:inline-block;text-align:center;"></td>
-                        <td class="text-center"><input type="number" class="form-control form-control-sm produits-par-lot" value="${pplInitial}" min="1" style="width:90px;display:inline-block;text-align:center;"></td>
+                        <td class="text-center"><input type="number" class="form-control form-control-sm produits-par-lot" value="${unitesParLot}" min="1" style="width:90px;display:inline-block;text-align:center;"></td>
                         <td class="text-center nb-lots-ligne fw-bold">${nbLotsInitial}</td>
                         <td class="text-end"><input type="number" class="form-control form-control-sm prix" value="${prixFinal}" min="0" style="width:120px;display:inline-block;text-align:right;"></td>
                         <td class="text-end montant-ligne fw-bold">${montant.toLocaleString('fr-FR')}</td>
@@ -1955,12 +2209,7 @@ $(document).ready(function() {
                     // sur bootstrap-select 1.14 beta, 'val' seul ne réaffiche pas toujours
                     // correctement le placeholder après une sélection (le nom du produit
                     // choisi restait affiché) — la reconstruction garantit un affichage fiable.
-                    $('#newLigneQte, #newLignePrix').val('');
-                    $('#newLigneLotConfigure').prop('checked', false);
-                    $('#newLigneLotDetails').hide();
-                    $('#newLigneLotUnites').val(2);
-                    $('#newLigneLotLibelle').val('Unité');
-                    filtrerProduitsNouvelleLigne();
+                    reinitialiserFormulaireNouvelleLigne();
                     recalculerTotaux();
                     showToast('Ligne ajoutée : ' + (resp.titre || produitTexte) + '. Vous pouvez continuer à ajouter d\'autres lignes.', 'success');
                 },
@@ -1969,10 +2218,23 @@ $(document).ready(function() {
         });
 
         $('#edit_avance').on('input', recalculerTotaux);
+
+        // Montant d'une ligne : si le champ "Prix" contient un prix DE LOT (flag
+        // data-prix-est-lot, posé uniquement pour les lignes ajoutées via le
+        // catalogue) -> montant = nb de cartons complets × prix du lot. Sinon
+        // (produit simple ou lot ad-hoc à prix/unité) -> montant = qté × prix/unité,
+        // comme toujours. La quantité en base reste toujours en unités dans les deux cas.
+        function montantLigne(row) {
+            const qte = parseFloat(row.find('.qte').val()) || 0;
+            const ppl = Math.max(1, parseFloat(row.find('.produits-par-lot').val()) || 1);
+            const prix = parseFloat(row.find('.prix').val()) || 0;
+            const prixEstLot = row.data('prix-est-lot') == 1 || row.data('prix-est-lot') === '1';
+            if (prixEstLot && ppl > 1) return Math.floor(qte / ppl) * prix;
+            return qte * prix;
+        }
         $(document).on('change', '#editLignesTable .qte, #editLignesTable .prix', function() {
             const row = $(this).closest('tr');
-            const montant = (parseFloat(row.find('.qte').val()) || 0) * (parseFloat(row.find('.prix').val()) || 0);
-            row.find('.montant-ligne').text(montant.toLocaleString('fr-FR'));
+            row.find('.montant-ligne').text(montantLigne(row).toLocaleString('fr-FR'));
             recalculerTotaux();
         });
         $(document).on('change', '#editLignesTable .qte, #editLignesTable .produits-par-lot', function() {
@@ -1980,6 +2242,8 @@ $(document).ready(function() {
             const qte = parseFloat(row.find('.qte').val()) || 0;
             const ppl = Math.max(1, parseFloat(row.find('.produits-par-lot').val()) || 1);
             row.find('.nb-lots-ligne').text(Math.floor(qte / ppl));
+            row.find('.montant-ligne').text(montantLigne(row).toLocaleString('fr-FR'));
+            recalculerTotaux();
         });
         $(document).on('click', '#editLignesTable .supprimer-ligne', function() {
             const row = $(this).closest('tr');
@@ -2019,9 +2283,8 @@ $(document).ready(function() {
             row.find('.prix').val(row.data('prix-avant-suppression') || 0);
             const qte = parseFloat(row.find('.qte').val()) || 0;
             const ppl = Math.max(1, parseFloat(row.find('.produits-par-lot').val()) || 1);
-            const prix = parseFloat(row.find('.prix').val()) || 0;
             row.find('.nb-lots-ligne').text(Math.floor(qte / ppl));
-            row.find('.montant-ligne').text((qte * prix).toLocaleString('fr-FR'));
+            row.find('.montant-ligne').text(montantLigne(row).toLocaleString('fr-FR'));
             row.find('.annuler-suppression-ligne')
                 .removeClass('annuler-suppression-ligne').addClass('supprimer-ligne')
                 .attr('title', 'Supprimer')
@@ -2033,6 +2296,24 @@ $(document).ready(function() {
             $('#editContent').empty();
             location.reload();
         });
+        // Le serveur (comme l'historique de toutes les lignes déjà enregistrées)
+        // attend toujours un prix/unité. Pour une ligne où "Prix" contient un
+        // prix DE LOT (flag data-prix-est-lot), on convertit ici seulement,
+        // jamais à l'écran.
+        function prixUnitePourEnvoi(row) {
+            const prix = parseFloat(row.find('.prix').val()) || 0;
+            const ppl = Math.max(1, parseFloat(row.find('.produits-par-lot').val()) || 1);
+            const prixEstLot = row.data('prix-est-lot') == 1 || row.data('prix-est-lot') === '1';
+            return (prixEstLot && ppl > 1) ? Math.round((prix / ppl) * 100) / 100 : prix;
+        }
+        // Le prix du lot TEL QUE SAISI (sans division), à conserver tel quel en
+        // base pour un affichage futur sans reconstruction ni erreur d'arrondi.
+        // null si la ligne n'est pas vendue par lot.
+        function prixLotPourEnvoi(row) {
+            const prixEstLot = row.data('prix-est-lot') == 1 || row.data('prix-est-lot') === '1';
+            return prixEstLot ? (parseFloat(row.find('.prix').val()) || 0) : null;
+        }
+
         $('#btnEnregistrerEdit').click(function() {
             const commandes = [];
             const nouvellesLignes = [];
@@ -2047,7 +2328,8 @@ $(document).ready(function() {
                             boutique_id: row.data('boutique'),
                             quantite: qte,
                             produits_par_lot: Math.max(1, parseInt(row.find('.produits-par-lot').val()) || 1),
-                            prix: parseFloat(row.find('.prix').val()) || 0,
+                            prix: prixUnitePourEnvoi(row),
+                            prix_lot: prixLotPourEnvoi(row),
                             lot_configure: row.data('lot-configure') == 1 || row.data('lot-configure') === '1',
                             libelle_lot: row.data('libelle-lot') || 'Unité'
                         });
@@ -2057,7 +2339,8 @@ $(document).ready(function() {
                         id: id,
                         quantite: qte,
                         produits_par_lot: Math.max(1, parseInt(row.find('.produits-par-lot').val()) || 1),
-                        prix: parseFloat(row.find('.prix').val()) || 0,
+                        prix: prixUnitePourEnvoi(row),
+                        prix_lot: prixLotPourEnvoi(row),
                         supprimer: qte === 0
                     });
                 }

@@ -59,6 +59,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
             $categorie_id      = trim($_POST['categorie_id'] ?? '');
             $description       = trim($_POST['description_produit'] ?? '');
             $oldCode           = trim($_POST['old_code'] ?? $code);
+            $saisie_par_carton = isset($_POST['saisie_par_carton']) ? 1 : 0;
 
             // ✅ État Actif/Inactif saisi manuellement (plus de calcul auto)
             $etat_input = trim($_POST['etat_produit'] ?? 'Actif');
@@ -97,11 +98,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
                         } else {
                             $sql = "INSERT INTO produit 
                                     (code_produit, titre_produit, prix_fournisseur, prix_produit, benefice_produit, 
-                                     stock_alerte, stock_produit, categorie_id, description_produit, photo, type_photo, etat_produit)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                                     stock_alerte, stock_produit, categorie_id, description_produit, photo, type_photo, etat_produit, saisie_par_carton)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
                             $pdo->prepare($sql)->execute([
                                 $code, $titre, $prix_fournisseur, $prix_produit, $benefice,
-                                $stock_alerte, $stock_produit, $categorie_id, $description, $photo, $type_photo, $etat
+                                $stock_alerte, $stock_produit, $categorie_id, $description, $photo, $type_photo, $etat, $saisie_par_carton
                             ]);
 
                             // Initialisation du stock dans chaque boutique
@@ -123,19 +124,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
                         if ($photo !== null) {
                             $sql = "UPDATE produit SET code_produit=?, titre_produit=?, prix_fournisseur=?, prix_produit=?, 
                                     benefice_produit=?, stock_alerte=?, stock_produit=?, categorie_id=?, description_produit=?, 
-                                    photo=?, type_photo=?, etat_produit=? WHERE code_produit = ?";
+                                    photo=?, type_photo=?, etat_produit=?, saisie_par_carton=? WHERE code_produit = ?";
                             $pdo->prepare($sql)->execute([
                                 $code, $titre, $prix_fournisseur, $prix_produit, $benefice,
                                 $stock_alerte, $stock_produit, $categorie_id, $description,
-                                $photo, $type_photo, $etat, $oldCode
+                                $photo, $type_photo, $etat, $saisie_par_carton, $oldCode
                             ]);
                         } else {
                             $sql = "UPDATE produit SET code_produit=?, titre_produit=?, prix_fournisseur=?, prix_produit=?, 
                                     benefice_produit=?, stock_alerte=?, stock_produit=?, categorie_id=?, description_produit=?, 
-                                    etat_produit=? WHERE code_produit = ?";
+                                    etat_produit=?, saisie_par_carton=? WHERE code_produit = ?";
                             $pdo->prepare($sql)->execute([
                                 $code, $titre, $prix_fournisseur, $prix_produit, $benefice,
-                                $stock_alerte, $stock_produit, $categorie_id, $description, $etat, $oldCode
+                                $stock_alerte, $stock_produit, $categorie_id, $description, $etat, $saisie_par_carton, $oldCode
                             ]);
                         }
                         if ($oldCode !== $code) {
@@ -807,6 +808,17 @@ body {
                         </div>
                     </div>
 
+                    <!-- Vente / achat par lot -->
+                    <div class="row g-3 mb-4">
+                        <div class="col-12">
+                            <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
+                                <input type="checkbox" id="saisie_par_carton" name="saisie_par_carton" style="width:16px;height:16px;">
+                                <span>Vente/achat par lot : la quantité saisie est le <strong>nombre de cartons</strong> (au lieu du nombre de pièces)</span>
+                            </label>
+                            <small class="text-muted d-block mt-1">À activer uniquement si un prix de vente et/ou un prix d'achat spécifique au lot est configuré pour ce produit (menu « Configuration des lots »).</small>
+                        </div>
+                    </div>
+
                     <!-- Stock -->
                     <div class="section-title stock"><i class="bi bi-boxes"></i> GESTION DE STOCK</div>
                     <div class="row g-3 mb-4">
@@ -1086,6 +1098,7 @@ $(function() {
     $('#categorie_id').val(p.categorie_id);
     $('#description_produit').val(p.description_produit);
     $('#etat_produit').val(p.etat_produit === 'Inactif' ? 'Inactif' : 'Actif');
+    $('#saisie_par_carton').prop('checked', parseInt(p.saisie_par_carton) === 1);
     $('#benefice_estime').val((parseFloat(p.prix_produit) - parseFloat(p.prix_fournisseur)).toLocaleString('fr-FR'));
     if (p.photo) {
         $('#photoPreviewContainer').html(`<img src="data:${p.type_photo||'image/jpeg'};base64,${p.photo}" class="preview-img">`);

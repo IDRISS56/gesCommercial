@@ -54,8 +54,8 @@ $csrf_token = $_SESSION['csrf_token'];
 // LISTE DES LOTS (recherche + pagination), même principe que getTableContent() de index.php
 // ==========================================
 function getLotsTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
-    $sql = "SELECT l.code_lot, l.libelle, l.unites_par_lot, l.quantite, l.etat_lot,
-                   p.code_produit, p.titre_produit, COALESCE(c.titre_categorie,'Autre') AS titre_categorie
+    $sql = "SELECT l.code_lot, l.libelle, l.unites_par_lot, l.prix_lot, l.cout_lot, l.quantite, l.etat_lot,
+                   p.code_produit, p.titre_produit, p.prix_produit, p.prix_fournisseur, COALESCE(c.titre_categorie,'Autre') AS titre_categorie
             FROM lot l
             LEFT JOIN produit p ON l.produit_id = p.code_produit
             LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
@@ -71,6 +71,11 @@ function getLotsTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
     if (!empty($filtres['etat'])) {
         $sql .= " AND l.etat_lot = ?";
         $params[] = $filtres['etat'];
+    }
+
+    if (!empty($filtres['categorie'])) {
+        $sql .= " AND p.categorie_id = ?";
+        $params[] = $filtres['categorie'];
     }
 
     $countStmt = $pdo->prepare("SELECT COUNT(*) FROM (" . $sql . ") AS t");
@@ -89,13 +94,27 @@ function getLotsTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
     ob_start();
     if (empty($lots)):
     ?>
-    <tr><td colspan="7" class="text-center py-5 text-muted"><i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>Aucun lot trouvé</td></tr>
+    <tr><td colspan="9" class="text-center py-5 text-muted"><i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>Aucun lot trouvé</td></tr>
     <?php else: foreach ($lots as $l): ?>
     <tr>
         <td class="td-bold"><?= e($l['titre_produit'] ?? $l['code_produit']) ?></td>
         <td><?= e($l['titre_categorie']) ?></td>
         <td><?= e($l['libelle']) ?></td>
         <td><?= (int)$l['unites_par_lot'] ?></td>
+        <td>
+            <?php if ($l['prix_lot'] !== null): ?>
+                <span class="fw-bold text-success"><?= number_format((float)$l['prix_lot'], 0, ',', ' ') ?> F</span>
+            <?php else: ?>
+                <span class="text-muted small">— (<?= number_format((float)$l['prix_produit'] * (int)$l['unites_par_lot'], 0, ',', ' ') ?> F au prix unitaire)</span>
+            <?php endif; ?>
+        </td>
+        <td>
+            <?php if ($l['cout_lot'] !== null): ?>
+                <span class="fw-bold text-primary"><?= number_format((float)$l['cout_lot'], 0, ',', ' ') ?> F</span>
+            <?php else: ?>
+                <span class="text-muted small">— (<?= number_format((float)$l['prix_fournisseur'] * (int)$l['unites_par_lot'], 0, ',', ' ') ?> F au prix fourn.)</span>
+            <?php endif; ?>
+        </td>
         <td><?= (int)$l['quantite'] ?></td>
         <td>
             <span class="status-badge <?= $l['etat_lot'] === 'Actif' ? 'on' : 'off' ?>">
@@ -141,7 +160,7 @@ function getLotsTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
 // ==========================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['ajax'] === '1' && !isset($_POST['action'])) {
     $search = trim($_POST['search'] ?? '');
-    $filtres = ['etat' => trim($_POST['etat'] ?? '')];
+    $filtres = ['etat' => trim($_POST['etat'] ?? ''), 'categorie' => trim($_POST['categorie'] ?? '')];
     $page = (int)($_POST['page'] ?? 1);
     if ($page < 1) $page = 1;
     $result = getLotsTableContent($pdo, $search, $filtres, $page);
@@ -164,7 +183,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         if ($action === 'get_lots_produit') {
             $produitId = trim($_POST['produit_id'] ?? '');
             if ($produitId === '') { echo json_encode(['success' => false, 'message' => 'Produit manquant.']); exit; }
-            $stmt = $pdo->prepare("SELECT code_lot, libelle, unites_par_lot, quantite, etat_lot FROM lot WHERE produit_id = ? ORDER BY FIELD(etat_lot,'Actif','Inactif'), libelle");
+            $stmt = $pdo->prepare("SELECT code_lot, libelle, unites_par_lot, prix_lot, cout_lot, quantite, etat_lot FROM lot WHERE produit_id = ? ORDER BY FIELD(etat_lot,'Actif','Inactif'), libelle");
             $stmt->execute([$produitId]);
             $stmtStock = $pdo->prepare("SELECT stock_produit FROM produit WHERE code_produit = ?");
             $stmtStock->execute([$produitId]);
@@ -177,8 +196,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         if ($action === 'get_lot') {
             $codeLot = trim($_POST['code_lot'] ?? '');
             if ($codeLot === '') { echo json_encode(['success' => false, 'message' => 'Lot manquant.']); exit; }
-            $stmt = $pdo->prepare("SELECT l.code_lot, l.libelle, l.unites_par_lot, l.quantite, l.etat_lot,
-                                           p.titre_produit, p.stock_produit, COALESCE(c.titre_categorie,'Autre') AS titre_categorie
+            $stmt = $pdo->prepare("SELECT l.code_lot, l.libelle, l.unites_par_lot, l.prix_lot, l.cout_lot, l.quantite, l.etat_lot,
+                                           p.titre_produit, p.stock_produit, p.prix_produit, p.prix_fournisseur, COALESCE(c.titre_categorie,'Autre') AS titre_categorie
                                     FROM lot l
                                     LEFT JOIN produit p ON l.produit_id = p.code_produit
                                     LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
@@ -202,6 +221,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $produitId = trim($_POST['produit_id'] ?? '');
             $libelle = trim($_POST['libelle'] ?? '');
             $unitesParLot = intval($_POST['unites_par_lot'] ?? 0);
+            $prixLotRaw = trim($_POST['prix_lot'] ?? '');
+            $prixLot = ($prixLotRaw === '') ? null : round((float)str_replace(',', '.', $prixLotRaw), 2);
+            $coutLotRaw = trim($_POST['cout_lot'] ?? '');
+            $coutLot = ($coutLotRaw === '') ? null : round((float)str_replace(',', '.', $coutLotRaw), 2);
 
             if ($categorieId === '' || $produitId === '') {
                 throw new Exception("Veuillez d'abord choisir une catégorie, puis un produit.");
@@ -211,6 +234,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
             if ($unitesParLot < 1) {
                 throw new Exception("Le nombre d'unités par lot doit être supérieur ou égal à 1.");
+            }
+            if ($prixLot !== null && $prixLot < 0) {
+                throw new Exception("Le prix du lot ne peut pas être négatif.");
+            }
+            if ($coutLot !== null && $coutLot < 0) {
+                throw new Exception("Le coût du lot ne peut pas être négatif.");
             }
 
             $stmtProd = $pdo->prepare("SELECT categorie_id, titre_produit, stock_produit FROM produit WHERE code_produit = ?");
@@ -234,8 +263,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $existant = $stmtExist->fetch(PDO::FETCH_ASSOC);
 
             if ($existant) {
-                $stmt = $pdo->prepare("UPDATE lot SET unites_par_lot = ?, quantite = ? WHERE code_lot = ?");
-                $stmt->execute([$unitesParLot, $quantite, $existant['code_lot']]);
+                $stmt = $pdo->prepare("UPDATE lot SET unites_par_lot = ?, prix_lot = ?, cout_lot = ?, quantite = ? WHERE code_lot = ?");
+                $stmt->execute([$unitesParLot, $prixLot, $coutLot, $quantite, $existant['code_lot']]);
                 echo json_encode([
                     'success' => true,
                     'message' => "Lot « $libelle » déjà configuré pour ce produit : quantité resynchronisée avec le stock ($quantite).",
@@ -245,8 +274,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
 
             $codeLot = generateLotId($pdo);
-            $stmt = $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, produit_id, quantite, etat_lot) VALUES (?, ?, ?, ?, ?, 'Actif')");
-            $stmt->execute([$codeLot, $libelle, $unitesParLot, $produitId, $quantite]);
+            $stmt = $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, prix_lot, cout_lot, produit_id, quantite, etat_lot) VALUES (?, ?, ?, ?, ?, ?, ?, 'Actif')");
+            $stmt->execute([$codeLot, $libelle, $unitesParLot, $prixLot, $coutLot, $produitId, $quantite]);
 
             echo json_encode([
                 'success' => true,
@@ -260,9 +289,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         if ($action === 'update_lot') {
             $codeLot = trim($_POST['code_lot'] ?? '');
             $unitesParLot = intval($_POST['unites_par_lot'] ?? 0);
+            $prixLotRaw = trim($_POST['prix_lot'] ?? '');
+            $prixLot = ($prixLotRaw === '') ? null : round((float)str_replace(',', '.', $prixLotRaw), 2);
+            $coutLotRaw = trim($_POST['cout_lot'] ?? '');
+            $coutLot = ($coutLotRaw === '') ? null : round((float)str_replace(',', '.', $coutLotRaw), 2);
 
             if ($codeLot === '') throw new Exception("Lot manquant.");
             if ($unitesParLot < 1) throw new Exception("Le nombre d'unités par lot doit être supérieur ou égal à 1.");
+            if ($prixLot !== null && $prixLot < 0) throw new Exception("Le prix du lot ne peut pas être négatif.");
+            if ($coutLot !== null && $coutLot < 0) throw new Exception("Le coût du lot ne peut pas être négatif.");
 
             // La quantité n'est jamais modifiée à la main : on la resynchronise
             // avec le stock actuel du produit (table `produit`).
@@ -275,8 +310,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $stmtStock->execute([$produitId]);
             $quantite = max(0, (int) $stmtStock->fetchColumn());
 
-            $stmt = $pdo->prepare("UPDATE lot SET unites_par_lot = ?, quantite = ? WHERE code_lot = ?");
-            $stmt->execute([$unitesParLot, $quantite, $codeLot]);
+            $stmt = $pdo->prepare("UPDATE lot SET unites_par_lot = ?, prix_lot = ?, cout_lot = ?, quantite = ? WHERE code_lot = ?");
+            $stmt->execute([$unitesParLot, $prixLot, $coutLot, $quantite, $codeLot]);
 
             // Un lot réapprovisionné (quantite > 0) redevient automatiquement actif.
             $pdo->prepare("UPDATE lot SET etat_lot = 'Actif' WHERE code_lot = ? AND quantite > 0")->execute([$codeLot]);
@@ -310,7 +345,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 // CHARGEMENT INITIAL DE LA PAGE
 // ==========================================
 $search = trim($_POST['search'] ?? '');
-$filtres = ['etat' => trim($_POST['etat'] ?? '')];
+$filtres = ['etat' => trim($_POST['etat'] ?? ''), 'categorie' => trim($_POST['categorie'] ?? '')];
 $page = (int)($_POST['page'] ?? 1);
 if ($page < 1) $page = 1;
 
@@ -475,6 +510,14 @@ $produitsConfigures = (int)$pdo->query("SELECT COUNT(DISTINCT produit_id) FROM l
                 <label class="text-uppercase small fw-bold text-muted mb-0"><i class="bi bi-search"></i> Recherche</label>
                 <input type="text" id="searchInput" class="form-control" placeholder="Produit, catégorie, type de lot..." value="<?= e($search) ?>" style="flex:1; min-width:150px;">
 
+                <label class="text-uppercase small fw-bold text-muted mb-0"><i class="bi bi-tags"></i> Catégorie</label>
+                <select id="categorieFilter" class="selectpicker" data-live-search="true">
+                    <option value="">Toutes</option>
+                    <?php foreach ($categories as $c): ?>
+                        <option value="<?= e($c['code_categorie']) ?>" <?= ($filtres['categorie'] === $c['code_categorie']) ? 'selected' : '' ?>><?= e($c['titre_categorie']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+
                 <label class="text-uppercase small fw-bold text-muted mb-0"><i class="bi bi-toggle-on"></i> État</label>
                 <select id="etatFilter" class="selectpicker">
                     <option value="">Tous</option>
@@ -502,6 +545,8 @@ $produitsConfigures = (int)$pdo->query("SELECT COUNT(DISTINCT produit_id) FROM l
                     <th>Catégorie</th>
                     <th>Type de lot</th>
                     <th>Unités/lot</th>
+                    <th>Prix du lot</th>
+                    <th>Coût du lot</th>
                     <th>Quantité dispo.</th>
                     <th>État</th>
                     <th class="text-end">Actions</th>
@@ -516,7 +561,7 @@ $produitsConfigures = (int)$pdo->query("SELECT COUNT(DISTINCT produit_id) FROM l
 
 <!-- Modal Créer / Modifier un lot -->
 <div class="modal fade modal-chic" id="lotModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered modal-md">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title"><i class="bi bi-box-seam" id="lotModalIcon"></i><span id="lotModalTitleText">Nouveau lot</span></h5>
@@ -576,6 +621,16 @@ $produitsConfigures = (int)$pdo->query("SELECT COUNT(DISTINCT produit_id) FROM l
                             <label for="unites_par_lot" class="form-label">Unités par lot <span class="text-danger">*</span></label>
                             <input type="number" name="unites_par_lot" id="unites_par_lot" class="form-control" min="1" step="1" value="1" required disabled>
                             <div class="form-text" style="font-size:11px;color:var(--text-tertiary);">Ex : 24 pour un carton de 24 pièces.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="prix_lot" class="form-label">Prix du lot <span class="text-muted">(vente, optionnel)</span></label>
+                            <input type="number" name="prix_lot" id="prix_lot" class="form-control" min="0" step="0.01" placeholder="Laisser vide = prix unitaire × unités" disabled>
+                            <div class="form-text" style="font-size:11px;color:var(--text-tertiary);">Ex : 10000 pour vendre le carton entier à 10 000 FCFA au lieu de 24 × prix unitaire.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="cout_lot" class="form-label">Coût du lot <span class="text-muted">(achat, optionnel)</span></label>
+                            <input type="number" name="cout_lot" id="cout_lot" class="form-control" min="0" step="0.01" placeholder="Laisser vide = prix fournisseur × unités" disabled>
+                            <div class="form-text" style="font-size:11px;color:var(--text-tertiary);">Ex : 8000 si le fournisseur vend le carton de 24 à 8 000 FCFA.</div>
                         </div>
                         <div class="col-md-6">
                             <label for="quantite" class="form-label">Quantité disponible</label>
@@ -638,6 +693,21 @@ $(document).ready(function() {
     const toastEl = document.getElementById('toastMsg');
     const toast = new bootstrap.Toast(toastEl, { delay: 2500 });
 
+    // Tant que le modal est caché (display:none), bootstrap-select ne peut pas
+    // mesurer/peindre correctement le bouton d'un select : le libellé choisi
+    // (catégorie) ne s'affiche pas. Et comme dans entree_stock.php, 'refresh'
+    // ne resynchronise pas toujours la liste interne du plugin sur cette
+    // version beta — cela duplique le texte du bouton (ex. "CartonCartonCarton").
+    // ✅ On applique donc le même pattern DESTROY + RÉINIT qu'entree_stock.php,
+    // une fois le modal réellement visible.
+    lotModalEl.addEventListener('shown.bs.modal', function() {
+        ['#categorie_id', '#produit_id', '#libelle'].forEach(function(sel) {
+            var $s = $(sel);
+            if ($s.hasClass('bs-select-hidden') || $s.data('selectpicker')) $s.selectpicker('destroy');
+            $s.selectpicker();
+        });
+    });
+
     function showToast(msg, type) {
         type = type || 'success';
         const colors = { success: 'bg-success', error: 'bg-danger', info: 'bg-primary' };
@@ -655,7 +725,8 @@ $(document).ready(function() {
         currentPage = page;
         const search = $('#searchInput').val();
         const etat = $('#etatFilter').val();
-        $.post(window.location.href, { ajax: 1, search: search, etat: etat, page: page }, function(data) {
+        const categorie = $('#categorieFilter').val();
+        $.post(window.location.href, { ajax: 1, search: search, etat: etat, categorie: categorie, page: page }, function(data) {
             $('#tableBody').html(data.table);
             $('#paginationContainer').html(data.pagination);
             $('#totalCount').text(data.total + ' lot(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
@@ -672,10 +743,15 @@ $(document).ready(function() {
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(function() { rechercher(1); }, 300);
     });
+    $('#categorieFilter').on('changed.bs.select', function() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(function() { rechercher(1); }, 300);
+    });
     $('#filterBtn').on('click', function() { rechercher(1); });
     $('#resetBtn').on('click', function() {
         $('#searchInput').val('');
         $('#etatFilter').selectpicker('val', '');
+        $('#categorieFilter').selectpicker('val', '');
         rechercher(1);
     });
     $(document).on('click', '.page-link', function(e) {
@@ -691,11 +767,13 @@ $(document).ready(function() {
     });
 
     function lockStepsAfterProduit(lock) {
-        ['#libelle', '#unites_par_lot'].forEach(function(sel) {
+        ['#libelle', '#unites_par_lot', '#prix_lot', '#cout_lot'].forEach(function(sel) {
             $(sel).prop('disabled', lock);
         });
         if (lock) $('#quantite').val('—');
-        if ($('#libelle').data('selectpicker')) $('#libelle').selectpicker('refresh');
+        var $libelle = $('#libelle');
+        if ($libelle.hasClass('bs-select-hidden') || $libelle.data('selectpicker')) $libelle.selectpicker('destroy');
+        $libelle.selectpicker();
     }
 
     function filterProduitsByCategorie() {
@@ -738,7 +816,9 @@ $(document).ready(function() {
             if (res.lots && res.lots.length) {
                 var html = '<strong><i class="bi bi-info-circle me-1"></i>Lots déjà configurés pour ce produit :</strong><br>';
                 res.lots.forEach(function(l) {
-                    html += `<span class="lot-chip">${l.libelle} — ${l.unites_par_lot}/lot — dispo ${l.quantite} <em>(${l.etat_lot})</em></span>`;
+                    var prixTxt = (l.prix_lot !== null && l.prix_lot !== '') ? Number(l.prix_lot).toLocaleString('fr-FR') + ' F' : 'prix unitaire × qté';
+                    var coutTxt = (l.cout_lot !== null && l.cout_lot !== '') ? Number(l.cout_lot).toLocaleString('fr-FR') + ' F' : 'prix fourn. × qté';
+                    html += `<span class="lot-chip">${l.libelle} — ${l.unites_par_lot}/lot — vente ${prixTxt} — achat ${coutTxt} — dispo ${l.quantite} <em>(${l.etat_lot})</em></span>`;
                 });
                 html += '<div class="mt-1 text-muted">Choisir le même type ci-dessous resynchronisera sa quantité avec le stock.</div>';
                 $('#lotsExistants').html(html).show();
@@ -757,13 +837,17 @@ $(document).ready(function() {
         $('#lotModalIcon').attr('class', 'bi bi-box-seam');
         $('#lotModalTitleText').text('Nouveau lot');
         $('#btnSubmitLotText').text('Enregistrer la configuration');
+        $('#prix_lot').val('');
+        $('#cout_lot').val('');
 
         $('#lotCreateFields').show();
         $('#lotEditInfo').hide();
         $('#categorie_id, #produit_id, #libelle').prop('required', true);
 
-        if ($('#categorie_id').data('selectpicker')) $('#categorie_id').selectpicker('val', '');
-        if ($('#categorie_id').data('selectpicker')) $('#categorie_id').selectpicker('refresh');
+        var $cat = $('#categorie_id');
+        $cat.val('');
+        if ($cat.hasClass('bs-select-hidden') || $cat.data('selectpicker')) $cat.selectpicker('destroy');
+        $cat.selectpicker();
 
         filterProduitsByCategorie();
     }
@@ -794,6 +878,8 @@ $(document).ready(function() {
             $('#lotEditInfo').show();
 
             $('#unites_par_lot').prop('disabled', false).val(l.unites_par_lot);
+            $('#prix_lot').prop('disabled', false).val(l.prix_lot !== null ? l.prix_lot : '');
+            $('#cout_lot').prop('disabled', false).val(l.cout_lot !== null ? l.cout_lot : '');
             $('#quantite').val((typeof l.stock_produit !== 'undefined') ? l.stock_produit : l.quantite);
 
             lotModal.show();

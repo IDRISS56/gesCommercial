@@ -88,7 +88,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $q = trim($_POST['q'] ?? '');
                 $cat = $_POST['categorie'] ?? 'Tous';
                 $sql = "SELECT p.code_produit, p.titre_produit, p.prix_fournisseur, p.prix_produit,
-                               p.etat_produit, COALESCE(c.titre_categorie, 'Autre') as categorie,
+                               p.etat_produit, p.saisie_par_carton, COALESCE(c.titre_categorie, 'Autre') as categorie,
                                COALESCE(sb.quantite, CAST(p.stock_produit AS SIGNED)) as stock
                         FROM produit p
                         LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
@@ -107,7 +107,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $sql .= " ORDER BY p.titre_produit ASC LIMIT 80";
                 $stmt = $pdo->prepare($sql);
                 $stmt->execute($params);
-                echo json_encode(['success' => true, 'products' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
+                $produits = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                // Lots catalogue (menu "Configuration des lots") des produits renvoyés :
+                // structure fixe (libelle + unites_par_lot), seul cout_lot est modifiable
+                // au moment de l'achat.
+                if ($produits) {
+                    $codes = array_column($produits, 'code_produit');
+                    $in = implode(',', array_fill(0, count($codes), '?'));
+                    $stmtLots = $pdo->prepare("SELECT produit_id, libelle, unites_par_lot, cout_lot FROM lot WHERE etat_lot = 'Actif' AND produit_id IN ($in)");
+                    $stmtLots->execute($codes);
+                    $lotsParProduit = [];
+                    foreach ($stmtLots->fetchAll(PDO::FETCH_ASSOC) as $l) {
+                        $lotsParProduit[$l['produit_id']][] = [
+                            'libelle' => $l['libelle'],
+                            'unites_par_lot' => (int) $l['unites_par_lot'],
+                            'cout_lot' => $l['cout_lot'] !== null ? (float) $l['cout_lot'] : null,
+                        ];
+                    }
+                    foreach ($produits as &$p) {
+                        $p['lots'] = $lotsParProduit[$p['code_produit']] ?? [];
+                    }
+                    unset($p);
+                }
+
+                echo json_encode(['success' => true, 'products' => $produits]);
                 exit;
 
             // ===== VALIDER L'ACHAT =====
@@ -191,6 +215,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         $qte = max(1, intval($ligne['qte'] ?? 1));
                         $prix_achat = floatval($ligne['prix_achat'] ?? 0);
                         $montant = floatval($ligne['montant'] ?? ($prix_achat * $qte));
+                        $prixLotLigne = (isset($ligne['prix_lot']) && $ligne['prix_lot'] !== null && $ligne['prix_lot'] !== '') ? round((float)$ligne['prix_lot'], 2) : null;
                         if (!$code_prod) continue;
 
                         // Configuration de lot (optionnelle) : si l'utilisateur n'a pas
@@ -204,18 +229,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                         $lot_id = null;
                         $produits_par_lot = 1;
                         if ($lotConfigure) {
-                            $lot_id = 'LOT-' . date('YmdHis') . rand(100, 999) . '-' . $i;
-                            $produits_par_lot = $unitesParLot;
-                            $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, produit_id, quantite, etat_lot)
-                                          VALUES (?, ?, ?, ?, ?, 'Actif')")
-                                ->execute([$lot_id, $libelleLot, $unitesParLot, $code_prod, $qte]);
+                            // Un lot est déjà configuré pour ce produit (même libellé) ?
+                            // On le réutilise — le lot ne doit être créé qu'une seule fois,
+                            // pas à chaque nouvel achat du même produit.
+                            $stmtLotExist = $pdo->prepare("SELECT code_lot, unites_par_lot FROM lot WHERE produit_id = ? AND libelle = ? AND etat_lot = 'Actif' LIMIT 1");
+                            $stmtLotExist->execute([$code_prod, $libelleLot]);
+                            $lotExistant = $stmtLotExist->fetch(PDO::FETCH_ASSOC);
+
+                            if ($lotExistant) {
+                                $lot_id = $lotExistant['code_lot'];
+                                $produits_par_lot = (int) $lotExistant['unites_par_lot'];
+                            } else {
+                                $lot_id = 'LOT-' . date('YmdHis') . rand(100, 999) . '-' . $i;
+                                $produits_par_lot = $unitesParLot;
+                                $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, produit_id, quantite, etat_lot)
+                                              VALUES (?, ?, ?, ?, ?, 'Actif')")
+                                    ->execute([$lot_id, $libelleLot, $unitesParLot, $code_prod, $qte]);
+                            }
                         }
 
                         $numCmd = 'BC-' . $numBase . str_pad($i, 2, '0', STR_PAD_LEFT);
-                        $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
-                                      VALUES (?, ?, ?, ?, ?, '011', CURDATE(), CURTIME(), ?, 0, ?, ?, ?, ?, ?, ?)")
+                        $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, prix_lot_ligne, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
+                                      VALUES (?, ?, ?, ?, ?, '011', CURDATE(), CURTIME(), ?, 0, ?, ?, ?, ?, ?, ?, ?)")
                             ->execute([$numCmd, $code_prod, $lot_id, $fournisseur_id, $numDocument,
-                                       $prix_achat, $qte, $produits_par_lot, $montant, USER_ID, $boutique_id,
+                                       $prix_achat, $prixLotLigne, $qte, $produits_par_lot, $montant, USER_ID, $boutique_id,
                                        $is_attente ? 'EN ATTENTE' : 'VALIDEE']);
 
                         // Entrée en stock : UNIQUEMENT si l'achat est validé directement
@@ -764,18 +801,26 @@ function addProduct(idx) {
     const existing = cart.find(item => item.code === p.code_produit);
     if (existing) {
         existing.qte += 1;
-        existing.montant = existing.qte * existing.prix_achat;
+        recalculerMontantAchat(existing);
     } else {
         const prix = parseFloat(p.prix_fournisseur) || 0;
         cart.push({
             code: p.code_produit,
             nom: p.titre_produit,
             prix_achat: prix,
+            prixUnitaire: prix,
+            prixManuel: false,
             qte: 1,
             montant: prix,
+            lots: p.lots || [],
+            modeVente: 'unite',
             lotConfigure: false,
             unitesParLot: 1,
-            libelleLot: 'Unité'
+            libelleLot: 'Unité',
+            // Produit spécial (voir fiche produit) : la quantité saisie/affichée
+            // en mode lot est le nombre de CARTONS, pas de pièces. item.qte
+            // reste toujours en pièces en interne (backend inchangé).
+            saisieParCarton: !!p.saisie_par_carton
         });
     }
     renderCart();
@@ -783,23 +828,69 @@ function addProduct(idx) {
     toast('Produit ajouté');
 }
 
+// ============================================================
+// NOUVEAU MODÈLE (lots) :
+// - La quantité saisie/affichée est TOUJOURS le nombre de pièces, que la
+//   ligne soit achetée à l'unité ou "par lot" (Carton, Boîte...).
+// - Le prix saisi est le PRIX UNITAIRE du produit tant qu'aucun coût n'est
+//   configuré pour le lot choisi. Dès qu'un coût de lot est configuré en
+//   catalogue pour ce type de lot, le prix saisi devient le COÛT DU LOT
+//   (modifiable : ça devient alors le nouveau coût du lot utilisé pour le
+//   calcul), et le montant = (pièces / unités du lot) x coût du lot.
+// ============================================================
+
+function lotChoisiAchat(item) {
+    if (!(item.lots || []).length || item.modeVente === 'unite') return null;
+    return item.lots.find(l => l.libelle === item.modeVente) || null;
+}
+
+function coutLotConfigure(item) {
+    const lotCat = lotChoisiAchat(item);
+    return !!(lotCat && lotCat.cout_lot !== null && lotCat.cout_lot !== '' && lotCat.cout_lot !== undefined);
+}
+
+function unitesActuellesAchat(item) {
+    const lotCat = lotChoisiAchat(item);
+    if (lotCat) return lotCat.unites_par_lot || 1;
+    if (!(item.lots || []).length && item.lotConfigure) return Math.max(2, parseInt(item.unitesParLot) || 2);
+    return 1;
+}
+
+function recalculerMontantAchat(item) {
+    if (coutLotConfigure(item)) {
+        const unites = unitesActuellesAchat(item);
+        item.montant = Math.round((item.qte / unites) * item.prix_achat * 100) / 100;
+    } else {
+        item.montant = item.qte * item.prix_achat;
+    }
+}
+
+// Le "pas" de saisie : en pièces normalement, ou en unités-de-carton pour un
+// produit "saisieParCarton" tant qu'un lot est sélectionné. item.qte reste
+// TOUJOURS en pièces (backend/stock inchangés).
+function pasSaisieAchat(item) {
+    if (item.saisieParCarton && lotChoisiAchat(item)) return unitesActuellesAchat(item);
+    return 1;
+}
+
 window.updateQty = function(code, delta) {
     const item = cart.find(p => p.code === code);
     if (!item) return;
-    const newQty = item.qte + delta;
+    const pas = pasSaisieAchat(item);
+    const newQty = item.qte + delta * pas;
     if (newQty <= 0) { window.removeProduct(code); return; }
     item.qte = newQty;
-    item.montant = item.qte * item.prix_achat;
+    recalculerMontantAchat(item);
     renderCart();
 };
 
 window.setQty = function(code, value) {
     const item = cart.find(p => p.code === code);
     if (!item) return;
-    let newQty = parseInt(value, 10);
-    if (isNaN(newQty) || newQty <= 0) { renderCart(); return; }
-    item.qte = newQty;
-    item.montant = item.qte * item.prix_achat;
+    const saisie = parseInt(value, 10);
+    if (isNaN(saisie) || saisie <= 0) { renderCart(); return; }
+    item.qte = saisie * pasSaisieAchat(item); // conversion cartons -> pièces (pas=1 en mode normal)
+    recalculerMontantAchat(item);
     renderCart();
 };
 
@@ -807,7 +898,14 @@ window.updatePrice = function(code, newPrice) {
     const item = cart.find(p => p.code === code);
     if (!item) return;
     item.prix_achat = Math.max(0, parseFloat(newPrice) || 0);
-    item.montant = item.qte * item.prix_achat;
+    item.prixManuel = true;
+    if (coutLotConfigure(item)) {
+        const lotCat = lotChoisiAchat(item);
+        if (lotCat) lotCat.cout_lot = item.prix_achat;
+    } else {
+        item.prixUnitaire = item.prix_achat;
+    }
+    recalculerMontantAchat(item);
     renderCart();
 };
 
@@ -825,32 +923,45 @@ function renderCart() {
     } else {
         let html = '';
         cart.forEach(p => {
-            const unites = Math.max(1, parseInt(p.unitesParLot) || 1);
-            let apercu;
-            if (p.lotConfigure && unites > 1) {
-                const nbLots = Math.floor(p.qte / unites);
-                const reste = p.qte % unites;
-                apercu = reste > 0 ? `${nbLots} ${esc(p.libelleLot)}(s) et ${reste} Produit(s)` : `${nbLots} ${esc(p.libelleLot)}(s)`;
+            const aCatalogue = (p.lots || []).length > 0;
+            let apercu, lotBlock, labelPrix = 'P.A';
+
+            if (aCatalogue) {
+                // Produit catalogué : structure du lot fixe. La quantité saisie
+                // est TOUJOURS le nombre de pièces. Le prix affiché est le coût
+                // du lot si un coût est configuré pour ce type, sinon le prix
+                // unitaire.
+                const lotChoisi = p.lots.find(l => l.libelle === p.modeVente);
+                if (lotChoisi) {
+                    const unites = lotChoisi.unites_par_lot || 1;
+                    const nbLots = Math.floor(p.qte / unites);
+                    const reste = p.qte % unites;
+                    apercu = reste > 0 ? `${nbLots} ${esc(p.modeVente)}(s) et ${reste} Produit(s)` : `${nbLots} ${esc(p.modeVente)}(s)`;
+                    labelPrix = coutLotConfigure(p) ? ('Coût/' + esc(p.modeVente).toLowerCase()) : 'Prix unitaire';
+                } else {
+                    apercu = `${p.qte} Produit(s)`;
+                }
+                lotBlock = `
+                <span>Acheter par :
+                    <select onclick="event.stopPropagation()" onchange="setModeVente('${p.code}', this.value)">
+                        <option value="unite" ${p.modeVente === 'unite' ? 'selected' : ''}>Unité</option>
+                        ${p.lots.map(l => `<option value="${esc(l.libelle)}" ${p.modeVente === l.libelle ? 'selected' : ''}>${esc(l.libelle)} — ${l.unites_par_lot} unité(s)</option>`).join('')}
+                    </select>
+                    ${lotChoisi ? `<span style="margin-left:8px;"><strong>${apercu}</strong></span>` : ''}
+                </span>`;
             } else {
-                apercu = `${p.qte} Produit(s)`;
-            }
-            html += `<div class="cart-line">
-                <div class="cl-info">
-                    <div class="cl-name">${esc(p.nom)}</div>
-                    <div class="cl-price">P.A: <input type="number" value="${p.prix_achat}" onchange="updatePrice('${p.code}', this.value)" onclick="event.stopPropagation()"> FCFA</div>
-                </div>
-                <div class="cl-qty">
-                    <button onclick="updateQty('${p.code}', -1)">-</button>
-                    <input type="number" class="cl-qty-input" min="1" step="1"
-                           value="${p.qte}"
-                           onclick="event.stopPropagation()"
-                           onchange="setQty('${p.code}', this.value)">
-                    <button onclick="updateQty('${p.code}', 1)">+</button>
-                </div>
-                <div class="cl-montant">${fmt(p.montant)}</div>
-                <button class="cl-remove" onclick="removeProduct('${p.code}')"><i class="bi bi-x-circle"></i></button>
-            </div>
-            <div class="cl-lot-config" style="padding:4px 10px 8px;font-size:11px;color:var(--color-gray-500);">
+                // Produit pas encore catalogué : configuration libre. La
+                // quantité saisie est TOUJOURS le nombre de pièces ; le prix
+                // reste le prix unitaire (pas de coût de lot ad-hoc).
+                const unites = Math.max(1, parseInt(p.unitesParLot) || 1);
+                if (p.lotConfigure && unites > 1) {
+                    const nbLots = Math.floor(p.qte / unites);
+                    const reste = p.qte % unites;
+                    apercu = reste > 0 ? `${nbLots} ${esc(p.libelleLot)}(s) et ${reste} Produit(s)` : `${nbLots} ${esc(p.libelleLot)}(s)`;
+                } else {
+                    apercu = `${p.qte} Produit(s)`;
+                }
+                lotBlock = `
                 <label style="cursor:pointer;">
                     <input type="checkbox" ${p.lotConfigure ? 'checked' : ''} onchange="toggleLotConfig('${p.code}', this.checked)">
                     Configurer un lot
@@ -863,7 +974,28 @@ function renderCart() {
                         ${['Boîte','Palette','Carton','Bidon','Unité'].map(l => `<option value="${l}" ${p.libelleLot === l ? 'selected' : ''}>${l}</option>`).join('')}
                     </select>
                     — <strong>${apercu}</strong>
-                </span>` : `<span style="margin-left:8px;">— ${apercu}</span>`}
+                </span>` : `<span style="margin-left:8px;">— ${apercu}</span>`}`;
+            }
+
+            html += `<div class="cart-line">
+                <div class="cl-info">
+                    <div class="cl-name">${esc(p.nom)}</div>
+                    <div class="cl-price">${labelPrix}: <input type="number" value="${p.prix_achat}" onchange="updatePrice('${p.code}', this.value)" onclick="event.stopPropagation()"> FCFA</div>
+                </div>
+                <div class="cl-qty">
+                    <button onclick="updateQty('${p.code}', -1)">-</button>
+                    <input type="number" class="cl-qty-input" min="1" step="1"
+                           title="${p.saisieParCarton && aCatalogue && p.modeVente !== 'unite' ? 'Nombre de cartons' : 'Nombre de pièces'}"
+                           value="${(p.saisieParCarton && aCatalogue && p.modeVente !== 'unite' && p.lots.find(l => l.libelle === p.modeVente)) ? Math.floor(p.qte / (p.lots.find(l => l.libelle === p.modeVente).unites_par_lot || 1)) : p.qte}"
+                           onclick="event.stopPropagation()"
+                           onchange="setQty('${p.code}', this.value)">
+                    <button onclick="updateQty('${p.code}', 1)">+</button>
+                </div>
+                <div class="cl-montant">${fmt(p.montant)}</div>
+                <button class="cl-remove" onclick="removeProduct('${p.code}')"><i class="bi bi-x-circle"></i></button>
+            </div>
+            <div class="cl-lot-config" style="padding:4px 10px 8px;font-size:11px;color:var(--color-gray-500);">
+                ${lotBlock}
             </div>`;
         });
         gid('cartItems').innerHTML = html;
@@ -873,11 +1005,35 @@ function renderCart() {
     updateButtons();
 }
 
+// ----- Changement de mode d'achat (catalogue) : la quantité (en pièces) n'a
+// pas besoin d'être réinitialisée. Le prix devient le coût du lot configuré
+// en catalogue s'il existe, sinon le prix unitaire du produit. -----
+window.setModeVente = function(code, value) {
+    const item = cart.find(p => p.code === code);
+    if (!item) return;
+    item.modeVente = value;
+    item.prixManuel = false;
+    if (value === 'unite') {
+        item.prix_achat = item.prixUnitaire;
+    } else {
+        const lotCat = (item.lots || []).find(l => l.libelle === value);
+        item.prix_achat = (lotCat && lotCat.cout_lot !== null && lotCat.cout_lot !== '' && lotCat.cout_lot !== undefined)
+            ? parseFloat(lotCat.cout_lot)
+            : item.prixUnitaire;
+    }
+    recalculerMontantAchat(item);
+    renderCart();
+};
+
+// ----- Mode "ad-hoc" (produit pas encore catalogué) : la case ne fait que
+// changer le libellé d'affichage, la quantité reste en pièces et le prix
+// reste le prix unitaire. -----
 window.toggleLotConfig = function(code, checked) {
     const item = cart.find(p => p.code === code);
     if (!item) return;
     item.lotConfigure = checked;
     if (checked && (!item.unitesParLot || item.unitesParLot < 2)) item.unitesParLot = 2;
+    recalculerMontantAchat(item);
     renderCart();
 };
 
@@ -885,6 +1041,7 @@ window.setLotUnites = function(code, value) {
     const item = cart.find(p => p.code === code);
     if (!item) return;
     item.unitesParLot = Math.max(2, parseInt(value, 10) || 2);
+    recalculerMontantAchat(item);
     renderCart();
 };
 
@@ -935,10 +1092,35 @@ gid('btnValider').addEventListener('click', function() {
 async function validerAchat(enAttente) {
     try {
         const res = await api('valider_achat', {
-            panier: JSON.stringify(cart.map(c => ({
-                code: c.code, prix_achat: c.prix_achat, qte: c.qte, montant: c.montant,
-                lot_configure: !!c.lotConfigure, unites_par_lot: c.unitesParLot || 1, libelle_lot: c.libelleLot || 'Unité'
-            }))),
+            panier: JSON.stringify(cart.map(c => {
+                const aCatalogue = (c.lots || []).length > 0;
+                let lotConfigure, unitesParLot, libelleLot, prixUnite, prixLot;
+                if (aCatalogue && c.modeVente !== 'unite') {
+                    const lotCat = c.lots.find(l => l.libelle === c.modeVente);
+                    const lotPrixConfigure = coutLotConfigure(c);
+                    lotConfigure = true;
+                    unitesParLot = (lotCat && lotCat.unites_par_lot) || 1;
+                    libelleLot = c.modeVente;
+                    // c.qte est déjà en pièces ; c.prix_achat représente le coût du
+                    // lot si un coût est configuré pour ce type, sinon le prix unitaire.
+                    prixUnite = lotPrixConfigure ? Math.round((c.prix_achat / unitesParLot) * 100) / 100 : c.prix_achat;
+                    prixLot = lotPrixConfigure ? c.prix_achat : null;
+                } else if (!aCatalogue && c.lotConfigure) {
+                    lotConfigure = true;
+                    unitesParLot = c.unitesParLot || 1;
+                    libelleLot = c.libelleLot || 'Unité';
+                    prixUnite = c.prix_achat;
+                    prixLot = null;
+                } else {
+                    lotConfigure = false;
+                    unitesParLot = 1;
+                    libelleLot = 'Unité';
+                    prixUnite = c.prix_achat;
+                    prixLot = null;
+                }
+                return { code: c.code, prix_achat: prixUnite, prix_lot: prixLot, qte: c.qte, montant: c.montant,
+                         lot_configure: lotConfigure, unites_par_lot: unitesParLot, libelle_lot: libelleLot };
+            })),
             fournisseur_id: selectedFournisseur.code,
             boutique_id: gid('boutiqueSelect').value,
             en_attente: enAttente,

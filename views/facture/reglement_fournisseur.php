@@ -61,6 +61,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 if (empty($fournisseur_id)) {
                     throw new Exception("Veuillez sélectionner un fournisseur ou une facture.");
                 }
+                $stmtF = $pdo->prepare("SELECT code_contact, nom_prenom_contact FROM contact WHERE code_contact = ? AND type_contact = 'Fournisseur' FOR UPDATE");
+                $stmtF->execute([$fournisseur_id]);
+                $contactDepense = $stmtF->fetch(PDO::FETCH_ASSOC);
+                if (!$contactDepense) throw new Exception("Fournisseur introuvable.");
 
                 $stmt = $pdo->prepare("SELECT * FROM caisse WHERE statut = 'Actif' AND (boutique_id = ? OR boutique_id IS NULL) ORDER BY boutique_id IS NULL LIMIT 1 FOR UPDATE");
                 $stmt->execute([$user['boutique_id']]);
@@ -75,16 +79,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 $soldeAvant = floatval($caisse['solde']);
                 $soldeApres = $soldeAvant - $montant;
                 $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
+                $objetTransactionDepense = 'Décaissement fournisseur (dépense) — ' . $contactDepense['nom_prenom_contact'];
 
                 $stmtTr = $pdo->prepare("INSERT INTO transaction
                     (numero_transaction, date_transaction, heure_transaction, montant_transaction,
                      frais_transaction, montant_total, type_transaction, objet_transaction,
                      caisse_id, facture_id, mode_reglement, numero_reglement, reference_reglement,
                      utilisateur_id, etat_transaction)
-                    VALUES (?, ?, CURTIME(), ?, 0, ?, 'Sortie', 'Décaissement fournisseur (dépense)',
+                    VALUES (?, ?, CURTIME(), ?, 0, ?, 'Sortie', ?,
                             ?, NULL, ?, ?, ?, ?, 'Succes')");
                 $stmtTr->execute([
-                    $numTrans, $date_reglement, $montant, $montant,
+                    $numTrans, $date_reglement, $montant, $montant, $objetTransactionDepense,
                     $caisse['caisse_id'], $mode_reglement_mapped,
                     $numero_reglement, $reference_reglement, $user['id']
                 ]);
@@ -115,9 +120,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                     // surplus part en avance chez ce fournisseur (voir solde_contact plus bas).
                 } else {
                     if (empty($fournisseur_id)) throw new Exception("Veuillez sélectionner un fournisseur.");
-                    $stmtF = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ? AND type_contact = 'Fournisseur' FOR UPDATE");
+                    $stmtF = $pdo->prepare("SELECT code_contact, nom_prenom_contact FROM contact WHERE code_contact = ? AND type_contact = 'Fournisseur' FOR UPDATE");
                     $stmtF->execute([$fournisseur_id]);
-                    if (!$stmtF->fetch()) throw new Exception("Fournisseur introuvable.");
+                    $contactSansFacture = $stmtF->fetch(PDO::FETCH_ASSOC);
+                    if (!$contactSansFacture) throw new Exception("Fournisseur introuvable.");
                 }
                 // La seule contrainte qui reste est la disponibilité physique de la
                 // caisse (vérifiée juste après).
@@ -135,7 +141,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 $soldeAvant = floatval($caisse['solde']);
                 $soldeApres = $soldeAvant - $montant;
                 $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
-                $objetTransaction = $facture ? 'Règlement facture fournisseur' : 'Avance / versement fournisseur';
+                $objetTransaction = $facture ? 'Règlement facture fournisseur' : ('Avance / versement fournisseur — ' . $contactSansFacture['nom_prenom_contact']);
 
                 $stmtTr = $pdo->prepare("INSERT INTO transaction
                     (numero_transaction, date_transaction, heure_transaction, montant_transaction,

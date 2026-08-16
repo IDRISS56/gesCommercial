@@ -293,6 +293,31 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 25) {
 }
 
 // ============================================================
+// REQUÊTE AJAX : DÉTAIL D'UNE TRANSACTION
+// ============================================================
+if (isset($_POST['action']) && $_POST['action'] === 'get_detail') {
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json');
+    $numero = trim($_POST['numero'] ?? '');
+    $stmt = $pdo->prepare("SELECT t.*, c.nom_caisse, f.titre_facture, f.type_facture, f.categorie_facture,
+                                   ct.nom_prenom_contact, ct.telephone_contact, u.nom_prenom AS utilisateur_nom
+                            FROM transaction t
+                            LEFT JOIN caisse c ON c.caisse_id = t.caisse_id
+                            LEFT JOIN facture f ON f.numero_facture = t.facture_id
+                            LEFT JOIN contact ct ON ct.code_contact = f.contact_id
+                            LEFT JOIN utilisateur u ON u.id = t.utilisateur_id
+                            WHERE t.numero_transaction = ?");
+    $stmt->execute([$numero]);
+    $t = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$t) {
+        echo json_encode(['success' => false, 'message' => 'Transaction introuvable.']);
+        exit;
+    }
+    echo json_encode(['success' => true, 'transaction' => $t]);
+    exit;
+}
+
+// ============================================================
 // REQUÊTE AJAX (tout en POST)
 // ============================================================
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
@@ -632,14 +657,55 @@ $(document).ready(function() {
         const code = $(this).data('code');
         $('#detailContent').html('<div class="text-center py-4"><i class="bi bi-arrow-repeat"></i> Chargement...</div>');
         detailModal.show();
-        // Ici on pourrait faire un appel AJAX pour charger le détail
-        // Pour l'instant, on affiche un message
-        $('#detailContent').html(`
-            <div class="alert alert-info">
-                <i class="bi bi-info-circle"></i> Transaction : <strong>${code}</strong>
-            </div>
-            <p class="text-muted text-center">Le détail complet de cette transaction sera disponible prochainement.</p>
-        `);
+        $.ajax({
+            url: window.location.pathname,
+            method: 'POST',
+            data: { action: 'get_detail', numero: code },
+            dataType: 'json',
+            success: function(data) {
+                if (!data.success) {
+                    $('#detailContent').html('<div class="alert alert-danger">' + (data.message || 'Transaction introuvable.') + '</div>');
+                    return;
+                }
+                const t = data.transaction;
+                const ligne = (label, valeur) => valeur ? `
+                    <tr><td class="text-muted" style="width:40%;">${label}</td><td class="fw-semibold">${valeur}</td></tr>
+                ` : '';
+                const badgeType = t.type_transaction === 'Entree'
+                    ? '<span class="badge bg-success-subtle text-success">Entrée</span>'
+                    : '<span class="badge bg-danger-subtle text-danger">Sortie</span>';
+                const badgeEtat = t.etat_transaction === 'Succes'
+                    ? '<span class="badge bg-success-subtle text-success">Succès</span>'
+                    : (t.etat_transaction === 'Echec'
+                        ? '<span class="badge bg-danger-subtle text-danger">Échec</span>'
+                        : '<span class="badge bg-warning-subtle text-warning">En attente</span>');
+                $('#detailContent').html(`
+                    <div class="alert alert-info d-flex justify-content-between align-items-center">
+                        <span><i class="bi bi-info-circle"></i> Transaction : <strong>${t.numero_transaction}</strong></span>
+                        <span>${badgeType} ${badgeEtat}</span>
+                    </div>
+                    <table class="table table-sm">
+                        <tbody>
+                            ${ligne('Date', (t.date_transaction || '') + ' ' + (t.heure_transaction || ''))}
+                            ${ligne('Montant', fmt(t.montant_transaction) + ' F')}
+                            ${ligne('Frais', t.frais_transaction && t.frais_transaction != 0 ? fmt(t.frais_transaction) + ' F' : '')}
+                            ${ligne('Montant total', fmt(t.montant_total) + ' F')}
+                            ${ligne('Objet', t.objet_transaction)}
+                            ${ligne('Mode de règlement', t.mode_reglement)}
+                            ${ligne('N° règlement', t.numero_reglement)}
+                            ${ligne('Référence', t.reference_reglement)}
+                            ${ligne('Caisse', t.nom_caisse)}
+                            ${ligne('Facture liée', t.facture_id ? (t.facture_id + (t.titre_facture ? ' — ' + t.titre_facture : '')) : '')}
+                            ${ligne('Client / Fournisseur', t.nom_prenom_contact ? (t.nom_prenom_contact + (t.telephone_contact ? ' (' + t.telephone_contact + ')' : '')) : '')}
+                            ${ligne('Enregistré par', t.utilisateur_nom)}
+                        </tbody>
+                    </table>
+                `);
+            },
+            error: function() {
+                $('#detailContent').html('<div class="alert alert-danger">Erreur lors du chargement du détail.</div>');
+            }
+        });
     });
 });
 </script>
