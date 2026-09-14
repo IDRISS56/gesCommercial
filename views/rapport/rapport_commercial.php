@@ -34,7 +34,11 @@ function valeurParDefaut($periode) {
 }
 
 $valeur = $_POST['valeur'] ?? $_GET['valeur'] ?? valeurParDefaut($periode);
+// Boutiques que cet utilisateur a le droit de consulter (toutes pour
+// Administrateur/Superviseur ; sa boutique + exceptions pour les autres).
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $_SESSION['role'] ?? null, $_SESSION['boutique_id'] ?? null);
 $boutiqueId = trim($_POST['boutique_id'] ?? $_GET['boutique_id'] ?? '');
+if ($boutiqueId !== '' && !in_array($boutiqueId, $boutiquesAutorisees, true)) $boutiqueId = '';
 
 // Construction de la clause de date (sur c.date_commande) selon la période
 $whereDate = "1=1";
@@ -80,16 +84,23 @@ if ($periode === 'journalier' && preg_match('/^\d{4}-\d{2}-\d{2}$/', $valeur)) {
     }
 }
 
-$paramsBoutique = [];
-$whereBoutique = "";
+$paramsBoutique = $boutiquesAutorisees;
+$whereBoutique = empty($boutiquesAutorisees) ? " AND 1=0" : " AND c.boutique_id IN (" . implode(',', array_fill(0, count($boutiquesAutorisees), '?')) . ")";
 if ($boutiqueId !== '') {
-    $whereBoutique = " AND c.boutique_id = :boutique_id";
-    $paramsBoutique[':boutique_id'] = $boutiqueId;
+    $whereBoutique .= " AND c.boutique_id = ?";
+    $paramsBoutique[] = $boutiqueId;
 }
 
 $whereVente = "c.statut_id='012' AND c.etat_commande NOT IN ('En attente','Annulé')";
 $whereFull = "$whereVente AND $whereDate$whereBoutique";
-$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
+if (empty($boutiquesAutorisees)) {
+    $boutiques = [];
+} else {
+    $inPhCom = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtBCom = $pdo->prepare("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' AND code_boutique IN ($inPhCom) ORDER BY nom_boutique");
+    $stmtBCom->execute($boutiquesAutorisees);
+    $boutiques = $stmtBCom->fetchAll(PDO::FETCH_ASSOC);
+}
 
 // Onglet
 $onglet = $_POST['onglet'] ?? $_GET['onglet'] ?? 'ca';

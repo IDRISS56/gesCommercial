@@ -5,17 +5,23 @@ while (ob_get_level() > 0) ob_end_clean();
 header('Content-Type: application/json');
 echo json_encode($data); exit;
 }
-require __DIR__ . '/../../databases/database.php';
+require 'databases/database.php';
 if (!isset($_SESSION['user_id'])) { header('Location: ../utilisateur/login'); exit; }
 $stmt = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
 $stmt->execute([$_SESSION['user_id']]);
 $user = $stmt->fetch(PDO::FETCH_ASSOC);
 if (!$user) { session_destroy(); header('Location: ../utilisateur/login'); exit; }
 
-// Seul le rôle "Caisse" (caissier) est autorisé à ouvrir/fermer une journée.
-// Les autres rôles autorisés à accéder à cette page (Administrateur, Superviseur, Proprietaire)
-// ne l'ont qu'en lecture seule, pour suivi/supervision.
-$estCaissier = ($user['role'] === 'Caisse');
+// $estCaissier autorise l'ouverture/fermeture d'une journée pour les rôles
+// Caisse, Administrateur, Superviseur et Proprietaire (le nom de la variable
+// est un raccourci historique, ce n'est pas réservé au seul rôle "Caisse").
+$estCaissier = ($user['role'] === 'Caisse' || $user['role'] === 'Administrateur' || $user['role'] === 'Superviseur' || $user['role'] === 'Proprietaire');
+
+// Boutique(s) auxquelles cet utilisateur a accès : toutes les boutiques
+// actives pour Administrateur/Superviseur, uniquement la sienne (+ accès
+// supplémentaire éventuel) pour les autres rôles — même mécanisme que le
+// reste de l'application (config/authentification.php).
+$boutiquesAutoriseesJournee = getBoutiquesAutorisees($pdo, $user['role'], $user['boutique_id']);
 
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
@@ -36,12 +42,20 @@ function generateJourneeId($pdo) {
 }
 
 function recalculerJournee($pdo, $j) {
+    // ⚠️ Corrigé : compte les transactions sur TOUTE la période d'ouverture
+    // (de la date d'ouverture jusqu'à aujourd'hui inclus), pas seulement la
+    // date d'ouverture. Avant ce correctif, une journée restée ouverte
+    // plusieurs jours (oubli de fermeture, écart qui a découragé la clôture)
+    // "perdait" silencieusement toutes les transactions des jours suivants
+    // dans son calcul théorique — elles étaient bien enregistrées en base,
+    // mais jamais comptées ici, ce qui donnait l'impression que rien ne
+    // s'enregistrait et faisait apparaître un écart énorme à la fermeture.
     $stmt = $pdo->prepare("SELECT
         COALESCE(SUM(CASE WHEN type_transaction='Entree' THEN montant_total ELSE 0 END), 0) as total_entrees,
         COALESCE(SUM(CASE WHEN type_transaction='Sortie' THEN montant_total ELSE 0 END), 0) as total_sorties,
         COUNT(*) as nombre_transactions
         FROM transaction
-        WHERE caisse_id = ? AND date_transaction = ? AND etat_transaction = 'Succes'");
+        WHERE caisse_id = ? AND etat_transaction = 'Succes' AND date_transaction BETWEEN ? AND CURDATE()");
     $stmt->execute([$j['caisse_id'], $j['date_journee']]);
     $tot = $stmt->fetch(PDO::FETCH_ASSOC);
     $solde_theorique = floatval($j['solde_ouverture']) + floatval($tot['total_entrees']) - floatval($tot['total_sorties']);
@@ -79,6 +93,9 @@ if (isset($_POST['btn_ouvrir'])) {
                     $stmt->execute([$caisse_id]);
                     $c = $stmt->fetch(PDO::FETCH_ASSOC);
                     if (!$c) throw new Exception("Caisse introuvable.");
+                    if (!empty($c['boutique_id']) && !in_array($c['boutique_id'], $boutiquesAutoriseesJournee, true)) {
+                        throw new Exception("Vous n'avez pas accès à cette caisse (autre boutique).");
+                    }
 
                     $pdo->beginTransaction();
                     $id = generateJourneeId($pdo);
@@ -113,10 +130,13 @@ if (isset($_POST['btn_fermer'])) {
         $observations = trim($_POST['observations'] ?? '');
 
         try {
-            $stmt = $pdo->prepare("SELECT jc.*, c.nom_caisse FROM journees_caisse jc JOIN caisse c ON c.caisse_id = jc.caisse_id WHERE jc.id = ?");
+            $stmt = $pdo->prepare("SELECT jc.*, c.nom_caisse, c.boutique_id FROM journees_caisse jc JOIN caisse c ON c.caisse_id = jc.caisse_id WHERE jc.id = ?");
             $stmt->execute([$journee_id]);
             $j = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$j) throw new Exception("Journée introuvable.");
+            if (!empty($j['boutique_id']) && !in_array($j['boutique_id'], $boutiquesAutoriseesJournee, true)) {
+                throw new Exception("Vous n'avez pas accès à cette journée (autre boutique).");
+            }
             if ($j['statut'] === 'FERMEE') throw new Exception("Déjà fermée.");
 
             $j['date_fermeture'] = null;
@@ -140,31 +160,45 @@ if (isset($_POST['btn_fermer'])) {
 // ============================================================
 // DONNÉES POUR L'AFFICHAGE
 // ============================================================
-$caissesDisponibles = $pdo->query("SELECT c.*, b.nom_boutique FROM caisse c LEFT JOIN boutique b ON b.code_boutique = c.boutique_id WHERE c.statut != 'Inactif' ORDER BY c.nom_caisse")->fetchAll(PDO::FETCH_ASSOC);
+$placeholdersBq = !empty($boutiquesAutoriseesJournee) ? implode(',', array_fill(0, count($boutiquesAutoriseesJournee), '?')) : "''";
 
-$stmt = $pdo->query("SELECT jc.*, c.nom_caisse, c.caisse_id as code_caisse, b.nom_boutique, u.nom_prenom AS ouvert_par
+$stmt = $pdo->prepare("SELECT c.*, b.nom_boutique FROM caisse c LEFT JOIN boutique b ON b.code_boutique = c.boutique_id
+                        WHERE c.statut != 'Inactif' AND (c.boutique_id IN ($placeholdersBq) OR c.boutique_id IS NULL)
+                        ORDER BY c.nom_caisse");
+$stmt->execute($boutiquesAutoriseesJournee);
+$caissesDisponibles = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$stmt = $pdo->prepare("SELECT jc.*, c.nom_caisse, c.caisse_id as code_caisse, b.nom_boutique, u.nom_prenom AS ouvert_par
                      FROM journees_caisse jc
                      JOIN caisse c ON c.caisse_id = jc.caisse_id
                      LEFT JOIN boutique b ON b.code_boutique = c.boutique_id
                      LEFT JOIN utilisateur u ON u.id = jc.id_utilisateur_ouverture
-                     WHERE jc.statut = 'OUVERTE'
+                     WHERE jc.statut = 'OUVERTE' AND (c.boutique_id IN ($placeholdersBq) OR c.boutique_id IS NULL)
                      ORDER BY jc.date_ouverture DESC");
+$stmt->execute($boutiquesAutoriseesJournee);
 $journeesOuvertes = $stmt->fetchAll(PDO::FETCH_ASSOC);
 foreach ($journeesOuvertes as &$j) { $j = array_merge($j, recalculerJournee($pdo, $j)); }
 unset($j);
 
-$stmt = $pdo->query("SELECT jc.*, c.nom_caisse, uo.nom_prenom AS ouvert_par, uf.nom_prenom AS ferme_par
+// Historique des journées fermées également scopé par boutique, par
+// cohérence avec le reste de l'application (les autres écrans filtrent déjà
+// systématiquement tous leurs listings de cette façon).
+$stmt = $pdo->prepare("SELECT jc.*, c.nom_caisse, uo.nom_prenom AS ouvert_par, uf.nom_prenom AS ferme_par
                      FROM journees_caisse jc
                      JOIN caisse c ON c.caisse_id = jc.caisse_id
                      LEFT JOIN utilisateur uo ON uo.id = jc.id_utilisateur_ouverture
                      LEFT JOIN utilisateur uf ON uf.id = jc.id_utilisateur_fermeture
-                     WHERE jc.statut = 'FERMEE'
+                     WHERE jc.statut = 'FERMEE' AND (c.boutique_id IN ($placeholdersBq) OR c.boutique_id IS NULL)
                      ORDER BY jc.date_fermeture DESC LIMIT 30");
+$stmt->execute($boutiquesAutoriseesJournee);
 $historique = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 // Statistiques
 $nbOuvertes = count($journeesOuvertes);
-$nbFermees = $pdo->query("SELECT COUNT(*) FROM journees_caisse WHERE statut = 'FERMEE'")->fetchColumn();
+$stmtNbFermees = $pdo->prepare("SELECT COUNT(*) FROM journees_caisse jc JOIN caisse c ON c.caisse_id = jc.caisse_id
+                                 WHERE jc.statut = 'FERMEE' AND (c.boutique_id IN ($placeholdersBq) OR c.boutique_id IS NULL)");
+$stmtNbFermees->execute($boutiquesAutoriseesJournee);
+$nbFermees = $stmtNbFermees->fetchColumn();
 $totalEntreesJour = 0;
 $totalSortiesJour = 0;
 $totalEcart = 0;
@@ -643,6 +677,15 @@ $fg = $colorMap[$s[0]][1];
 </div>
 <div class="jc-status"><span class="dot"></span> Ouverte</div>
 </div>
+<?php
+$joursOuverte = (strtotime(date('Y-m-d')) - strtotime($j['date_journee'])) / 86400;
+if ($joursOuverte >= 1):
+?>
+<div class="alert alert-warning py-1 px-2 mb-2" style="font-size:11px;border-radius:8px;">
+<i class="bi bi-exclamation-triangle-fill"></i>
+Ouverte depuis <?= (int)$joursOuverte ?> jour(s) (le <?= date('d/m/Y', strtotime($j['date_journee'])) ?>) — à fermer dès que possible.
+</div>
+<?php endif; ?>
 
 <div class="jc-grid">
 <div class="jc-stat">

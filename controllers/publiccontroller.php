@@ -8,6 +8,12 @@ class publics
         include "views/publics/dashboard.php";
     }
 
+    public function proprietaireDashboard()
+    {
+        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire']);
+        include "views/publics/dashboard_proprietaire.php";
+    }
+
      public function caisseDashboard()
     {
         requirePermission(['Administrateur', 'Superviseur', 'Caisse']);
@@ -23,7 +29,7 @@ class publics
 
     public function vente()
     {
-        requirePermission(['Administrateur', 'Superviseur', 'Vendeur', 'Caisse']);
+        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire', 'Vendeur', 'Caisse']);
         include "views/publics/vente_comptoir.php";
     }
 }

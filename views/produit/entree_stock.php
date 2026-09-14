@@ -5,6 +5,7 @@
 //    elle met seulement à jour les stocks (la disponibilité est calculée ailleurs).
 ob_start();
 require 'databases/database.php';
+require_once 'databases/id_generator.php';
 
 // ==========================================
 // SÉCURITÉ : utilisateur connecté & actif
@@ -22,27 +23,31 @@ if (!$user) {
     exit;
 }
 
+// ==========================================
+// BOUTIQUES AUTORISÉES POUR CET UTILISATEUR
+// Même logique centralisée que vente_comptoir.php (getBoutiquesAutorisees) :
+// Administrateur/Superviseur → toutes les boutiques actives ; les autres
+// rôles → leur boutique d'affectation + les accès supplémentaires éventuels
+// (table acces_boutique_supplementaire). L'ancienne version locale de cette
+// logique ignorait ces accès supplémentaires — corrigé en réutilisant la
+// même fonction que partout ailleurs dans l'application.
+// ==========================================
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $user['role'] ?? '', $user['boutique_id'] ?? null);
+
 function e($str) {
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
 }
 function fmt($n) {
     return number_format(floatval($n), 0, ',', ' ');
 }
-function generateCommandeId($pdo) {
-    $prefix = 'ENT-' . date('Ymd') . '-';
-    $stmt = $pdo->prepare("SELECT numero_commande FROM commande WHERE numero_commande LIKE ? ORDER BY numero_commande DESC LIMIT 1");
-    $stmt->execute([$prefix . '%']);
-    $last = $stmt->fetchColumn();
-    if ($last) {
-        $num = (int)substr($last, strrpos($last, '-') + 1) + 1;
-    } else {
-        $num = 1;
-    }
-    return $prefix . str_pad($num, 5, '0', STR_PAD_LEFT);
-}
+// (la génération du numéro se fait désormais directement via
+// genererEtInsererIdSequence() au moment de l'insertion, voir plus bas)
 
-// - Récupération des boutiques actives -
+// - Récupération des boutiques actives et autorisées pour cet utilisateur -
 $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
+$boutiques = array_values(array_filter($boutiques, function ($b) use ($boutiquesAutorisees) {
+    return in_array($b['code_boutique'], $boutiquesAutorisees, true);
+}));
 
 // ✅ Liste des produits avec leur état Actif/Inactif (actifs en premier)
 $produits = $pdo->query("SELECT code_produit, titre_produit, prix_fournisseur, etat_produit, categorie_id
@@ -51,6 +56,17 @@ ORDER BY CASE WHEN etat_produit = 'Inactif' THEN 1 ELSE 0 END, titre_produit")->
 
 // - Récupération des catégories actives (pour filtrer la liste des produits) -
 $categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='ACTIF' ORDER BY titre_categorie")->fetchAll(PDO::FETCH_ASSOC);
+
+// - Catégories autorisées par boutique (restriction optionnelle, voir
+//   config/authentification.php::getCategoriesAutoriseesBoutique). Un
+//   utilisateur non-admin peut avoir plusieurs boutiques dans sa liste (accès
+//   supplémentaire), chacune potentiellement restreinte différemment — d'où
+//   la carte boutique -> catégories autorisées (null = pas de restriction),
+//   utilisée à la fois pour le filtrage JS et la vérification serveur. -
+$categoriesAutoriseesParBoutique = [];
+foreach ($boutiques as $b) {
+    $categoriesAutoriseesParBoutique[$b['code_boutique']] = getCategoriesAutoriseesBoutique($pdo, $user['role'] ?? null, $b['code_boutique']);
+}
 
 // - Statut fixe pour l'entrée de stock (011 = Achat / ENTREE dans la table statut) -
 $statut_entree = '011';
@@ -76,6 +92,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'entree') {
 
         if (empty($categorieId) || empty($produitId) || empty($boutiqueId) || $quantite <= 0) {
             $message = 'Veuillez sélectionner une catégorie, un produit, une boutique et saisir une quantité valide (> 0).';
+            $messageType = 'danger';
+        } elseif (!in_array($boutiqueId, $boutiquesAutorisees, true)) {
+            $message = "Vous n'êtes pas autorisé à saisir une entrée de stock pour cette boutique.";
+            $messageType = 'danger';
+        } elseif (($catsAutoriseesEntree = getCategoriesAutoriseesBoutique($pdo, $user['role'] ?? null, $boutiqueId)) !== null && !in_array($categorieId, $catsAutoriseesEntree, true)) {
+            $message = "Cette boutique n'est pas autorisée à gérer la catégorie sélectionnée.";
             $messageType = 'danger';
         } elseif ($commentaire === '') {
             $message = 'Un commentaire est obligatoire pour justifier cette entrée (traçabilité).';
@@ -126,22 +148,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'entree') {
                 $stockApres = $stockAvant + $quantite;
                 $montantCommande = $nouveauPrixFournisseur * $quantite;
 
-                // 5️⃣ Générer le numéro de commande
-                $numeroCommande = generateCommandeId($pdo);
-
-                // 6️⃣ Insérer dans la table commande (statut 011 = Achat/ENTREE)
-                $stmtCmd = $pdo->prepare("
-                    INSERT INTO commande
-                    (numero_commande, produit_id, lot_id, produits_par_lot, contact_id, facture_id, statut_id,
-                     date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, montant_commande,
-                     utilisateur_id, boutique_id, etat_commande)
-                    VALUES (?, ?, NULL, 1, NULL, NULL, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, 'VALIDEE')
-                ");
-                $stmtCmd->execute([
-                    $numeroCommande, $produitId, $statut_entree,
-                    $nouveauPrixFournisseur, $nouveauPrixFournisseur, $quantite, $montantCommande,
-                    $user['id'], $boutiqueId
-                ]);
+                // 5️⃣ Générer le numéro de commande et l'insérer, avec réessai
+                // automatique en cas de collision entre deux entrées de stock
+                // simultanées (voir databases/id_generator.php).
+                $numeroCommande = genererEtInsererIdSequence($pdo, 'ENT', function (string $numero) use (
+                    $pdo, $produitId, $statut_entree, $nouveauPrixFournisseur, $quantite, $montantCommande, $user, $boutiqueId
+                ) {
+                    $stmtCmd = $pdo->prepare("
+                        INSERT INTO commande
+                        (numero_commande, produit_id, lot_id, produits_par_lot, contact_id, facture_id, statut_id,
+                         date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, montant_commande,
+                         utilisateur_id, boutique_id, etat_commande)
+                        VALUES (?, ?, NULL, 1, NULL, NULL, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, 'VALIDEE')
+                    ");
+                    $stmtCmd->execute([
+                        $numero, $produitId, $statut_entree,
+                        $nouveauPrixFournisseur, $nouveauPrixFournisseur, $quantite, $montantCommande,
+                        $user['id'], $boutiqueId
+                    ]);
+                }, 5);
 
                 // 7️⃣ Mettre à jour la table stock (INSERT ON DUPLICATE KEY UPDATE)
                 $stmtStockUp = $pdo->prepare("
@@ -172,32 +197,40 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-// - Historique des entrées de stock (statut 011 = Achat) -
-$historique = $pdo->query("
-    SELECT
-        c.numero_commande,
-        c.produit_id,
-        c.boutique_id,
-        c.statut_id,
-        s.titre_statut,
-        s.type_statut,
-        c.quantite_commande,
-        c.prix_achat,
-        c.prix_commande,
-        c.montant_commande,
-        c.date_commande,
-        c.heure_commande,
-        c.etat_commande,
-        p.titre_produit,
-        b.nom_boutique
-    FROM commande c
-    LEFT JOIN statut s ON c.statut_id = s.code_statut
-    LEFT JOIN produit p ON c.produit_id = p.code_produit
-    LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
-    WHERE c.statut_id = '$statut_entree'
-    ORDER BY c.date_commande DESC, c.heure_commande DESC
-    LIMIT 30
-")->fetchAll(PDO::FETCH_ASSOC);
+// - Historique des entrées de stock (statut 011 = Achat), restreint aux boutiques autorisées -
+if (!empty($boutiquesAutorisees)) {
+    $placeholders = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtHist = $pdo->prepare("
+        SELECT
+            c.numero_commande,
+            c.produit_id,
+            c.boutique_id,
+            c.statut_id,
+            s.titre_statut,
+            s.type_statut,
+            c.quantite_commande,
+            c.prix_achat,
+            c.prix_commande,
+            c.montant_commande,
+            c.date_commande,
+            c.heure_commande,
+            c.etat_commande,
+            p.titre_produit,
+            b.nom_boutique
+        FROM commande c
+        LEFT JOIN statut s ON c.statut_id = s.code_statut
+        LEFT JOIN produit p ON c.produit_id = p.code_produit
+        LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
+        WHERE c.statut_id = ? AND c.boutique_id IN ($placeholders)
+        ORDER BY c.date_commande DESC, c.heure_commande DESC
+        LIMIT 30
+    ");
+    $stmtHist->execute(array_merge([$statut_entree], $boutiquesAutorisees));
+    $historique = $stmtHist->fetchAll(PDO::FETCH_ASSOC);
+} else {
+    // Aucune boutique autorisée : aucun historique visible
+    $historique = [];
+}
 
 // - Statistiques -
 $totalEntrees = count($historique);
@@ -209,7 +242,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $produitId = $_POST['produit_id'] ?? '';
     $boutiqueId = $_POST['boutique_id'] ?? '';
     $response = ['success' => false, 'quantite' => 0, 'disponible' => 0, 'prix' => 0, 'prix_vente' => 0];
-    if (!empty($produitId) && !empty($boutiqueId)) {
+    if (!empty($produitId) && !empty($boutiqueId) && in_array($boutiqueId, $boutiquesAutorisees, true)) {
         $stmt = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ?");
         $stmt->execute([$produitId, $boutiqueId]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -514,6 +547,17 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                 <div class="row g-3">
                     <div class="col-md-4">
+                        <label for="boutique_id" class="form-label">Boutique <span class="text-danger">*</span></label>
+                        <select name="boutique_id" id="boutique_id" class="form-select selectpicker" data-live-search="true" required>
+                            <option value="">-- Choisir une boutique --</option>
+                            <?php foreach ($boutiques as $b): ?>
+                                <option value="<?= htmlspecialchars($b['code_boutique']) ?>">
+                                    <?= htmlspecialchars($b['nom_boutique']) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
                         <label for="categorie_id" class="form-label">Catégorie <span class="text-danger">*</span></label>
                         <select name="categorie_id" id="categorie_id" class="form-select selectpicker" data-live-search="true" required>
                             <option value="">-- Choisir une catégorie --</option>
@@ -531,17 +575,6 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                             <?php foreach ($produits as $p): ?>
                                 <option value="<?= htmlspecialchars($p['code_produit']) ?>" data-categorie="<?= htmlspecialchars($p['categorie_id'] ?? '') ?>">
                                     <?= htmlspecialchars($p['titre_produit']) ?><?= ($p['etat_produit'] === 'Inactif') ? ' (inactif)' : '' ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-md-4">
-                        <label for="boutique_id" class="form-label">Boutique <span class="text-danger">*</span></label>
-                        <select name="boutique_id" id="boutique_id" class="form-select selectpicker" data-live-search="true" required>
-                            <option value="">-- Choisir une boutique --</option>
-                            <?php foreach ($boutiques as $b): ?>
-                                <option value="<?= htmlspecialchars($b['code_boutique']) ?>">
-                                    <?= htmlspecialchars($b['nom_boutique']) ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
@@ -710,6 +743,47 @@ $(document).ready(function() {
         });
     });
 
+    // ============================================================
+    // Catégories autorisées par boutique (null = pas de restriction pour
+    // cette boutique). Un utilisateur peut avoir plusieurs boutiques dans sa
+    // liste (accès supplémentaire), potentiellement restreintes différemment
+    // — on filtre donc la liste des catégories à chaque changement de
+    // boutique, pas une fois pour toutes.
+    // ============================================================
+    const CATEGORIES_AUTORISEES_PAR_BOUTIQUE = <?= json_encode($categoriesAutoriseesParBoutique, JSON_UNESCAPED_UNICODE) ?>;
+    var allCategorieOptions = [];
+    $('#categorie_id option').each(function() {
+        if ($(this).val() !== '') {
+            allCategorieOptions.push({ value: $(this).val(), text: $.trim($(this).text()) });
+        }
+    });
+
+    function filterCategoriesByBoutique() {
+        var boutiqueId = String($('#boutique_id').val() || '').trim();
+        var $categorie = $('#categorie_id');
+        var catsAutorisees = boutiqueId ? CATEGORIES_AUTORISEES_PAR_BOUTIQUE[boutiqueId] : null;
+        var ancienneValeur = $categorie.val();
+
+        $categorie.empty();
+        $categorie.append($('<option>', { value: '', text: '-- Sélectionner --' }));
+        allCategorieOptions.forEach(function(opt) {
+            if (!catsAutorisees || catsAutorisees.indexOf(opt.value) !== -1) {
+                $categorie.append($('<option>', { value: opt.value, text: opt.text }));
+            }
+        });
+
+        // Si la catégorie déjà choisie n'est plus autorisée pour la nouvelle
+        // boutique, on la désélectionne (et le select produit se réinitialise
+        // via filterProduitsByCategorie, appelée juste après).
+        if (ancienneValeur && (!catsAutorisees || catsAutorisees.indexOf(ancienneValeur) !== -1)) {
+            $categorie.val(ancienneValeur);
+        }
+
+        if ($categorie.hasClass('bs-select-hidden') || $categorie.data('selectpicker')) { $categorie.selectpicker('destroy'); }
+        $categorie.selectpicker();
+        filterProduitsByCategorie();
+    }
+
     // Mise à jour des infos de stock et des prix en AJAX
     function updateStockInfo() {
         var produit = $('#produit_id').val();
@@ -791,7 +865,9 @@ $(document).ready(function() {
     // Événements (on écoute 'change' natif en plus de 'changed.bs.select' :
     // plus fiable selon les versions de bootstrap-select)
     $('#categorie_id').on('changed.bs.select change', filterProduitsByCategorie);
+    $('#boutique_id').on('changed.bs.select change', filterCategoriesByBoutique);
     $('#produit_id, #boutique_id').on('changed.bs.select change', updateStockInfo);
+    filterCategoriesByBoutique(); // applique la restriction dès l'ouverture (boutique déjà présélectionnée)
     $('#quantite').on('input', updateStockInfo);
 
     // État initial

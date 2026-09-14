@@ -28,6 +28,8 @@ if (!$userInfo) {
 
 define('USER_ID', $_SESSION['user_id']);
 define('USER_BOUTIQUE', $userInfo['boutique_id'] ?? null);
+// Boutiques que cet utilisateur a le droit d'utiliser pour un achat.
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $userInfo['role'], USER_BOUTIQUE);
 
 // CSRF
 if (empty($_SESSION['csrf_token'])) {
@@ -149,6 +151,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 if (empty($fournisseur_id)) throw new Exception('Veuillez sélectionner un fournisseur.');
 
                 $boutique_id = trim($_POST['boutique_id'] ?? '') ?: USER_BOUTIQUE;
+                if (!in_array($boutique_id, $boutiquesAutorisees, true)) $boutique_id = USER_BOUTIQUE;
                 if (empty($boutique_id)) throw new Exception('Veuillez sélectionner une boutique de réception.');
 
                 $is_attente = filter_var($_POST['en_attente'] ?? false, FILTER_VALIDATE_BOOLEAN);
@@ -330,7 +333,14 @@ $categories = $pdo->query("SELECT DISTINCT c.titre_categorie
 
 // Boutiques actives : l'utilisateur choisit celle qui reçoit la marchandise
 // (pré-sélectionnée sur sa propre boutique quand il en a une).
-$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique ASC")->fetchAll(PDO::FETCH_ASSOC);
+if (empty($boutiquesAutorisees)) {
+    $boutiques = [];
+} else {
+    $inPhB = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtBou = $pdo->prepare("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' AND code_boutique IN ($inPhB) ORDER BY nom_boutique ASC");
+    $stmtBou->execute($boutiquesAutorisees);
+    $boutiques = $stmtBou->fetchAll(PDO::FETCH_ASSOC);
+}
 ?>
 <!DOCTYPE html>
 <html lang="fr">

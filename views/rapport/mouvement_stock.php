@@ -13,8 +13,22 @@ function fmt($n) { return number_format(floatval($n), 0, ',', ' '); }
 // ==========================================================
 // FILTRE BOUTIQUE
 // ==========================================================
+// Boutiques que cet utilisateur a le droit de consulter (toutes pour
+// Administrateur/Superviseur ; sa boutique + exceptions pour les autres).
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $_SESSION['role'] ?? null, $_SESSION['boutique_id'] ?? null);
 $boutiqueId = trim($_GET['boutique_id'] ?? $_POST['boutique_id'] ?? '');
-$boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
+if ($boutiqueId !== '' && !in_array($boutiqueId, $boutiquesAutorisees, true)) $boutiqueId = '';
+if (empty($boutiquesAutorisees)) {
+    $boutiques = [];
+} else {
+    $inPhRap = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtBRap = $pdo->prepare("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' AND code_boutique IN ($inPhRap) ORDER BY nom_boutique");
+    $stmtBRap->execute($boutiquesAutorisees);
+    $boutiques = $stmtBRap->fetchAll(PDO::FETCH_ASSOC);
+}
+// Clause SQL + valeurs à fusionner dans chaque requête de ce rapport pour ne
+// jamais dépasser les boutiques autorisées, quel que soit le filtre choisi.
+$boutiquesAutoriseesSql = empty($boutiquesAutorisees) ? '1=0' : 'IN (' . implode(',', array_fill(0, count($boutiquesAutorisees), '?')) . ')';
 // ==========================================================
 // FONCTION DE PAGINATION PARTAGÉE
 // ==========================================================
@@ -62,16 +76,19 @@ return compact('tableHtml', 'paginationHtml', 'total', 'page', 'totalPages');
 // ==========================================================
 // ONGLET 1 : MOUVEMENTS DE STOCK
 // ==========================================================
-function chargerMouvements($pdo, $page) {
+function chargerMouvements($pdo, $page, $boutiquesAutorisees, $boutiqueId) {
+$whereBoutiqueMvt = empty($boutiquesAutorisees) ? " AND 1=0" : " AND c.boutique_id IN (" . implode(',', array_fill(0, count($boutiquesAutorisees), '?')) . ")";
+$paramsMvt = $boutiquesAutorisees;
+if ($boutiqueId !== '') { $whereBoutiqueMvt .= " AND c.boutique_id = ?"; $paramsMvt[] = $boutiqueId; }
 $sql = "SELECT c.numero_commande, c.date_commande, c.quantite_commande, c.statut_id, c.etat_commande,
 p.titre_produit, b.nom_boutique,
 CASE WHEN c.statut_id IN ('011','009','010','006') THEN 'ENTRÉE' ELSE 'SORTIE' END AS type_mvt
 FROM commande c
 JOIN produit p ON c.produit_id = p.code_produit
 LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
-WHERE c.etat_commande NOT IN ('En attente','Annulé')
+WHERE c.etat_commande NOT IN ('En attente','Annulé')$whereBoutiqueMvt
 ORDER BY c.date_commande DESC, c.heure_commande DESC";
-$countSql = "SELECT COUNT(*) FROM commande c WHERE c.etat_commande NOT IN ('En attente','Annulé')";
+$countSql = "SELECT COUNT(*) FROM commande c WHERE c.etat_commande NOT IN ('En attente','Annulé')$whereBoutiqueMvt";
 $renderer = function ($row) {
 $badgeMvt = $row['type_mvt'] === 'ENTRÉE' ? 'bg-success-subtle text-success' : 'bg-danger-subtle text-danger';
 $etat = $row['etat_commande'];
@@ -93,17 +110,18 @@ return '<tr>'
 . '<td class="text-center"><span class="badge-chic ' . $badgeEtat . '"><span class="dot"></span> ' . e($etat) . '</span></td>'
 . '</tr>';
 };
-return paginer($pdo, $sql, $countSql, [], $page, 20, $renderer, 7);
+return paginer($pdo, $sql, $countSql, $paramsMvt, $page, 20, $renderer, 7);
 }
 // ==========================================================
 // ONGLET 2 : VALORISATION DU STOCK
 // ==========================================================
-function chargerValorisation($pdo, $page, $boutiqueId) {
+function chargerValorisation($pdo, $page, $boutiqueId, $boutiquesAutorisees) {
 $params = [];
-$whereBoutique = "";
+$whereBoutique = empty($boutiquesAutorisees) ? " AND 1=0" : " AND s.boutique_id IN (" . implode(',', array_fill(0, count($boutiquesAutorisees), '?')) . ")";
+foreach ($boutiquesAutorisees as $bid) $params[] = $bid;
 if ($boutiqueId !== '') {
-$whereBoutique = " AND s.boutique_id = :boutique_id";
-$params[':boutique_id'] = $boutiqueId;
+$whereBoutique .= " AND s.boutique_id = ?";
+$params[] = $boutiqueId;
 }
 $sql = "SELECT s.produit_id, s.boutique_id, s.quantite, s.stock_alerte AS alerte_boutique,
 p.titre_produit, p.prix_fournisseur, p.prix_produit, p.stock_alerte, p.etat_produit,
@@ -146,10 +164,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['aj
 $tab = $_POST['tab'] ?? 'mouvements';
 $page = (int)($_POST['page'] ?? 1);
 $boutiqueIdAjax = trim($_POST['boutique_id'] ?? '');
+if ($boutiqueIdAjax !== '' && !in_array($boutiqueIdAjax, $boutiquesAutorisees, true)) $boutiqueIdAjax = '';
 if ($tab === 'valorisation') {
-$res = chargerValorisation($pdo, $page, $boutiqueIdAjax);
+$res = chargerValorisation($pdo, $page, $boutiqueIdAjax, $boutiquesAutorisees);
 } else {
-$res = chargerMouvements($pdo, $page);
+$res = chargerMouvements($pdo, $page, $boutiquesAutorisees, $boutiqueIdAjax);
 }
 while (ob_get_level()) ob_end_clean();
 header('Content-Type: application/json; charset=utf-8');
@@ -157,20 +176,211 @@ echo json_encode(['table' => $res['tableHtml'], 'pagination' => $res['pagination
 exit;
 }
 // ==========================================================
+// IMPRESSION PDF (mêmes filtres que l'onglet affiché à l'écran)
+// ==========================================================
+if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
+while (ob_get_level() > 0) { ob_end_clean(); }
+
+$tabPdf = $_POST['tab'] ?? 'mouvements';
+// 'I' = affichage direct dans l'onglet, 'D' = téléchargement forcé (PDF uniquement).
+$modePdf = (isset($_POST['mode']) && $_POST['mode'] === 'D') ? 'D' : 'I';
+// 'pdf' (défaut) ou 'excel'.
+$formatExport = (isset($_POST['format']) && $_POST['format'] === 'excel') ? 'excel' : 'pdf';
+$boutiqueIdPdf = trim($_POST['boutique_id'] ?? '');
+if ($boutiqueIdPdf !== '' && !in_array($boutiqueIdPdf, $boutiquesAutorisees, true)) $boutiqueIdPdf = '';
+
+$boutique = null;
+$boutiqueIdEntete = $boutiqueIdPdf !== '' ? $boutiqueIdPdf : ($_SESSION['boutique_id'] ?? '');
+if (!empty($boutiqueIdEntete)) {
+    $stmtBPdf = $pdo->prepare("SELECT * FROM boutique WHERE code_boutique = ?");
+    $stmtBPdf->execute([$boutiqueIdEntete]);
+    $boutique = $stmtBPdf->fetch(PDO::FETCH_ASSOC) ?: null;
+}
+$sousTitreBoutique = !empty($boutique['nom_boutique']) ? ('Boutique : ' . $boutique['nom_boutique']) : 'Toutes boutiques';
+
+if ($tabPdf === 'valorisation') {
+    // Même requête que chargerValorisation(), sans pagination.
+    $params = [];
+    $whereBoutique = empty($boutiquesAutorisees) ? " AND 1=0" : " AND s.boutique_id IN (" . implode(',', array_fill(0, count($boutiquesAutorisees), '?')) . ")";
+    foreach ($boutiquesAutorisees as $bid) $params[] = $bid;
+    if ($boutiqueIdPdf !== '') { $whereBoutique .= " AND s.boutique_id = ?"; $params[] = $boutiqueIdPdf; }
+    $sql = "SELECT s.produit_id, s.boutique_id, s.quantite,
+            p.titre_produit, p.prix_fournisseur, p.prix_produit, p.etat_produit,
+            cat.titre_categorie, b.nom_boutique,
+            (s.quantite * p.prix_fournisseur) AS valeur_achat,
+            (s.quantite * p.prix_produit) AS valeur_vente
+            FROM stock s
+            JOIN produit p ON s.produit_id = p.code_produit
+            LEFT JOIN categorie cat ON p.categorie_id = cat.code_categorie
+            LEFT JOIN boutique b ON s.boutique_id = b.code_boutique
+            WHERE s.quantite > 0$whereBoutique
+            ORDER BY valeur_achat DESC";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $colonnes = [
+        ['titre' => 'Produit', 'largeur' => 42, 'align' => 'L'],
+        ['titre' => 'Catégorie', 'largeur' => 26, 'align' => 'L'],
+        ['titre' => 'Boutique', 'largeur' => 26, 'align' => 'L'],
+        ['titre' => 'Qté', 'largeur' => 14, 'align' => 'C'],
+        ['titre' => 'Px achat', 'largeur' => 20, 'align' => 'R'],
+        ['titre' => 'Val. achat', 'largeur' => 24, 'align' => 'R'],
+        ['titre' => 'Val. vente', 'largeur' => 24, 'align' => 'R'],
+        ['titre' => 'État', 'largeur' => 14, 'align' => 'C'],
+    ];
+    $libellesEtat = ['DISPONIBLE' => 'Dispo.', 'ALERTE' => 'Alerte', 'RUPTURE' => 'Rupture'];
+    $totalQte = 0; $totalValeurAchat = 0; $totalValeurVente = 0;
+    foreach ($lignes as $row) {
+        $totalQte += (int)$row['quantite'];
+        $totalValeurAchat += (float)$row['valeur_achat'];
+        $totalValeurVente += (float)$row['valeur_vente'];
+    }
+
+    if ($formatExport === 'excel') {
+        $xlsx = creerExcelRapport('VALORISATION DU STOCK', $sousTitreBoutique, $boutique, count($colonnes));
+        $xlsx->setColumnWidths([30, 18, 18, 10, 12, 14, 14, 12]);
+        $xlsx->addHeaderRow(['Produit', 'Catégorie', 'Boutique', 'Qté', 'Px achat', 'Val. achat', 'Val. vente', 'État']);
+        foreach ($lignes as $row) {
+            $xlsx->addRow([
+                $row['titre_produit'],
+                $row['titre_categorie'] ?? '—',
+                $row['nom_boutique'] ?? '—',
+                (int)$row['quantite'],
+                (float)$row['prix_fournisseur'],
+                (float)$row['valeur_achat'],
+                (float)$row['valeur_vente'],
+                $libellesEtat[$row['etat_produit']] ?? $row['etat_produit'],
+            ], ['L', 'L', 'L', 'C', 'R', 'R', 'R', 'C']);
+        }
+        $xlsx->addBlankRow();
+        $xlsx->addTotalRow(['TOTAL (' . count($lignes) . ' ligne(s))', '', '', $totalQte, '', $totalValeurAchat, $totalValeurVente, ''], ['L', 'L', 'L', 'C', 'R', 'R', 'R', 'C']);
+        $xlsx->output('Valorisation_stock_' . date('Ymd_His') . '.xlsx', $modePdf);
+    }
+
+    $pdf = creerPdfRapport('VALORISATION DU STOCK', $sousTitreBoutique, $boutique);
+    dessinerEnteteTableauRapport($pdf, $colonnes);
+    foreach ($lignes as $i => $row) {
+        dessinerLigneTableauRapport($pdf, $colonnes, [
+            $row['titre_produit'],
+            $row['titre_categorie'] ?? '—',
+            $row['nom_boutique'] ?? '—',
+            (string)(int)$row['quantite'],
+            fmt((float)$row['prix_fournisseur']) . ' F',
+            fmt((float)$row['valeur_achat']) . ' F',
+            fmt((float)$row['valeur_vente']) . ' F',
+            $libellesEtat[$row['etat_produit']] ?? $row['etat_produit'],
+        ], $i);
+    }
+    $pdf->SetFont('Arial', 'B', 8);
+    $pdf->SetFillColor(242, 242, 242);
+    $pdf->Cell(96, 7, 'TOTAL (' . count($lignes) . ' ligne(s))', 0, 0, 'L', true);
+    $pdf->Cell(14, 7, (string)$totalQte, 0, 0, 'C', true);
+    $pdf->Cell(20, 7, '', 0, 0, 'L', true);
+    $pdf->Cell(24, 7, fmt($totalValeurAchat) . ' F', 0, 0, 'R', true);
+    $pdf->Cell(24, 7, fmt($totalValeurVente) . ' F', 0, 0, 'R', true);
+    $pdf->Cell(14, 7, '', 0, 1, 'L', true);
+    $pdf->Output($modePdf, 'Valorisation_stock_' . date('Ymd_His') . '.pdf');
+    exit;
+}
+
+// Onglet "mouvements" (même requête que chargerMouvements(), sans pagination).
+$whereBoutiqueMvt = empty($boutiquesAutorisees) ? " AND 1=0" : " AND c.boutique_id IN (" . implode(',', array_fill(0, count($boutiquesAutorisees), '?')) . ")";
+$paramsMvt = $boutiquesAutorisees;
+if ($boutiqueIdPdf !== '') { $whereBoutiqueMvt .= " AND c.boutique_id = ?"; $paramsMvt[] = $boutiqueIdPdf; }
+$sql = "SELECT c.numero_commande, c.date_commande, c.quantite_commande, c.statut_id, c.etat_commande,
+        p.titre_produit, b.nom_boutique,
+        CASE WHEN c.statut_id IN ('011','009','010','006') THEN 'ENTRÉE' ELSE 'SORTIE' END AS type_mvt
+        FROM commande c
+        JOIN produit p ON c.produit_id = p.code_produit
+        LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
+        WHERE c.etat_commande NOT IN ('En attente','Annulé')$whereBoutiqueMvt
+        ORDER BY c.date_commande DESC, c.heure_commande DESC";
+$stmt = $pdo->prepare($sql);
+$stmt->execute($paramsMvt);
+$lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$colonnes = [
+    ['titre' => 'N° Mouvement', 'largeur' => 32, 'align' => 'L'],
+    ['titre' => 'Date', 'largeur' => 22, 'align' => 'C'],
+    ['titre' => 'Produit', 'largeur' => 48, 'align' => 'L'],
+    ['titre' => 'Boutique', 'largeur' => 30, 'align' => 'L'],
+    ['titre' => 'Qté', 'largeur' => 15, 'align' => 'C'],
+    ['titre' => 'Type', 'largeur' => 20, 'align' => 'C'],
+    ['titre' => 'État', 'largeur' => 23, 'align' => 'C'],
+];
+$totalEntrees = 0; $totalSorties = 0;
+foreach ($lignes as $row) {
+    $qte = (int)$row['quantite_commande'];
+    if ($row['type_mvt'] === 'ENTRÉE') { $totalEntrees += $qte; } else { $totalSorties += $qte; }
+}
+
+if ($formatExport === 'excel') {
+    $xlsx = creerExcelRapport('MOUVEMENTS DE STOCK', $sousTitreBoutique, $boutique, count($colonnes));
+    $xlsx->setColumnWidths([20, 14, 32, 20, 10, 12, 16]);
+    $xlsx->addHeaderRow(['N° Mouvement', 'Date', 'Produit', 'Boutique', 'Qté', 'Type', 'État']);
+    foreach ($lignes as $row) {
+        $qte = (int)$row['quantite_commande'];
+        $xlsx->addRow([
+            $row['numero_commande'],
+            date('d/m/Y', strtotime($row['date_commande'])),
+            $row['titre_produit'],
+            $row['nom_boutique'] ?? '—',
+            $qte,
+            $row['type_mvt'],
+            $row['etat_commande'],
+        ], ['L', 'C', 'L', 'L', 'C', 'C', 'C']);
+    }
+    $xlsx->addBlankRow();
+    $xlsx->addTotalRow(['TOTAL (' . count($lignes) . ' mouvement(s))', '', '', '', '', 'E:' . $totalEntrees . ' / S:' . $totalSorties, ''], ['L', 'C', 'L', 'L', 'C', 'C', 'C']);
+    $xlsx->output('Mouvements_stock_' . date('Ymd_His') . '.xlsx', $modePdf);
+}
+
+$pdf = creerPdfRapport('MOUVEMENTS DE STOCK', $sousTitreBoutique, $boutique);
+dessinerEnteteTableauRapport($pdf, $colonnes);
+foreach ($lignes as $i => $row) {
+    $qte = (int)$row['quantite_commande'];
+    dessinerLigneTableauRapport($pdf, $colonnes, [
+        $row['numero_commande'],
+        date('d/m/Y', strtotime($row['date_commande'])),
+        $row['titre_produit'],
+        $row['nom_boutique'] ?? '—',
+        (string)$qte,
+        $row['type_mvt'],
+        $row['etat_commande'],
+    ], $i);
+}
+$pdf->SetFont('Arial', 'B', 8);
+$pdf->SetFillColor(242, 242, 242);
+$pdf->Cell(102, 7, 'TOTAL (' . count($lignes) . ' mouvement(s))', 0, 0, 'L', true);
+$pdf->Cell(15, 7, '', 0, 0, 'L', true);
+$pdf->Cell(20, 7, 'E:' . $totalEntrees . ' / S:' . $totalSorties, 0, 0, 'C', true);
+$pdf->Cell(23, 7, '', 0, 1, 'L', true);
+$pdf->Output($modePdf, 'Mouvements_stock_' . date('Ymd_His') . '.pdf');
+exit;
+}
+// ==========================================================
 // CHARGEMENT INITIAL
 // ==========================================================
-$resMouvements = chargerMouvements($pdo, 1);
-$resValorisation = chargerValorisation($pdo, 1, $boutiqueId);
+$resMouvements = chargerMouvements($pdo, 1, $boutiquesAutorisees, $boutiqueId);
+$resValorisation = chargerValorisation($pdo, 1, $boutiqueId, $boutiquesAutorisees);
 // Graphique : entrées/sorties mensuelles (12 derniers mois)
-$mouvementsMois = $pdo->query("SELECT DATE_FORMAT(date_commande,'%Y-%m') AS mois,
+if (empty($boutiquesAutorisees)) {
+    $mouvementsMois = [];
+} else {
+    $inPhMois = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtMois = $pdo->prepare("SELECT DATE_FORMAT(date_commande,'%Y-%m') AS mois,
 SUM(CASE WHEN statut_id IN ('011','009','010','006') THEN quantite_commande ELSE 0 END) AS entrees,
 SUM(CASE WHEN statut_id IN ('012','008','007','001','002','003','004') THEN quantite_commande ELSE 0 END) AS sorties
-FROM commande WHERE etat_commande NOT IN ('En attente','Annulé') AND date_commande >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-GROUP BY mois ORDER BY mois ASC")->fetchAll(PDO::FETCH_ASSOC);
+FROM commande WHERE etat_commande NOT IN ('En attente','Annulé') AND date_commande >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH) AND boutique_id IN ($inPhMois)
+GROUP BY mois ORDER BY mois ASC");
+    $stmtMois->execute($boutiquesAutorisees);
+    $mouvementsMois = $stmtMois->fetchAll(PDO::FETCH_ASSOC);
+}
 // Stats de valorisation globale
-$paramsVal = [];
-$whereBoutiqueVal = "";
-if ($boutiqueId !== '') { $whereBoutiqueVal = " AND s.boutique_id = :boutique_id"; $paramsVal[':boutique_id'] = $boutiqueId; }
+$paramsVal = $boutiquesAutorisees;
+$whereBoutiqueVal = empty($boutiquesAutorisees) ? " AND 1=0" : " AND s.boutique_id IN (" . implode(',', array_fill(0, count($boutiquesAutorisees), '?')) . ")";
+if ($boutiqueId !== '') { $whereBoutiqueVal .= " AND s.boutique_id = ?"; $paramsVal[] = $boutiqueId; }
 $stmt = $pdo->prepare("SELECT COALESCE(SUM(s.quantite * p.prix_fournisseur),0) AS valeur_achat,
 COALESCE(SUM(s.quantite * p.prix_produit),0) AS valeur_vente,
 COALESCE(SUM(s.quantite),0) AS qte_totale,
@@ -192,8 +402,17 @@ GROUP BY cat.code_categorie ORDER BY valeur DESC");
 $stmt->execute($paramsVal);
 $valeurParCategorie = $stmt->fetchAll(PDO::FETCH_ASSOC);
 // Produits en rupture / alerte
-$nbRupture = (int)$pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit = 'RUPTURE'")->fetchColumn();
-$nbAlerte  = (int)$pdo->query("SELECT COUNT(*) FROM produit WHERE etat_produit = 'ALERTE'")->fetchColumn();
+if (empty($boutiquesAutorisees)) {
+    $nbRupture = 0; $nbAlerte = 0;
+} else {
+    $inPhKpi = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtRupt = $pdo->prepare("SELECT COUNT(*) FROM stock s WHERE s.boutique_id IN ($inPhKpi) AND s.quantite <= 0");
+    $stmtRupt->execute($boutiquesAutorisees);
+    $nbRupture = (int)$stmtRupt->fetchColumn();
+    $stmtAlerte = $pdo->prepare("SELECT COUNT(*) FROM stock s WHERE s.boutique_id IN ($inPhKpi) AND s.quantite > 0 AND s.quantite <= s.stock_alerte");
+    $stmtAlerte->execute($boutiquesAutorisees);
+    $nbAlerte = (int)$stmtAlerte->fetchColumn();
+}
 $onglet = $_GET['onglet'] ?? 'mouvements';
 if (!in_array($onglet, ['mouvements', 'valorisation'], true)) $onglet = 'mouvements';
 ?>
@@ -618,6 +837,9 @@ $fg = $colorMap[$s[0]][1];
 <div class="d-flex gap-2">
 <button type="submit" class="btn-filter"><i class="bi bi-funnel"></i> Filtrer</button>
 <a href="?onglet=<?= e($onglet) ?>" class="btn-reset"><i class="bi bi-arrow-counterclockwise"></i> Réinitialiser</a>
+<button type="button" class="btn-reset" id="printStockBtn" data-mode="I"><i class="bi bi-printer"></i> Imprimer</button>
+<button type="button" class="btn-reset" id="downloadStockBtn" data-mode="D"><i class="bi bi-download"></i> Télécharger</button>
+<button type="button" class="btn-reset" id="excelStockBtn"><i class="bi bi-file-earmark-excel"></i> Excel</button>
 </div>
 </div>
 </form>
@@ -789,6 +1011,33 @@ if (!page || $(this).closest('li').hasClass('disabled')) return;
 var tab = $(this).closest('.tab-pane').attr('id').replace('pane-', '');
 chargerPage(tab, page);
 });
+
+// ---- Impression / téléchargement PDF (onglet actif + boutique filtrée) ----
+function imprimerMouvementStock(mode, format) {
+    var tab = $('#stockTabs .nav-link.active').data('tab') || 'mouvements';
+    var data = {
+        action: 'pdf',
+        mode: mode || 'I',
+        format: format || 'pdf',
+        tab: tab,
+        boutique_id: $('#boutiqueSelect').val() || ''
+    };
+    var form = document.createElement('form');
+    form.method = 'POST';
+    form.action = window.location.pathname;
+    // Pas de target : le fichier s'ouvre/se télécharge dans le même onglet.
+    Object.keys(data).forEach(function (key) {
+        var input = document.createElement('input');
+        input.type = 'hidden'; input.name = key; input.value = data[key];
+        form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+    form.remove();
+}
+$('#printStockBtn').on('click', function() { imprimerMouvementStock('I', 'pdf'); });
+$('#downloadStockBtn').on('click', function() { imprimerMouvementStock('D', 'pdf'); });
+$('#excelStockBtn').on('click', function() { imprimerMouvementStock('D', 'excel'); });
 });
 </script>
 </body>

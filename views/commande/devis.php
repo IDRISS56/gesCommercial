@@ -69,6 +69,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         exit;
     }
 
+    // Vente à perte : le prix de vente d'une ligne ne doit jamais être
+    // inférieur au prix d'achat du produit. Lève une Exception (message prêt
+    // à afficher) si c'est le cas ; ne fait rien si le prix est correct ou
+    // égal (marge nulle tolérée, seulement signalée côté client).
+    if (!function_exists('verifierPrixVenteLigneDevis')) {
+        function verifierPrixVenteLigneDevis(PDO $pdo, string $codeProduit, float $prixSaisi): void {
+            $stmtPa = $pdo->prepare("SELECT prix_fournisseur, titre_produit FROM produit WHERE code_produit = ?");
+            $stmtPa->execute([$codeProduit]);
+            $refProd = $stmtPa->fetch(PDO::FETCH_ASSOC);
+            $prixAchatRef = (float) ($refProd['prix_fournisseur'] ?? 0);
+            if ($prixAchatRef > 0 && $prixSaisi < $prixAchatRef) {
+                $nomProd = $refProd['titre_produit'] ?? $codeProduit;
+                throw new Exception("Prix de vente (" . number_format($prixSaisi, 0, ',', ' ') . " F) inférieur au prix d'achat (" . number_format($prixAchatRef, 0, ',', ' ') . " F) pour « $nomProd » — devis refusé.");
+            }
+        }
+    }
+
+    // ---- PRODUITS D'UNE CATÉGORIE (chargement à la demande, remplace le
+    // préchargement complet du catalogue produit dans la page — voir la
+    // même correction sur commande/vente.php et commande/suivi_achat.php) ----
+    if ($action === 'produits_par_categorie') {
+        $categorieId = trim($_POST['categorie_id'] ?? '');
+        if (empty($categorieId)) {
+            echo json_encode(['success' => false, 'message' => 'Catégorie manquante', 'produits' => []]);
+            exit;
+        }
+        $stmtProd = $pdo->prepare(
+            "SELECT code_produit, titre_produit, prix_produit, prix_fournisseur
+             FROM produit
+             WHERE categorie_id = ?
+             ORDER BY titre_produit ASC"
+        );
+        $stmtProd->execute([$categorieId]);
+        echo json_encode(['success' => true, 'produits' => $stmtProd->fetchAll(PDO::FETCH_ASSOC)]);
+        exit;
+    }
+
     // ---- CRÉATION D'UN DEVIS ----
     if ($action === 'creer_devis') {
         try {
@@ -91,6 +128,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $produits_par_lot = max(1, intval($l['produits_par_lot'] ?? 1));
 
                 if (!$code_prod || $prix < 0) continue;
+
+                // Vente à perte : vérification autoritaire (le client peut être
+                // contourné) — voir verifierPrixVenteLigneDevis() plus haut.
+                verifierPrixVenteLigneDevis($pdo, $code_prod, $prix);
 
                 $montantLigne = round($qte * $prix, 2);
                 $montantHT += $montantLigne;
@@ -164,6 +205,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $produits_par_lot = max(1, intval($l['produits_par_lot'] ?? 1));
 
                 if (!$code_prod || $prix < 0) continue;
+
+                // Vente à perte : vérification autoritaire (le client peut être
+                // contourné) — voir verifierPrixVenteLigneDevis() plus haut.
+                verifierPrixVenteLigneDevis($pdo, $code_prod, $prix);
 
                 $montantLigne = round($qte * $prix, 2);
                 $montantHT += $montantLigne;
@@ -399,7 +444,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 // DONNÉES POUR LA PAGE
 // ==========================================
 $clients = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact WHERE type_contact = 'Client' AND etat_contact = 'Actif' ORDER BY nom_prenom_contact ASC")->fetchAll(PDO::FETCH_ASSOC);
-$produits = $pdo->query("SELECT code_produit, titre_produit, prix_produit, categorie_id FROM produit ORDER BY titre_produit ASC")->fetchAll(PDO::FETCH_ASSOC);
+// Le catalogue produit n'est plus préchargé en entier ici (voir la même
+// correction sur commande/vente.php) : chaque ligne du devis récupère ses
+// produits à la demande, par catégorie, via l'action AJAX 'produits_par_categorie'.
 $categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie = 'ACTIF' ORDER BY titre_categorie ASC")->fetchAll(PDO::FETCH_ASSOC);
 $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique ASC")->fetchAll(PDO::FETCH_ASSOC);
 $taxes = $pdo->query("SELECT * FROM taxe WHERE etat_taxe = 'ACTIF' ORDER BY type_taxe, taux_taxe")->fetchAll(PDO::FETCH_ASSOC);
@@ -558,6 +605,7 @@ h1,h2,h3,h4,h5,h6 { font-family: 'Outfit', sans-serif; font-weight: 700; letter-
 .ligne-devis { display: grid; grid-template-columns: 120px minmax(160px,1.4fr) 60px 72px 88px 92px 32px; gap: 6px; align-items: center; background: #fff; border: 1px solid var(--border-color); border-radius: 12px; padding: 8px; margin-bottom: 8px; max-width: 100%; }
 .ligne-devis.line-error { border-color: var(--color-danger) !important; background: #fff5f5; }
 .ligne-devis-hint { grid-column: 1 / -1; font-size: 11px; color: var(--text-tertiary); margin-top: 6px; }
+.ligne-prix-alerte { grid-column: 1 / -1; font-size: 11px; margin-top: 2px; }
 
 .totals-card { width: 320px; max-width: 100%; background: #fff; border: 1px solid var(--border-color); border-radius: 12px; padding: 16px; }
 
@@ -943,8 +991,24 @@ h1,h2,h3,h4,h5,h6 { font-family: 'Outfit', sans-serif; font-weight: 700; letter-
 
 <script>
 const CSRF_TOKEN = <?= json_encode($csrf_token) ?>;
-const PRODUITS = <?= json_encode($produits, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?: '[]' ?>;
 const CATEGORIES = <?= json_encode($categories, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?: '[]' ?>;
+// Le catalogue produit n'est plus préchargé en entier (voir la même
+// correction sur commande/vente.php) : chaque ligne récupère ses produits à
+// la demande, par catégorie, via 'produits_par_categorie'. Petit cache par
+// catégorie pour éviter de re-télécharger la même liste à chaque nouvelle
+// ligne d'une même catégorie dans un même devis.
+const _produitsParCategorieCache = {};
+function chargerProduitsCategorie(catId, callback) {
+    if (Object.prototype.hasOwnProperty.call(_produitsParCategorieCache, catId)) {
+        callback(_produitsParCategorieCache[catId]);
+        return;
+    }
+    $.post(window.location.href, { action: 'produits_par_categorie', categorie_id: catId, csrf_token: CSRF_TOKEN }, function(resp) {
+        const produits = (resp && resp.success) ? (resp.produits || []) : [];
+        _produitsParCategorieCache[catId] = produits;
+        callback(produits);
+    }, 'json');
+}
 
 let devisEnEdition = null; // null = création, sinon numéro du devis en cours de modification
 
@@ -1045,46 +1109,55 @@ function filtrerProduitsLigne($line, catId, selectedProduitCode) {
     // Source de vérité pour la validation : indépendante du widget bootstrap-select.
     $line.attr('data-produit-code', selectedProduitCode || '');
 
-    let options = '<option value="">-- Produit --</option>';
-    if (catId !== '') {
-        PRODUITS.filter(p => String(p.categorie_id) === String(catId)).forEach(p => {
+    function rendreOptions(produits) {
+        let options = '<option value="">-- Produit --</option>';
+        produits.forEach(p => {
             const sel = (selectedProduitCode && String(p.code_produit) === String(selectedProduitCode)) ? ' selected' : '';
             options += `
                 <option
                     value="${escapeHtml(p.code_produit)}"
                     data-prix="${escapeHtml(p.prix_produit)}"
+                    data-prix-achat="${escapeHtml(p.prix_fournisseur || 0)}"
                     data-subtext="${escapeHtml(fmtN(p.prix_produit))}"${sel}
                 >
                     ${escapeHtml(p.titre_produit)}
                 </option>
             `;
         });
+
+        if ($.fn.selectpicker) {
+            try { $prodSelect.selectpicker('destroy'); } catch (e) {}
+        }
+
+        $prodSelect.html(options);
+        $prodSelect.prop('disabled', catId === '');
+        $prodSelect.attr('title', catId === '' ? "-- Choisir d'abord une catégorie --" : '-- Produit --');
+
+        if ($.fn.selectpicker) {
+            $prodSelect.selectpicker({
+                liveSearch: true,
+                width: '100%',
+                size: 8,
+                liveSearchPlaceholder: 'Rechercher un produit'
+            });
+
+            $prodSelect.off('changed.bs.select').on('changed.bs.select', function () {
+                produitChoisi(this);
+                corrigerLibelleSelectpicker($(this));
+            });
+        } else {
+            $prodSelect.off('change').on('change', function () {
+                produitChoisi(this);
+            });
+        }
     }
 
-    if ($.fn.selectpicker) {
-        try { $prodSelect.selectpicker('destroy'); } catch (e) {}
-    }
-
-    $prodSelect.html(options);
-    $prodSelect.prop('disabled', catId === '');
-    $prodSelect.attr('title', catId === '' ? "-- Choisir d'abord une catégorie --" : '-- Produit --');
-
-    if ($.fn.selectpicker) {
-        $prodSelect.selectpicker({
-            liveSearch: true,
-            width: '100%',
-            size: 8,
-            liveSearchPlaceholder: 'Rechercher un produit'
-        });
-
-        $prodSelect.off('changed.bs.select').on('changed.bs.select', function () {
-            produitChoisi(this);
-            corrigerLibelleSelectpicker($(this));
-        });
+    if (catId === '') {
+        rendreOptions([]);
     } else {
-        $prodSelect.off('change').on('change', function () {
-            produitChoisi(this);
-        });
+        // Placeholder immédiat pendant le chargement, pour un retour visuel rapide.
+        $prodSelect.prop('disabled', true).attr('title', 'Chargement...');
+        chargerProduitsCategorie(catId, rendreOptions);
     }
 }
 
@@ -1119,6 +1192,7 @@ function ajouterLigne(prefill) {
         </button>
 
         <div class="ligne-devis-hint"></div>
+        <div class="ligne-prix-alerte"></div>
     `;
 
     container.appendChild(div);
@@ -1197,6 +1271,7 @@ function produitChoisi(sel) {
 
 function calculerTotaux() {
     let montantHT = 0;
+    let prixInvalideDetecte = false;
 
     document.querySelectorAll('.ligne-devis').forEach(div => {
         const qte = parseFloat(div.querySelector('.ligne-qte').value) || 0;
@@ -1205,6 +1280,26 @@ function calculerTotaux() {
 
         div.querySelector('.ligne-montant').textContent = fmtN(montant);
         calculerHintLigne(div);
+
+        // Vente à perte : le prix d'une ligne ne doit jamais être inférieur au
+        // prix d'achat du produit choisi (marge nulle tolérée, signalée).
+        // Lu directement sur l'option sélectionnée (fiable aussi bien après une
+        // sélection manuelle qu'au préremplissage d'un devis existant).
+        const $div = $(div);
+        const prixAchatLigne = parseFloat($div.find('.ligne-produit option:selected').data('prix-achat')) || 0;
+        const $alerte = $div.find('.ligne-prix-alerte');
+        if (prixAchatLigne > 0 && prix > 0) {
+            if (prix < prixAchatLigne) {
+                $alerte.html('<span class="text-danger fw-semibold"><i class="bi bi-x-octagon-fill"></i> Inférieur au prix d\'achat (' + fmtN(prixAchatLigne) + ' F) — ligne invalide.</span>');
+                prixInvalideDetecte = true;
+            } else if (prix === prixAchatLigne) {
+                $alerte.html('<span class="text-warning fw-semibold"><i class="bi bi-exclamation-triangle-fill"></i> Prix égal au prix d\'achat : marge nulle.</span>');
+            } else {
+                $alerte.html('');
+            }
+        } else {
+            $alerte.html('');
+        }
 
         montantHT += montant;
     });
@@ -1220,6 +1315,8 @@ function calculerTotaux() {
     document.getElementById('totTaxe').textContent = fmtN(taxe);
     document.getElementById('totRemise').textContent = fmtN(remise);
     document.getElementById('totTTC').textContent = fmtN(ttc);
+
+    return !prixInvalideDetecte;
 }
 
 function enregistrerDevis() {
@@ -1227,6 +1324,11 @@ function enregistrerDevis() {
 
     if (!client_id) {
         showToast('Veuillez sélectionner un client avant d’enregistrer le devis.', 'warning');
+        return;
+    }
+
+    if (!calculerTotaux()) {
+        showToast('Au moins une ligne a un prix de vente inférieur au prix d\'achat du produit : corrigez-la avant d\'enregistrer.', 'error');
         return;
     }
 

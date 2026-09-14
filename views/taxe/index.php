@@ -13,6 +13,7 @@ function sendJson($data)
 
 // taxe.php – Gestion des taxes (design boutique)
 require 'databases/database.php';
+require_once 'config/csrf.php';
 
 // --- Récupération des listes pour les selects ---
 $types_taxe = ['TVA', 'Remise', 'Autre'];
@@ -26,6 +27,10 @@ $etats_taxe = ['Actif', 'Inactif'];
 $message = '';
 $messageType = '';
 $action = $_POST['action'] ?? '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($action !== '' || isset($_POST['btn_supprimer']))) {
+    verifierCsrfToken();
+}
 
 if ($action === 'add' || $action === 'edit') {
     $code = trim($_POST['code_taxe'] ?? '');
@@ -517,6 +522,7 @@ $inactives = $pdo->query("SELECT COUNT(*) FROM taxe WHERE etat_taxe = 'Inactif'"
             </div>
             <!-- ✅ CORRECTION : ajout du style display:flex; flex-direction:column; flex:1; min-height:0; -->
             <form method="post" id="taxeForm" style="display: flex; flex-direction: column; flex: 1; min-height: 0;">
+                <?= csrfChampCache() ?>
                 <input type="hidden" name="action" id="formAction" value="add">
                 <input type="hidden" name="old_code" id="oldCode" value="">
                 <div class="modal-body">
@@ -626,11 +632,13 @@ $inactives = $pdo->query("SELECT COUNT(*) FROM taxe WHERE etat_taxe = 'Inactif'"
 
 <!-- Formulaires cachés -->
 <form id="deleteForm" method="POST" style="display:none;">
+    <?= csrfChampCache() ?>
     <input type="hidden" name="btn_supprimer" value="1">
     <input type="hidden" name="sai_supprimer_id" id="deleteFormId" value="">
 </form>
 
 <form method="post" id="actionForm" style="display:none;">
+    <?= csrfChampCache() ?>
     <input type="hidden" name="action" id="actionField">
     <input type="hidden" name="edit_code" id="editCodeField">
 </form>

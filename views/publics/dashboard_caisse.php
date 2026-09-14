@@ -18,14 +18,28 @@ $stmtU->execute([USER_ID]);
 $user = $stmtU->fetch(PDO::FETCH_ASSOC);
 if (!$user) { session_destroy(); header('Location: ../utilisateur/login'); exit; }
 
-// - CAISSE OUVERTE PAR CET UTILISATEUR (le jour même) -
-$stmtCaisse = $pdo->prepare("SELECT c.caisse_id, c.nom_caisse, c.solde, jc.date_ouverture, jc.solde_ouverture, jc.total_entrees, jc.total_sorties, jc.nombre_transactions
-    FROM caisse c
-    JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
-    WHERE c.statut = 'Actif' AND jc.id_utilisateur_ouverture = ?
-    ORDER BY jc.date_ouverture DESC LIMIT 1");
-$stmtCaisse->execute([USER_ID]);
-$caisseOuverte = $stmtCaisse->fetch(PDO::FETCH_ASSOC);
+// - CAISSE OUVERTE DANS LA/LES BOUTIQUE(S) DE CET UTILISATEUR -
+// Peu importe QUI l'a ouverte (le caissier lui-même, un Superviseur ou un
+// Administrateur) : dès qu'une caisse de sa boutique est ouverte, le
+// caissier doit pouvoir l'utiliser directement, sans avoir à l'ouvrir
+// lui-même. Restreint à sa boutique (et exceptions éventuelles) via
+// getBoutiquesAutorisees, pour ne jamais afficher/utiliser par erreur une
+// caisse d'une autre boutique.
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $user['role'] ?? null, $user['boutique_id'] ?? null);
+$caisseOuverte = null;
+$nbCaissesOuvertes = 0;
+if (!empty($boutiquesAutorisees)) {
+    $inPhDC = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtCaisse = $pdo->prepare("SELECT DISTINCT c.caisse_id, c.nom_caisse, c.solde, jc.date_ouverture, jc.solde_ouverture, jc.total_entrees, jc.total_sorties, jc.nombre_transactions
+        FROM caisse c
+        JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
+        WHERE c.statut = 'Actif' AND c.boutique_id IN ($inPhDC)
+        ORDER BY jc.date_ouverture DESC");
+    $stmtCaisse->execute($boutiquesAutorisees);
+    $caissesOuvertesListe = $stmtCaisse->fetchAll(PDO::FETCH_ASSOC);
+    $nbCaissesOuvertes = count($caissesOuvertesListe);
+    $caisseOuverte = $caissesOuvertesListe[0] ?? null;
+}
 
 $today = date('Y-m-d');
 $encaisseJour = 0; $decaisseJour = 0; $nbTransactionsJour = 0; $dernieresTransactions = [];
@@ -132,7 +146,7 @@ tbody tr:hover { background: var(--bl); }
             <p>Voici la situation de votre caisse aujourd'hui</p>
         </div>
         <?php if ($caisseOuverte): ?>
-            <span class="badge-caisse ouverte"><i class="bi bi-unlock-fill"></i> Caisse "<?= e($caisseOuverte['nom_caisse']) ?>" ouverte</span>
+            <span class="badge-caisse ouverte"><i class="bi bi-unlock-fill"></i> Caisse "<?= e($caisseOuverte['nom_caisse']) ?>" ouverte<?= $nbCaissesOuvertes > 1 ? ' (+' . ($nbCaissesOuvertes - 1) . ' autre(s))' : '' ?></span>
         <?php else: ?>
             <span class="badge-caisse fermee"><i class="bi bi-lock-fill"></i> Aucune caisse ouverte</span>
         <?php endif; ?>

@@ -9,7 +9,7 @@ function e($str) {
 $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
 
 // ===== EXCLURE LE RÔLE ADMINISTRATEUR =====
-$roles = ['Superviseur', 'Caisse', 'Vendeur']; // Administrateur retiré
+$roles = ['Superviseur', 'Proprietaire', 'Caisse', 'Vendeur']; // Administrateur retiré
 $sexes = ['Masculin', 'Feminin'];
 $etats = ['Actif', 'Inactif'];
 
@@ -63,7 +63,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = "Le rôle Administrateur n'est pas autorisé.";
             }
             
-            if (($role === 'Vendeur' || $role === 'Caisse') && empty($boutique_id)) {
+            if (($role === 'Vendeur' || $role === 'Caisse' || $role === 'Proprietaire') && empty($boutique_id)) {
                 $errors[] = "La boutique est obligatoire pour le rôle $role.";
             }
             
@@ -676,7 +676,7 @@ $(document).ready(function() {
     }
     
     window.toggleBoutiqueRequired = function(role) {
-        if (role === 'Vendeur' || role === 'Caisse') $('#boutiqueRequiredMsg').show();
+        if (role === 'Vendeur' || role === 'Caisse' || role === 'Proprietaire') $('#boutiqueRequiredMsg').show();
         else $('#boutiqueRequiredMsg').hide();
     };
     

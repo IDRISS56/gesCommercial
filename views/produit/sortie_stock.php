@@ -11,6 +11,7 @@
 //    elle met seulement à jour les stocks (la disponibilité est calculée ailleurs).
 ob_start();
 require 'databases/database.php';
+require 'databases/id_generator.php';
 
 // ==========================================
 // SÉCURITÉ : utilisateur connecté & actif
@@ -27,6 +28,16 @@ if (!$user) {
     header('Location: utilisateur/login');
     exit;
 }
+
+// ==========================================
+// BOUTIQUES AUTORISÉES POUR CET UTILISATEUR
+// Même logique centralisée que vente_comptoir.php (getBoutiquesAutorisees) :
+// le filtrage ne se base que sur la boutique à laquelle l'utilisateur est
+// réellement rattaché (boutique_id), avec les mêmes règles/exceptions que
+// partout ailleurs dans l'application. On évite ainsi une deuxième version
+// de la règle qui pourrait diverger de celle de la vente comptoir.
+// ==========================================
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $user['role'] ?? '', $user['boutique_id'] ?? null);
 function e($str) {
     return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8');
 }
@@ -39,14 +50,8 @@ $csrf_token = $_SESSION['csrf_token'];
 $message = '';
 $messageType = '';
 
-// Génération d'un numéro de commande unique
-function genererNumeroCommande($pdo) {
-    $prefix = 'SC-' . date('Ymd') . '-';
-    $stmt = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE numero_commande LIKE ?");
-    $stmt->execute([$prefix . '%']);
-    $count = intval($stmt->fetchColumn()) + 1;
-    return $prefix . str_pad($count, 4, '0', STR_PAD_LEFT);
-}
+// (la génération du numéro se fait désormais directement via
+// genererEtInsererIdSequence() au moment de l'insertion, voir plus bas)
 
 // ===== STATUTS DE SORTIE RÉSERVÉS (exclure les ajustements) =====
 // Codes réservés pour les mouvements standards :
@@ -63,6 +68,9 @@ $statutsSortieReserves = $pdo->query("
 
 // Récupération des listes pour les selects
 $boutiques = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
+$boutiques = array_values(array_filter($boutiques, function ($b) use ($boutiquesAutorisees) {
+    return in_array($b['code_boutique'], $boutiquesAutorisees, true);
+}));
 
 // ✅ Liste des produits : l'ancien filtre "etat_produit IN ('DISPONIBLE','ALERTE')"
 // ne fonctionne plus (enum devenu 'Actif'/'Inactif'). On le remplace par son
@@ -97,6 +105,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'sortie' && !isset($_PO
         } elseif (empty($produitId) || empty($boutiqueId) || empty($statutId) || $quantite <= 0) {
             $message = 'Veuillez sélectionner un produit, une boutique, un motif et saisir une quantité valide (> 0).';
             $messageType = 'warning';
+        } elseif (!in_array($boutiqueId, $boutiquesAutorisees, true)) {
+            $message = "Vous n'êtes pas autorisé à saisir une sortie de stock pour cette boutique.";
+            $messageType = 'danger';
         } else {
             // Vérification préliminaire (message rapide, hors transaction) : simplement
             // pour éviter d'ouvrir une transaction si le produit n'existe pas du tout
@@ -146,25 +157,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'sortie' && !isset($_PO
                     // pages de lecture (historique, ventes, etc.).
 
                     // 3) Enregistrement du mouvement dans la table commande
-                    $numeroCommande = genererNumeroCommande($pdo);
-                    $stmtInsert = $pdo->prepare("
-                        INSERT INTO commande
-                        (numero_commande, produit_id, statut_id, date_commande, heure_commande,
-                         prix_achat, prix_commande, quantite_commande, montant_commande,
-                         utilisateur_id, boutique_id, etat_commande)
-                        VALUES (?, ?, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, 'VALIDEE')
-                    ");
-                    $stmtInsert->execute([
-                        $numeroCommande,
-                        $produitId,
-                        $statutId,
-                        $prixAchat,
-                        $prixUnitaire,
-                        $quantite,
-                        $montantCommande,
-                        $user['id'],
-                        $boutiqueId
-                    ]);
+                    // Génération + insertion avec réessai automatique en cas de
+                    // collision entre deux sorties de stock simultanées (voir
+                    // databases/id_generator.php).
+                    $numeroCommande = genererEtInsererIdSequence($pdo, 'SC', function (string $numero) use (
+                        $pdo, $produitId, $statutId, $prixAchat, $prixUnitaire, $quantite, $montantCommande, $user, $boutiqueId
+                    ) {
+                        $stmtInsert = $pdo->prepare("
+                            INSERT INTO commande
+                            (numero_commande, produit_id, statut_id, date_commande, heure_commande,
+                             prix_achat, prix_commande, quantite_commande, montant_commande,
+                             utilisateur_id, boutique_id, etat_commande)
+                            VALUES (?, ?, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, 'VALIDEE')
+                        ");
+                        $stmtInsert->execute([
+                            $numero,
+                            $produitId,
+                            $statutId,
+                            $prixAchat,
+                            $prixUnitaire,
+                            $quantite,
+                            $montantCommande,
+                            $user['id'],
+                            $boutiqueId
+                        ]);
+                    }, 4);
 
                     $pdo->commit();
 
@@ -190,7 +207,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $produitId  = $_POST['produit_id'] ?? '';
     $boutiqueId = $_POST['boutique_id'] ?? '';
     $response = ['success' => false, 'quantite' => 0, 'disponible' => 0];
-    if (!empty($produitId) && !empty($boutiqueId)) {
+    if (!empty($produitId) && !empty($boutiqueId) && in_array($boutiqueId, $boutiquesAutorisees, true)) {
         $stmt = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ?");
         $stmt->execute([$produitId, $boutiqueId]);
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -206,29 +223,51 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     exit;
 }
 
-// Historique des sorties (30 derniers mouvements avec statuts réservés)
+// Historique des sorties (30 derniers mouvements avec statuts réservés), restreint aux boutiques autorisées
 $codesReserves = array_column($statutsSortieReserves, 'code_statut');
 $codesIn = "'" . implode("','", $codesReserves) . "'";
-$historique = $pdo->query("
-    SELECT c.numero_commande, c.produit_id, c.boutique_id, c.statut_id,
-           s.titre_statut, s.type_statut,
-           c.quantite_commande, c.prix_commande, c.montant_commande,
-           c.date_commande, c.heure_commande, c.etat_commande,
-           p.titre_produit, b.nom_boutique
-    FROM commande c
-    LEFT JOIN statut s ON c.statut_id = s.code_statut
-    LEFT JOIN produit p ON c.produit_id = p.code_produit
-    LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
-    WHERE c.statut_id IN ($codesIn)
-    ORDER BY c.date_commande DESC, c.heure_commande DESC
-    LIMIT 30
-")->fetchAll(PDO::FETCH_ASSOC);
+if (!empty($boutiquesAutorisees)) {
+    $placeholders = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtHistS = $pdo->prepare("
+        SELECT c.numero_commande, c.produit_id, c.boutique_id, c.statut_id,
+               s.titre_statut, s.type_statut,
+               c.quantite_commande, c.prix_commande, c.montant_commande,
+               c.date_commande, c.heure_commande, c.etat_commande,
+               p.titre_produit, b.nom_boutique
+        FROM commande c
+        LEFT JOIN statut s ON c.statut_id = s.code_statut
+        LEFT JOIN produit p ON c.produit_id = p.code_produit
+        LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
+        WHERE c.statut_id IN ($codesIn) AND c.boutique_id IN ($placeholders)
+        ORDER BY c.date_commande DESC, c.heure_commande DESC
+        LIMIT 30
+    ");
+    $stmtHistS->execute($boutiquesAutorisees);
+    $historique = $stmtHistS->fetchAll(PDO::FETCH_ASSOC);
 
-// Statistiques (sur les statuts réservés)
-$totalSorties     = $pdo->query("SELECT COUNT(*) FROM commande c WHERE c.statut_id IN ($codesIn)")->fetchColumn();
-$sortiesAujour    = $pdo->query("SELECT COUNT(*) FROM commande c WHERE c.statut_id IN ($codesIn) AND c.date_commande = CURDATE()")->fetchColumn();
-$sortiesSemaine   = $pdo->query("SELECT COUNT(*) FROM commande c WHERE c.statut_id IN ($codesIn) AND c.date_commande >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)")->fetchColumn();
-$valeurSorties    = $pdo->query("SELECT COALESCE(SUM(c.montant_commande),0) FROM commande c WHERE c.statut_id IN ($codesIn) AND c.date_commande >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)")->fetchColumn();
+    // Statistiques (sur les statuts réservés), restreintes aux boutiques autorisées
+    $stmtT = $pdo->prepare("SELECT COUNT(*) FROM commande c WHERE c.statut_id IN ($codesIn) AND c.boutique_id IN ($placeholders)");
+    $stmtT->execute($boutiquesAutorisees);
+    $totalSorties = $stmtT->fetchColumn();
+
+    $stmtJ = $pdo->prepare("SELECT COUNT(*) FROM commande c WHERE c.statut_id IN ($codesIn) AND c.date_commande = CURDATE() AND c.boutique_id IN ($placeholders)");
+    $stmtJ->execute($boutiquesAutorisees);
+    $sortiesAujour = $stmtJ->fetchColumn();
+
+    $stmtS = $pdo->prepare("SELECT COUNT(*) FROM commande c WHERE c.statut_id IN ($codesIn) AND c.date_commande >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND c.boutique_id IN ($placeholders)");
+    $stmtS->execute($boutiquesAutorisees);
+    $sortiesSemaine = $stmtS->fetchColumn();
+
+    $stmtV = $pdo->prepare("SELECT COALESCE(SUM(c.montant_commande),0) FROM commande c WHERE c.statut_id IN ($codesIn) AND c.date_commande >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND c.boutique_id IN ($placeholders)");
+    $stmtV->execute($boutiquesAutorisees);
+    $valeurSorties = $stmtV->fetchColumn();
+} else {
+    $historique = [];
+    $totalSorties = 0;
+    $sortiesAujour = 0;
+    $sortiesSemaine = 0;
+    $valeurSorties = 0;
+}
 
 $stats = [
     ['success', 'arrow-down-circle', 'Total sorties', $totalSorties, false],

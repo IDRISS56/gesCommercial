@@ -1,11 +1,13 @@
 <?php
 // login.php – Page de connexion
 require 'databases/database.php';
-
+require_once 'config/csrf.php';
 
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    verifierCsrfToken();
+
     $login = trim($_POST['login'] ?? '');
     $password = trim($_POST['mdp'] ?? '');
 
@@ -17,14 +19,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt = $pdo->prepare("SELECT * FROM utilisateur WHERE login = ? AND mdp= ? AND etat = 'Actif'");
         $stmt->execute([$login, $password]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
-         
+
         if (!empty($user)) {
             // Connexion réussie
+            session_regenerate_id(true); // évite la fixation de session au moment du login
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['nom_prenom'] = $user['nom_prenom'];
             $_SESSION['login'] = $user['login'];
             $_SESSION['role'] = $user['role'];
-            $_SESSION['mdp'] = $user['mdp'];
+            $_SESSION['authenticated'] = true; // ne plus jamais stocker le mot de passe en session
             $_SESSION['boutique_id'] = $user['boutique_id'];
             ?>
             <script type='text/javascript'>document.location.replace('<?php if(substr(((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"])),-1) =="/"){ echo (substr(((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"])), 0,-1)); }else{ echo ((isset($_SERVER["HTTPS"]) ? 'https://' : 'http://').$_SERVER['HTTP_HOST'].dirname($_SERVER["PHP_SELF"]));} ?>/utilisateur/menu');</script>
@@ -204,6 +207,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php endif; ?>
 
         <form method="post" action="">
+            <?= csrfChampCache() ?>
             <div class="form-group">
                 <label for="login">Identifiant</label>
                 <div class="input-icon">

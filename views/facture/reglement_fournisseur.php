@@ -51,6 +51,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
         try {
             if ($montant <= 0) throw new Exception("Le montant doit être supérieur à 0.");
 
+            // Un caissier est toujours lié à sa boutique : on l'utilise directement.
+            // Un superviseur/administrateur n'est lié à aucune boutique en propre :
+            // il doit choisir dans le formulaire pour quelle boutique cette
+            // opération (et donc quelle caisse) est enregistrée.
+            $boutique_id_cible = $user['boutique_id'];
+            if (empty($boutique_id_cible)) {
+                $boutique_id_cible = trim($_POST['boutique_id'] ?? '');
+                if (empty($boutique_id_cible)) throw new Exception("Veuillez sélectionner la boutique concernée par cette opération.");
+            }
+
             $pdo->beginTransaction();
 
             // ============================================================
@@ -67,9 +77,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 if (!$contactDepense) throw new Exception("Fournisseur introuvable.");
 
                 $stmt = $pdo->prepare("SELECT * FROM caisse WHERE statut = 'Actif' AND (boutique_id = ? OR boutique_id IS NULL) ORDER BY boutique_id IS NULL LIMIT 1 FOR UPDATE");
-                $stmt->execute([$user['boutique_id']]);
+                $stmt->execute([$boutique_id_cible]);
                 $caisse = $stmt->fetch(PDO::FETCH_ASSOC);
-                if (!$caisse) throw new Exception("Aucune caisse active.");
+                if (!$caisse) throw new Exception("Aucune caisse active pour cette boutique.");
 
                 $stmtJC = $pdo->prepare("SELECT COUNT(*) FROM journees_caisse WHERE caisse_id = ? AND statut = 'OUVERTE'");
                 $stmtJC->execute([$caisse['caisse_id']]);
@@ -84,13 +94,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 $stmtTr = $pdo->prepare("INSERT INTO transaction
                     (numero_transaction, date_transaction, heure_transaction, montant_transaction,
                      frais_transaction, montant_total, type_transaction, objet_transaction,
-                     caisse_id, facture_id, mode_reglement, numero_reglement, reference_reglement,
+                     caisse_id, facture_id, contact_id, mode_reglement, numero_reglement, reference_reglement,
                      utilisateur_id, etat_transaction)
                     VALUES (?, ?, CURTIME(), ?, 0, ?, 'Sortie', ?,
-                            ?, NULL, ?, ?, ?, ?, 'Succes')");
+                            ?, NULL, ?, ?, ?, ?, ?, 'Succes')");
                 $stmtTr->execute([
                     $numTrans, $date_reglement, $montant, $montant, $objetTransactionDepense,
-                    $caisse['caisse_id'], $mode_reglement_mapped,
+                    $caisse['caisse_id'], $contactDepense['code_contact'], $mode_reglement_mapped,
                     $numero_reglement, $reference_reglement, $user['id']
                 ]);
 
@@ -129,9 +139,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 // caisse (vérifiée juste après).
 
                 $stmt = $pdo->prepare("SELECT * FROM caisse WHERE statut = 'Actif' AND (boutique_id = ? OR boutique_id IS NULL) ORDER BY boutique_id IS NULL LIMIT 1 FOR UPDATE");
-                $stmt->execute([$user['boutique_id']]);
+                $stmt->execute([$boutique_id_cible]);
                 $caisse = $stmt->fetch(PDO::FETCH_ASSOC);
-                if (!$caisse) throw new Exception("Aucune caisse active.");
+                if (!$caisse) throw new Exception("Aucune caisse active pour cette boutique.");
 
                 $stmtJC = $pdo->prepare("SELECT COUNT(*) FROM journees_caisse WHERE caisse_id = ? AND statut = 'OUVERTE'");
                 $stmtJC->execute([$caisse['caisse_id']]);
@@ -146,13 +156,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
                 $stmtTr = $pdo->prepare("INSERT INTO transaction
                     (numero_transaction, date_transaction, heure_transaction, montant_transaction,
                      frais_transaction, montant_total, type_transaction, objet_transaction,
-                     caisse_id, facture_id, mode_reglement, numero_reglement, reference_reglement,
+                     caisse_id, facture_id, contact_id, mode_reglement, numero_reglement, reference_reglement,
                      utilisateur_id, etat_transaction)
                     VALUES (?, ?, CURTIME(), ?, 0, ?, 'Sortie', ?,
-                            ?, ?, ?, ?, ?, ?, 'Succes')");
+                            ?, ?, ?, ?, ?, ?, ?, 'Succes')");
                 $stmtTr->execute([
                     $numTrans, $date_reglement, $montant, $montant, $objetTransaction,
-                    $caisse['caisse_id'], ($facture ? $numero_facture : null), $mode_reglement_mapped,
+                    $caisse['caisse_id'], ($facture ? $numero_facture : null), $fournisseur_id, $mode_reglement_mapped,
                     $numero_reglement, $reference_reglement, $user['id']
                 ]);
 
@@ -174,6 +184,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
 
                 if ($facture) {
                     $avanceAvant = floatval($facture['avance']);
+                    $resteAvant = floatval($facture['reste']);
                     $nouvelleAvance = min($avanceAvant + $montant, floatval($facture['montant_ttc']));
                     $montantApplique = $nouvelleAvance - $avanceAvant;
                     $nouveauReste = round(floatval($facture['montant_ttc']) - $nouvelleAvance, 2);
@@ -182,6 +193,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
 
                     $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
                         ->execute([$nouvelleAvance, $nouveauReste, $nouvelEtat, $numero_facture]);
+
+                    // Gardé pour permettre une annulation fiable de cette transaction plus
+                    // tard (voir reglement_client.php pour la même logique).
+                    $pdo->prepare("UPDATE transaction SET montant_applique_facture = ? WHERE numero_transaction = ?")
+                        ->execute([$montantApplique, $numTrans]);
+
+                    // Trace détaillée pour le reçu de paiement (et une future annulation
+                    // plus précise) : quelle facture, combien, et son reste avant/après.
+                    $pdo->prepare("INSERT INTO transaction_facture (numero_transaction, numero_facture, montant_applique, reste_avant, reste_apres) VALUES (?, ?, ?, ?, ?)")
+                        ->execute([$numTrans, $numero_facture, $montantApplique, $resteAvant, $nouveauReste]);
 
                     $surplus = round($montant - $montantApplique, 2);
                 }
@@ -209,6 +230,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
 
                         $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
                             ->execute([$nouvelleAvanceAutre, $nouveauResteAutre, $nouvelEtatAutre, $autre['numero_facture']]);
+
+                        $pdo->prepare("INSERT INTO transaction_facture (numero_transaction, numero_facture, montant_applique, reste_avant, reste_apres) VALUES (?, ?, ?, ?, ?)")
+                            ->execute([$numTrans, $autre['numero_facture'], $montantApplicable, $resteAvantAutre, $nouveauResteAutre]);
 
                         $autresFacturesSoldees++;
                         $surplus = round($surplus - $montantApplicable, 2);
@@ -261,6 +285,14 @@ $stmt = $pdo->prepare("SELECT f.numero_facture, f.date_facture, f.montant_ttc, f
 $stmt->execute();
 $factures_fournisseurs = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $factures_json = json_encode($factures_fournisseurs);
+
+// Un superviseur/administrateur n'étant lié à aucune boutique, on lui propose
+// de choisir celle concernée par l'opération (donc la caisse impactée).
+$boutiques = [];
+if (empty($user['boutique_id'])) {
+    $stmt = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique");
+    $boutiques = $stmt->fetchAll(PDO::FETCH_ASSOC);
+}
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -366,6 +398,17 @@ $factures_json = json_encode($factures_fournisseurs);
                     <label><i class="bi bi-calendar"></i> Date</label>
                     <input type="date" name="date_reglement" value="<?= date('Y-m-d') ?>" required style="flex:1; border:none;">
                 </div>
+                <?php if (!empty($boutiques)): ?>
+                <div class="prow">
+                    <label><i class="bi bi-shop"></i> Boutique</label>
+                    <select class="form-select selectpicker" name="boutique_id" data-width="100%" required>
+                        <option value="">-- Sélectionner la boutique --</option>
+                        <?php foreach ($boutiques as $b): ?>
+                            <option value="<?= e($b['code_boutique']) ?>"><?= e($b['nom_boutique']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <?php endif; ?>
             </div>
 
             <div class="row g-3 mb-4">

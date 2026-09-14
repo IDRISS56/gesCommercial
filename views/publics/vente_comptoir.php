@@ -26,6 +26,11 @@ if (!$user) {
 
 define('USER_ID', $_SESSION['user_id']);
 define('USER_BOUTIQUE', $user['boutique_id'] ?? null);
+// Boutiques que cet utilisateur a le droit de voir/utiliser (toutes pour
+// Administrateur/Superviseur, sa boutique + éventuelles exceptions pour les
+// autres rôles). Sert à restreindre le sélecteur de boutique ET à valider
+// côté serveur tout boutique_id reçu du client.
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $user['role'], USER_BOUTIQUE);
 // Vente comptoir = vente cash sans compte client : toujours rattachée à ce
 // client générique plutôt qu'à une sélection manuelle.
 define('CLIENT_COMPTOIR_CODE', 'CLI-COMPTOIR');
@@ -85,7 +90,7 @@ if ($role === 'Superviseur') {
         exit;
     }
 
-    $stmt = $pdo->prepare("SELECT c.caisse_id, c.nom_caisse
+    $stmt = $pdo->prepare("SELECT DISTINCT c.caisse_id, c.nom_caisse
                            FROM caisse c
                            INNER JOIN journees_caisse jc ON jc.caisse_id = c.caisse_id AND jc.statut = 'OUVERTE'
                            WHERE c.statut = 'Actif' AND c.boutique_id = ? ORDER BY c.nom_caisse");
@@ -112,46 +117,20 @@ if ($role === 'Superviseur') {
     }
 }
 
-// Si le superviseur doit choisir parmi plusieurs caisses ouvertes
-if ($needCaisseChoice) {
-    if ($isAjax) {
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['success' => false, 'need_caisse_choice' => true, 'caisses' => $caissesDisponibles]);
-        exit;
-    }
-    ?>
-    <!DOCTYPE html>
-    <html lang="fr">
-    <head>
-<?php include "includes/pwa_head.php"; ?>
+// Plusieurs caisses ouvertes dans la boutique : on ne bloque plus l'accès à la
+// page pour autant — créer un bon de commande ne nécessite aucune caisse.
+// Seul l'encaissement (vente cash) a besoin de savoir sur quelle caisse
+// enregistrer la transaction ; un sélecteur inline (voir plus bas, à côté du
+// badge caisse) permet de choisir, et le bouton "Encaisser" reste désactivé
+// tant qu'aucun choix n'est fait — exactement comme quand aucune caisse n'est
+// ouverte. Aucun court-circuit ici : les appels AJAX (recherche produits,
+// etc.) doivent continuer à fonctionner normalement, caisse choisie ou non ;
+// seule l'action d'encaissement vérifie CAISSE_ID (voir plus bas).
 
-        <meta charset="UTF-8">
-        <title>Choix de la caisse</title>
-        <style>
-            body { font-family: Arial, sans-serif; background:#f1f5f9; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
-            .box { background:#fff; padding:32px; border-radius:10px; box-shadow:0 2px 12px rgba(0,0,0,.08); width:360px; }
-            .box h3 { margin-top:0; }
-            .box a { display:block; padding:12px 16px; margin-bottom:10px; border:1px solid #cbd5e1; border-radius:8px; text-decoration:none; color:#0f172a; font-weight:600; }
-            .box a:hover { background:#e2e8f0; }
-        </style>
-    </head>
-    <body>
-        <div class="box">
-            <h3>Plusieurs caisses sont ouvertes</h3>
-            <p>Choisissez la caisse sur laquelle enregistrer vos ventes :</p>
-            <?php foreach ($caissesDisponibles as $c): ?>
-                <a href="?choisir_caisse=<?= urlencode($c['caisse_id']) ?>"><?= htmlspecialchars($c['nom_caisse']) ?></a>
-            <?php endforeach; ?>
-        </div>
-    </body>
-    </html>
-    <?php
-    exit;
-}
-
-// Aucune caisse ouverte : on ne bloque plus l'accès à la page — on doit
-// pouvoir créer un bon de commande même sans caisse ouverte. Seul le bouton
-// "Encaisser" (vente cash) exigera une caisse ouverte, vérifié au moment du clic.
+// Aucune caisse ouverte, ou plusieurs sans choix encore fait : on ne bloque
+// plus l'accès à la page — on doit pouvoir créer un bon de commande dans
+// tous les cas. Seul le bouton "Encaisser" (vente cash) exigera une caisse
+// choisie, vérifié au moment du clic.
 if ($caisseActive) {
     define('CAISSE_ID', $caisseActive['caisse_id']);
 }
@@ -162,555 +141,9 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-// - TRAITEMENT AJAX - TOUT EN POST
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
-    $action = $_POST['action'];
-    try {
-        switch ($action) {
+require 'views/publics/vente_comptoir_actions.php';
 
-            // ===== CRÉER UN BON DE COMMANDE (EN ATTENTE) =====
-            // Contrairement à la vente comptoir (cash, immédiate), le bon de commande :
-            //  - n'exige AUCUN paiement (avance optionnelle, 0 par défaut) ;
-            //  - NE TOUCHE PAS le stock (ni produit, ni lot) à la création : le stock
-            //    n'est vérifié/réservé qu'à la validation du bon (views/commande/vente.php,
-            //    action validate_facture — cf. condition reference_id IS NULL) ;
-            //  - crée une vraie ligne `facture` (categorie_facture='Bon', statut 'En
-            //    attente') afin d'apparaître dans le suivi existant (/commande/vente),
-            //    exactement comme un bon transformé depuis un devis.
-            case 'creer_bon_attente':
-                $data = $_POST;
-                $token = $data['csrf_token'] ?? '';
-                if ($token !== $csrf_token) {
-                    echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
-                    exit;
-                }
-
-                $panier = json_decode($data['panier'] ?? '[]', true) ?: [];
-                if (empty($panier)) throw new Exception('Le panier est vide.');
-
-                // Client et boutique : ceux choisis dans les sélecteurs du panier,
-                // sinon le client générique comptoir et la boutique connectée
-                // (find-or-create pour le client comptoir, comme pour la vente cash).
-                $client_id = trim($data['client_id'] ?? '') ?: CLIENT_COMPTOIR_CODE;
-                $boutique_id = trim($data['boutique_id'] ?? '') ?: USER_BOUTIQUE;
-                $stmtCheckClient = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ?");
-                $stmtCheckClient->execute([$client_id]);
-                if (!$stmtCheckClient->fetchColumn()) {
-                    if ($client_id === CLIENT_COMPTOIR_CODE) {
-                        $pdo->prepare("INSERT INTO contact(code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, solde_contact, solde_maximum, etat_contact) VALUES (?, 'Client comptoir', '-', '-', 'Client', 'Particulier', 0, 0, 'Actif')")
-                            ->execute([$client_id]);
-                    } else {
-                        throw new Exception('Client introuvable.');
-                    }
-                }
-
-                $tax_rate = floatval($data['taux_tva'] ?? 0);
-                $discount_rate = floatval($data['taux_remise'] ?? 0);
-                $lotsData = json_decode($data['lots'] ?? '[]', true) ?: [];
-
-                $montantHT = 0;
-                foreach ($panier as $item) {
-                    $montantHT += floatval($item['montant'] ?? ($item['prix'] * $item['qte']));
-                }
-                $taxe = round($montantHT * $tax_rate / 100, 2);
-                $remise = round($montantHT * $discount_rate / 100, 2);
-                $montantTTC = round($montantHT + $taxe - $remise, 2);
-
-                // Acompte optionnel — jamais obligatoire pour créer le bon.
-                $avance = max(0, min(floatval($data['avance'] ?? 0), $montantTTC));
-                $reste = round($montantTTC - $avance, 2);
-                if ($avance <= 0) {
-                    $etatFacture = 'Impayee';
-                } elseif ($reste > 0) {
-                    $etatFacture = 'Partielle';
-                } else {
-                    $etatFacture = 'Payee';
-                }
-
-                $numBon = 'BON-' . date('Ymd') . '-' . str_pad((string)rand(1, 99999), 5, '0', STR_PAD_LEFT);
-
-                $pdo->beginTransaction();
-                try {
-                    $pdo->prepare("INSERT INTO facture(numero_facture, titre_facture, type_facture, categorie_facture, date_facture, montant_ht, taxe, remise, montant_ttc, avance, reste, contact_id, utilisateur_id, etat_facture, statut_facture, reference_id)
-                                   VALUES (?, ?, 'Client', 'Bon', CURDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, 'En attente', NULL)")
-                        ->execute([$numBon, 'Bon de commande ' . $numBon, $montantHT, $taxe, $remise, $montantTTC, $avance, $reste, $client_id, USER_ID, $etatFacture]);
-
-                    // Lignes de commande — AUCUNE vérification/mise à jour de stock ni de
-                    // lot ici : c'est repoussé à la validation du bon (validate_facture
-                    // dans commande/vente.php), qui reconnaît ce cas via reference_id NULL.
-                    $numBase = date('dmYHis');
-                    foreach ($panier as $i => $ligne) {
-                        $numCmd = $numBase . str_pad((string)$i, 2, '0', STR_PAD_LEFT) . '-DOC';
-                        $prix = floatval($ligne['prix'] ?? 0);
-                        $qte = intval($ligne['qte'] ?? 1);
-                        $montant = floatval($ligne['montant'] ?? ($prix * $qte));
-                        $prix_achat = floatval($ligne['prix_achat'] ?? $prix);
-                        $prixLotLigne = (isset($ligne['prix_lot']) && $ligne['prix_lot'] !== null && $ligne['prix_lot'] !== '') ? round((float)$ligne['prix_lot'], 2) : null;
-                        $code_prod = $ligne['code'] ?? $ligne['product_id'];
-                        // Pas de lot réel créé ici (aucune écriture de stock/lot n'est
-                        // faite avant la validation du bon) : on retient seulement le
-                        // nombre d'unités par lot choisi, pour l'affichage (X Boîte(s)...).
-                        $lot_id = null;
-                        $lotConfigure = filter_var($ligne['lot_configure'] ?? false, FILTER_VALIDATE_BOOLEAN);
-                        $produits_par_lot = $lotConfigure ? max(2, intval($ligne['unites_par_lot'] ?? 2)) : 1;
-
-                        $stmtCmd = $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, prix_lot_ligne, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
-                                                  VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, ?, 'VALIDEE')");
-                        $stmtCmd->execute([$numCmd, $code_prod, $lot_id, $client_id, $numBon,
-                                           $prix_achat, $prix, $prixLotLigne, $qte, $produits_par_lot, $montant, USER_ID, $boutique_id]);
-                    }
-
-                    $pdo->commit();
-                    echo json_encode([
-                        'success' => true,
-                        'message' => 'Bon de commande ' . $numBon . ' créé (en attente). Le stock sera vérifié à la validation.',
-                        'document' => $numBon,
-                        'etat' => $etatFacture,
-                        'lots' => $lotsData,
-                        'totaux' => ['ht' => $montantHT, 'taxe' => $taxe, 'remise' => $remise, 'ttc' => $montantTTC, 'reste' => $reste, 'avance' => $avance]
-                    ]);
-                } catch (Exception $e) {
-                    if ($pdo->inTransaction()) $pdo->rollBack();
-                    throw $e;
-                }
-                exit;
-
-            // ===== CHARGER LES CATÉGORIES =====
-            case 'load_categories':
-                $cats = $pdo->query("SELECT titre_categorie FROM categorie WHERE etat_categorie = 'ACTIF' ORDER BY titre_categorie ASC")->fetchAll(PDO::FETCH_COLUMN);
-                echo json_encode(['success' => true, 'data' => $cats, 'has_categorie' => count($cats) > 0]);
-                exit;
-
-            // ===== CHARGER TOUS LES CLIENTS =====
-            case 'load_all_clients':
-                $sql = "SELECT c.code_contact, c.nom_prenom_contact, c.telephone_contact,
-                        COALESCE(c.type_contact, 'Client') as type_contact,
-                        COALESCE(c.statut_contact, 'Particulier') as statut_contact
-                        FROM contact c
-                        WHERE c.type_contact = 'Client' AND c.etat_contact = 'Actif'
-                        ORDER BY c.nom_prenom_contact ASC";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute();
-                $clients = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                echo json_encode(['success' => true, 'data' => $clients]);
-                exit;
-
-            // ===== CLIENTS POUR LE SELECTPICKER =====
-            case 'get_clients':
-                $q = trim($_POST['q'] ?? '');
-                $sql = "SELECT c.code_contact, c.nom_prenom_contact, c.telephone_contact,
-                        COALESCE(c.type_contact, 'Client') as type_contact,
-                        COALESCE(c.statut_contact, 'Particulier') as statut_contact
-                        FROM contact c
-                        WHERE c.type_contact = 'Client' AND c.etat_contact = 'Actif'";
-                $params = [];
-                if ($q) {
-                    $sql .= " AND (c.nom_prenom_contact LIKE ? OR c.telephone_contact LIKE ? OR c.code_contact LIKE ?)";
-                    $params[] = "%$q%";
-                    $params[] = "%$q%";
-                    $params[] = "%$q%";
-                }
-                $sql .= " ORDER BY c.nom_prenom_contact ASC LIMIT 500";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute($params);
-                echo json_encode(['success' => true, 'clients' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
-                exit;
-
-            // ===== RECHERCHER CLIENTS =====
-            case 'search_customers':
-                $q = trim($_POST['q'] ?? '');
-                $sql = "SELECT c.code_contact, c.nom_prenom_contact, c.telephone_contact,
-                        COALESCE(c.type_contact, 'Client') as type_contact,
-                        COALESCE(c.statut_contact, 'Particulier') as statut_contact
-                        FROM contact c
-                        WHERE c.type_contact = 'Client' AND c.etat_contact = 'Actif'";
-                $params = [];
-                if ($q) {
-                    $sql .= " AND (c.nom_prenom_contact LIKE ? OR c.telephone_contact LIKE ? OR c.code_contact LIKE ?)";
-                    $params[] = "%$q%";
-                    $params[] = "%$q%";
-                    $params[] = "%$q%";
-                }
-                $sql .= " ORDER BY c.nom_prenom_contact ASC LIMIT 20";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute($params);
-                $clients = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                echo json_encode(['success' => true, 'data' => $clients]);
-                exit;
-
-            // ===== CHARGER PRODUITS =====
-            case 'get_products':
-            case 'search_products':
-                $q = trim($_POST['q'] ?? '');
-                $cat = $_POST['categorie'] ?? 'Tous';
-                // Boutique dont on affiche le stock : celle choisie dans le sélecteur,
-                // sinon la boutique de l'utilisateur connecté par défaut.
-                $boutiqueAffichage = trim($_POST['boutique_id'] ?? '') ?: USER_BOUTIQUE;
-                // Le stock affiché doit être celui de la boutique choisie uniquement
-                // (pas le stock global du produit) : si aucune ligne de stock n'existe
-                // pour cette boutique, on affiche 0 — sauf si aucune boutique n'est
-                // disponible, auquel cas on retombe sur le stock global.
-                $stockExpr = !empty($boutiqueAffichage) ? "COALESCE(sb.quantite, 0)" : "CAST(p.stock_produit AS SIGNED)";
-                $sql = "SELECT p.code_produit, p.titre_produit, p.stock_produit, p.prix_produit,
-                        p.categorie_id, p.etat_produit, p.saisie_par_carton,
-                        $stockExpr as stock,
-                        COALESCE(c.titre_categorie, 'Autre') as categorie
-                        FROM produit p
-                        LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
-                        LEFT JOIN stock sb ON sb.produit_id = p.code_produit AND sb.boutique_id = ?
-                        WHERE p.etat_produit != 'RUPTURE'";
-                $params = [$boutiqueAffichage];
-                if ($cat !== 'Tous') {
-                    $sql .= " AND c.titre_categorie = ?";
-                    $params[] = $cat;
-                }
-                if ($q) {
-                    $sql .= " AND (p.titre_produit LIKE ? OR p.code_produit LIKE ?)";
-                    $params[] = "%$q%";
-                    $params[] = "%$q%";
-                }
-                $sql .= " ORDER BY p.titre_produit ASC LIMIT 80";
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute($params);
-                $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-                // Lots catalogue (menu "Configuration des lots") des produits renvoyés :
-                // structure fixe (libelle + unites_par_lot), seul prix_lot est modifiable
-                // au moment de la vente.
-                if ($products) {
-                    $codes = array_column($products, 'code_produit');
-                    $in = implode(',', array_fill(0, count($codes), '?'));
-                    $stmtLots = $pdo->prepare("SELECT produit_id, libelle, unites_par_lot, prix_lot FROM lot WHERE etat_lot = 'Actif' AND produit_id IN ($in)");
-                    $stmtLots->execute($codes);
-                    $lotsParProduit = [];
-                    foreach ($stmtLots->fetchAll(PDO::FETCH_ASSOC) as $l) {
-                        $lotsParProduit[$l['produit_id']][] = [
-                            'libelle' => $l['libelle'],
-                            'unites_par_lot' => (int) $l['unites_par_lot'],
-                            'prix_lot' => $l['prix_lot'] !== null ? (float) $l['prix_lot'] : null,
-                        ];
-                    }
-                    foreach ($products as &$p) {
-                        $p['lots'] = $lotsParProduit[$p['code_produit']] ?? [];
-                    }
-                    unset($p);
-                }
-
-                echo json_encode(['success' => true, 'products' => $products]);
-                exit;
-
-            // ===== CRÉER CLIENT =====
-            case 'create_customer':
-                $data = json_decode(file_get_contents('php://input'), true) ?: $_POST;
-                $token = $data['csrf_token'] ?? '';
-                if ($token !== $csrf_token) {
-                    echo json_encode(['success' => false, 'message' => 'Token invalide']);
-                    exit;
-                }
-                $nom = trim($data['nom'] ?? '');
-                if (!$nom) {
-                    echo json_encode(['success' => false, 'message' => 'Nom requis']);
-                    exit;
-                }
-                $numClient = 'CT-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
-                $stmt = $pdo->prepare("INSERT INTO contact (code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, adresse_contact, etat_contact) VALUES (?, ?, ?, ?, 'Client', ?, ?, 'Actif')");
-                $stmt->execute([$numClient, $nom, $data['tel'] ?? '', $data['email'] ?? '', $data['statut'] ?? 'Particulier', $data['adresse'] ?? '']);
-                echo json_encode(['success' => true, 'code' => $numClient, 'nom' => $nom]);
-                exit;
-
-            // ===== VALIDER VENTE =====
-            case 'valider_vente':
-                $data = $_POST;
-                $token = $data['csrf_token'] ?? '';
-                if ($token !== $csrf_token) {
-                    echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
-                    exit;
-                }
-
-                // L'encaissement (vente cash immédiate) exige une caisse ouverte —
-                // contrairement au bon de commande, qui peut être créé sans caisse.
-                if (!defined('CAISSE_ID')) {
-                    throw new Exception("Aucune caisse n'est ouverte. Demandez au caissier d'ouvrir sa journée pour pouvoir encaisser, ou créez un bon de commande en attente.");
-                }
-
-                $panier = json_decode($data['panier'] ?? '[]', true) ?: [];
-                if (empty($panier)) throw new Exception('Le panier est vide.');
-
-                // Client et boutique : ceux choisis dans les sélecteurs du panier ;
-                // à défaut, on retombe sur le client comptoir générique et la boutique
-                // de l'utilisateur connecté (find-or-create pour le client comptoir).
-                $boutique_id = trim($data['boutique_id'] ?? '') ?: USER_BOUTIQUE;
-                $client_id = trim($data['client_id'] ?? '') ?: CLIENT_COMPTOIR_CODE;
-                $stmtCheckClient = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ?");
-                $stmtCheckClient->execute([$client_id]);
-                if (!$stmtCheckClient->fetchColumn()) {
-                    if ($client_id === CLIENT_COMPTOIR_CODE) {
-                        $pdo->prepare("INSERT INTO contact(code_contact, nom_prenom_contact, telephone_contact, email_contact, type_contact, statut_contact, solde_contact, solde_maximum, etat_contact) VALUES (?, 'Client comptoir', '-', '-', 'Client', 'Particulier', 0, 0, 'Actif')")
-                            ->execute([$client_id]);
-                    } else {
-                        throw new Exception('Client introuvable.');
-                    }
-                }
-
-                // Vente comptoir = paiement cash uniquement, aucun crédit ni bon en attente.
-                $mode_reglement = 'Espèce';
-                $amount_paid = floatval($data['avance'] ?? 0);
-                $tax_rate = floatval($data['taux_tva'] ?? 0);
-                $discount_rate = floatval($data['taux_remise'] ?? 0);
-
-                // Récupération des données de lots
-                $lotsData = json_decode($data['lots'] ?? '[]', true) ?: [];
-
-                $montantHT = 0;
-                foreach ($panier as $item) {
-                    $montantHT += floatval($item['montant'] ?? ($item['prix'] * $item['qte']));
-                }
-                $taxe = round($montantHT * $tax_rate / 100, 2);
-                $remise = round($montantHT * $discount_rate / 100, 2);
-                $montantTTC = round($montantHT + $taxe - $remise, 2);
-
-                // ===== PAIEMENT CASH INTÉGRAL OBLIGATOIRE =====
-                // La vente comptoir ne gère plus les bons / crédits : le montant reçu
-                // doit couvrir le total (le devis + transformation en bon de commande
-                // prend maintenant en charge les ventes à crédit).
-                if ($amount_paid < $montantTTC) {
-                    throw new Exception('Paiement insuffisant : la vente comptoir se règle intégralement en espèces (reçu ' . $amount_paid . ', dû ' . $montantTTC . ').');
-                }
-                // Seul le montant dû entre en caisse et sur la facture ; le surplus
-                // éventuel repart en monnaie rendue au client (jamais en caisse).
-                $avance = $montantTTC;
-                $reste = 0;
-                $etatFacture = 'Payee';
-                $statutFacture = 'Validee';
-                $categorieDocument = 'Ticket';
-                $titreDocument = 'Ticket de caisse';
-
-                // Numéro unique du ticket (aucune facture n'est créée pour la vente
-                // comptoir : elle est réglée intégralement en cash, le ticket suffit
-                // comme justificatif ; ce numéro sert uniquement de référence pour
-                // les lignes de commande et la transaction de caisse).
-                $numDocument = 'TICKET-' . date('Ymd') . '-' . str_pad(rand(1, 99999), 5, '0', STR_PAD_LEFT);
-
-                $pdo->beginTransaction();
-                try {
-                    // 0. CONTRÔLE DE STOCK (verrouillage + vérification AVANT toute écriture)
-                    // On agrège les quantités demandées par produit (le panier peut contenir
-                    // plusieurs lignes du même produit, ex. lots différents) puis on verrouille
-                    // et vérifie le stock réellement disponible pour la boutique de vente.
-                    $qteDemandeeParProduit = [];
-                    foreach ($panier as $ligne) {
-                        $code_prod = $ligne['code'] ?? $ligne['product_id'] ?? null;
-                        if (!$code_prod) {
-                            throw new Exception('Ligne de panier invalide : produit non identifié.');
-                        }
-                        $qte = intval($ligne['qte'] ?? 1);
-                        if ($qte <= 0) {
-                            throw new Exception('Quantité invalide pour un article du panier.');
-                        }
-                        $qteDemandeeParProduit[$code_prod] = ($qteDemandeeParProduit[$code_prod] ?? 0) + $qte;
-                    }
-
-                    foreach ($qteDemandeeParProduit as $code_prod => $qteDemandee) {
-                        $stmtNomProd = $pdo->prepare("SELECT titre_produit FROM produit WHERE code_produit = ?");
-                        $stmtNomProd->execute([$code_prod]);
-                        $nomProd = $stmtNomProd->fetchColumn() ?: $code_prod;
-
-                        if (!empty($boutique_id)) {
-                            // Verrouille la ligne de stock de cette boutique jusqu'au commit/rollback
-                            $stmtStockLock = $pdo->prepare(
-                                "SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE"
-                            );
-                            $stmtStockLock->execute([$code_prod, $boutique_id]);
-                            $stockDispo = $stmtStockLock->fetchColumn();
-                            $stockDispo = ($stockDispo === false) ? 0 : (int) $stockDispo;
-                        } else {
-                            // Pas de boutique sélectionnée : on se rabat sur le stock global
-                            $stmtStockLock = $pdo->prepare(
-                                "SELECT stock_produit FROM produit WHERE code_produit = ? FOR UPDATE"
-                            );
-                            $stmtStockLock->execute([$code_prod]);
-                            $stockDispo = (int) $stmtStockLock->fetchColumn();
-                        }
-
-                        if ($qteDemandee > $stockDispo) {
-                            throw new Exception(
-                                "Stock insuffisant pour « $nomProd » : disponible $stockDispo, demandé $qteDemandee."
-                            );
-                        }
-                    }
-
-                    // 1. AUCUNE FACTURE CRÉÉE — la vente comptoir est réglée intégralement
-                    // en cash, le ticket (numéro $numDocument, non stocké en base facture)
-                    // suffit comme justificatif. Seules les lignes de commande et la
-                    // transaction de caisse ci-dessous sont enregistrées.
-
-                    // 2. LIGNES DE COMMANDE — vente comptoir = remise immédiate au client,
-                    // donc pas de bon de livraison (le client repart avec sa marchandise
-                    // tout de suite ; le bon de livraison ne sert que pour les commandes
-                    // à préparer/livrer plus tard, gérées via le circuit devis → bon).
-                    $libellesLotValides = ['Boîte', 'Palette', 'Carton', 'Bidon', 'Unité'];
-                    $numBase = date('dmYHis');
-                    foreach ($panier as $i => $ligne) {
-                        $numCmd = $numBase . str_pad($i, 2, '0', STR_PAD_LEFT);
-                        $prix = floatval($ligne['prix'] ?? 0);
-                        $qte = intval($ligne['qte'] ?? 1);
-                        $montant = floatval($ligne['montant'] ?? ($prix * $qte));
-                        $prix_achat = floatval($ligne['prix_achat'] ?? $prix);
-                        $prixLotLigne = (isset($ligne['prix_lot']) && $ligne['prix_lot'] !== null && $ligne['prix_lot'] !== '') ? round((float)$ligne['prix_lot'], 2) : null;
-                        $code_prod = $ligne['code'] ?? $ligne['product_id'];
-
-                        // Configuration de lot (optionnelle, saisie manuellement dans le
-                        // panier) : si non configurée, on reste sur le comportement
-                        // "produit simple" (lot_id NULL, produits_par_lot = 1), et le
-                        // ticket affichera "X Produit(s)" plutôt que de parler de lot.
-                        $lotConfigure = filter_var($ligne['lot_configure'] ?? false, FILTER_VALIDATE_BOOLEAN);
-                        $unitesParLot = max(2, intval($ligne['unites_par_lot'] ?? 2));
-                        $libelleLot = in_array($ligne['libelle_lot'] ?? '', $libellesLotValides, true) ? $ligne['libelle_lot'] : 'Unité';
-
-                        $lot_id = null;
-                        $produits_par_lot = 1;
-                        $lotNouvellementCree = false;
-                        if ($lotConfigure) {
-                            // Un lot est déjà configuré pour ce produit (même libellé) ?
-                            // On le réutilise — le lot ne doit être créé qu'une seule fois,
-                            // pas à chaque nouvelle vente comptoir du même produit (c'est
-                            // notamment toujours le cas pour un produit déjà catalogué).
-                            $stmtLotExist = $pdo->prepare("SELECT code_lot, unites_par_lot FROM lot WHERE produit_id = ? AND libelle = ? AND etat_lot = 'Actif' LIMIT 1");
-                            $stmtLotExist->execute([$code_prod, $libelleLot]);
-                            $lotExistant = $stmtLotExist->fetch(PDO::FETCH_ASSOC);
-
-                            if ($lotExistant) {
-                                $lot_id = $lotExistant['code_lot'];
-                                $produits_par_lot = (int) $lotExistant['unites_par_lot'];
-                            } else {
-                                $lot_id = 'LOT-' . date('YmdHis') . rand(100, 999) . '-' . $i;
-                                $produits_par_lot = $unitesParLot;
-                                $lotNouvellementCree = true;
-                                $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, produit_id, quantite, etat_lot)
-                                               VALUES (?, ?, ?, ?, ?, 'Actif')")
-                                    ->execute([$lot_id, $libelleLot, $unitesParLot, $code_prod, $qte]);
-                            }
-                        }
-
-                        $stmtCmd = $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, prix_lot_ligne, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
-                                                  VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, ?, 'VALIDEE')");
-                        $stmtCmd->execute([$numCmd . '-DOC', $code_prod, $lot_id, $client_id, $numDocument,
-                                           $prix_achat, $prix, $prixLotLigne, $qte, $produits_par_lot, $montant, USER_ID, $boutique_id]);
-
-                        // Mise à jour stock boutique
-                        if (!empty($boutique_id)) {
-                            $pdo->prepare("UPDATE stock SET quantite = GREATEST(0, quantite - ?) WHERE produit_id = ? AND boutique_id = ?")
-                                ->execute([$qte, $code_prod, $boutique_id]);
-                        }
-
-                        // Mise à jour stock produit
-                        $pdo->prepare("UPDATE produit SET stock_produit = CAST(CAST(COALESCE(stock_produit,0) AS SIGNED) - ? AS CHAR) WHERE code_produit = ?")
-                            ->execute([$qte, $code_prod]);
-
-                        // Mise à jour état produit
-                        $pdo->prepare("UPDATE produit SET etat_produit = CASE
-                                        WHEN CAST(stock_produit AS SIGNED) <= 0 THEN 'RUPTURE'
-                                        WHEN CAST(stock_produit AS SIGNED) <= COALESCE(stock_alerte,0) THEN 'ALERTE'
-                                        ELSE 'DISPONIBLE' END WHERE code_produit = ?")
-                            ->execute([$code_prod]);
-
-                        // Gestion du lot ad-hoc tout juste créé : il est immédiatement
-                        // vendu, donc déplété au même montant que sa quantité de création.
-                        // Un lot CATALOGUE réutilisé n'est jamais déplété ici : sa quantité
-                        // est resynchronisée sur le stock produit par lots.php, pas
-                        // décrémentée vente par vente. Dans tous les cas, le lot reste
-                        // Actif même à quantité 0 : un lot déjà configuré ne doit jamais
-                        // être désactivé ni supprimé automatiquement.
-                        if ($lot_id && $lotNouvellementCree) {
-                            $pdo->prepare("UPDATE lot SET quantite = quantite - ? WHERE code_lot = ? AND quantite >= ?")
-                                ->execute([$qte, $lot_id, $qte]);
-                        }
-                    }
-
-                    // 4. TRANSACTION CAISSE — la vente comptoir est toujours payée cash et
-                    // intégralement : on encaisse exactement le montant dû (montantTTC).
-                    // La monnaie rendue au client ne transite jamais par la caisse.
-                    if ($montantTTC > 0) {
-                        $stmtSolde = $pdo->prepare("SELECT solde FROM caisse WHERE caisse_id = ? FOR UPDATE");
-                        $stmtSolde->execute([CAISSE_ID]);
-                        $soldeAvant = floatval($stmtSolde->fetchColumn());
-                        $soldeApres = $soldeAvant + $montantTTC;
-                        $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
-
-                        $stmtTr = $pdo->prepare("INSERT INTO transaction
-                            (numero_transaction, date_transaction, heure_transaction, montant_transaction, frais_transaction, montant_total, type_transaction, objet_transaction, caisse_id, facture_id, mode_reglement, utilisateur_id, etat_transaction)
-                            VALUES (?, CURDATE(), CURTIME(), ?, 0, ?, 'Entree', 'Vente comptoir', ?, ?, ?, ?, 'Succes')");
-                        $stmtTr->execute([$numTrans, $montantTTC, $montantTTC, CAISSE_ID, $numDocument, $mode_reglement, USER_ID]);
-
-                        $pdo->prepare("UPDATE caisse SET solde = ? WHERE caisse_id = ?")
-                            ->execute([$soldeApres, CAISSE_ID]);
-                    }
-
-                    // 5. SOLDE DU CONTACT : sans objet ici. La vente comptoir étant
-                    // toujours payée intégralement cash sur le client générique, elle
-                    // ne crée jamais de créance/avance sur un compte client.
-
-                    $pdo->commit();
-                    echo json_encode([
-                        'success' => true,
-                        'document' => $numDocument,
-                        'type_document' => $categorieDocument,
-                        'reste' => $reste,
-                        'etat' => $etatFacture,
-                        'statut' => $statutFacture,
-                        'lots' => $lotsData,
-                        'totaux' => [
-                            'ht' => $montantHT,
-                            'taxe' => $taxe,
-                            'remise' => $remise,
-                            'ttc' => $montantTTC,
-                            'reste' => $reste,
-                            'avance' => $avance
-                        ]
-                    ]);
-                } catch (Exception $e) {
-                    $pdo->rollBack();
-                    throw $e;
-                }
-                exit;
-
-            default:
-                throw new Exception('Action inconnue');
-        }
-    } catch (Exception $e) {
-        echo json_encode(['success' => false, 'error' => $e->getMessage(), 'message' => $e->getMessage()]);
-        exit;
-    }
-}
-
-// - RÉCUPÉRATION DES DONNÉES POUR LA PAGE -
-$taxes = $pdo->query("SELECT * FROM taxe WHERE etat_taxe = 'ACTIF' ORDER BY type_taxe, taux_taxe")->fetchAll();
-
-$categories = $pdo->query("SELECT DISTINCT c.titre_categorie
-                           FROM produit p
-                           JOIN categorie c ON p.categorie_id = c.code_categorie
-                           WHERE c.titre_categorie IS NOT NULL AND c.titre_categorie <> ''
-                           ORDER BY c.titre_categorie ASC")->fetchAll(PDO::FETCH_COLUMN);
-
-// Boutiques actives (sélecteur en haut du panier) : la boutique connectée reste
-// pré-sélectionnée par défaut, mais le vendeur peut vendre/commander pour une
-// autre boutique — le stock affiché suit alors la boutique choisie.
-$boutiquesListe = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
-
-// Clients actifs (sélecteur client) : "Client comptoir" reste la valeur par
-// défaut si rien n'est choisi.
-$clientsListe = $pdo->query("SELECT code_contact, nom_prenom_contact, telephone_contact FROM contact WHERE type_contact = 'Client' AND etat_contact = 'Actif' AND code_contact <> '" . CLIENT_COMPTOIR_CODE . "' ORDER BY nom_prenom_contact")->fetchAll(PDO::FETCH_ASSOC);
-
-$caisse = null;
-if (defined('CAISSE_ID')) {
-    $stmtCaisseInfo = $pdo->prepare("SELECT * FROM caisse WHERE caisse_id = ?");
-    $stmtCaisseInfo->execute([CAISSE_ID]);
-    $caisse = $stmtCaisseInfo->fetch();
-}
-
-$stmtUserInfo = $pdo->prepare("SELECT * FROM utilisateur WHERE id = ?");
-$stmtUserInfo->execute([USER_ID]);
-$userInfo = $stmtUserInfo->fetch();
+require 'views/publics/vente_comptoir_data.php';
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -882,7 +315,19 @@ $userInfo = $stmtUserInfo->fetch();
                 </div>
                 <span class="text-muted small"><i class="bi bi-person"></i> <?= htmlspecialchars($userInfo['nom_prenom'] ?? '') ?></span>
                 <?php if ($caisse): ?>
-                    <span class="badge bg-success-subtle text-success"><i class="bi bi-cash-stack"></i> Caisse ouverte</span>
+                    <span class="badge bg-success-subtle text-success"><i class="bi bi-cash-stack"></i> Caisse ouverte : <?= htmlspecialchars($caisse['nom_caisse'] ?? '') ?></span>
+                <?php elseif ($needCaisseChoice): ?>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                        <span class="badge bg-warning-subtle text-warning" title="Choisissez une caisse pour pouvoir encaisser — le bon de commande reste possible sans choix">
+                            <i class="bi bi-exclamation-triangle"></i> Plusieurs caisses ouvertes
+                        </span>
+                        <select class="form-select form-select-sm" style="width:auto;" onchange="if(this.value) location.href='?choisir_caisse='+encodeURIComponent(this.value)">
+                            <option value="">Choisir la caisse…</option>
+                            <?php foreach ($caissesDisponibles as $c): ?>
+                                <option value="<?= htmlspecialchars($c['caisse_id']) ?>"><?= htmlspecialchars($c['nom_caisse']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
                 <?php else: ?>
                     <span class="badge bg-warning-subtle text-warning" title="Vente cash indisponible — le bon de commande reste possible">
                         <i class="bi bi-exclamation-triangle"></i> Aucune caisse ouverte
@@ -1105,6 +550,9 @@ $userInfo = $stmtUserInfo->fetch();
 const BASE_URL = window.location.pathname;
 const CSRF_TOKEN = '<?= $csrf_token ?>';
 const CAISSE_OUVERTE = <?= $caisse ? 'true' : 'false' ?>;
+// Catégories autorisées par boutique (libellés, pas codes — cet écran filtre
+// par nom). null = pas de restriction pour cette boutique.
+const CATEGORIES_AUTORISEES_PAR_BOUTIQUE_COMPTOIR = <?= json_encode($categoriesAutoriseesParBoutiqueComptoir, JSON_UNESCAPED_UNICODE) ?>;
 let cart = [];
 let currentProducts = [];
 let currentCategory = 'Tous';
@@ -1224,14 +672,37 @@ function filterCategory(cat, btn) {
     loadProducts(gid('searchInput').value.trim());
 }
 
+// Affiche/masque les boutons de catégorie selon la boutique sélectionnée, et
+// réinitialise sur "Tous" si la catégorie active n'est plus autorisée.
+function filtrerCategoriesParBoutique() {
+    const boutiqueId = gid('boutiqueSelect').value || '';
+    const catsAutorisees = boutiqueId ? CATEGORIES_AUTORISEES_PAR_BOUTIQUE_COMPTOIR[boutiqueId] : null;
+
+    let categorieActiveMasquee = false;
+    document.querySelectorAll('.cat-btn').forEach(function(b) {
+        const cat = b.getAttribute('data-cat');
+        const autorise = (cat === 'Tous') || !catsAutorisees || catsAutorisees.indexOf(cat) !== -1;
+        b.style.display = autorise ? '' : 'none';
+        if (!autorise && cat === currentCategory) categorieActiveMasquee = true;
+    });
+
+    if (categorieActiveMasquee) {
+        const btnTous = document.querySelector('.cat-btn[data-cat="Tous"]');
+        if (btnTous) filterCategory('Tous', btnTous);
+    }
+}
+
 gid('searchInput').addEventListener('input', function() {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => loadProducts(this.value.trim()), 300);
 });
 
 gid('boutiqueSelect').addEventListener('change', function() {
+    filtrerCategoriesParBoutique();
     loadProducts(gid('searchInput').value.trim());
 });
+
+filtrerCategoriesParBoutique(); // applique la restriction dès le chargement
 
 async function addProduct(idx) {
     const p = currentProducts[idx];
@@ -1251,6 +722,7 @@ async function addProduct(idx) {
             prix: prix,
             prixUnitaire: prix,
             prix_achat: parseFloat(p.prix_produit) || 0,
+            prixAchatReel: parseFloat(p.prix_fournisseur) || 0, // coût réel du produit, pour la vérification "vente à perte"
             prixManuel: false,
             qte: 1,
             stock: stock,
@@ -1359,7 +831,35 @@ window.setQty = function(code, value) {
 window.updatePrice = function(code, newPrice) {
     const item = cart.find(p => p.code === code);
     if (!item) return;
-    item.prix = parseFloat(newPrice) || 0;
+
+    // Vente à perte : si un prix de lot ET un coût de lot sont définis pour ce
+    // lot précis, on compare directement lot à lot (le coût d'un lot n'est pas
+    // toujours un simple multiple du prix d'achat unitaire — remises fournisseur
+    // par exemple). Sinon, on retombe sur la comparaison au prix unitaire.
+    const nouveauPrix = parseFloat(newPrice) || 0;
+    const lotCatVerif = lotChoisiComptoir(item);
+    let prixARefuser = false, seuilRefus = 0, comparaisonLot = false;
+    if (lotCatVerif && aPrixLotConfigure(item) && lotCatVerif.cout_lot !== null && lotCatVerif.cout_lot !== undefined) {
+        // Comparaison directe : prix de vente du lot vs coût d'achat de ce même lot.
+        comparaisonLot = true;
+        seuilRefus = parseFloat(lotCatVerif.cout_lot) || 0;
+        prixARefuser = (seuilRefus > 0 && nouveauPrix < seuilRefus);
+    } else {
+        const uniteEquivalent = aPrixLotConfigure(item) ? (nouveauPrix / Math.max(1, unitesActuellesComptoir(item))) : nouveauPrix;
+        const prixAchatReel = parseFloat(item.prixAchatReel) || 0;
+        seuilRefus = prixAchatReel;
+        prixARefuser = (prixAchatReel > 0 && uniteEquivalent < prixAchatReel);
+        var uniteEquivalentPourEgalite = uniteEquivalent; // réutilisé plus bas pour le cas "égal"
+    }
+
+    if (prixARefuser) {
+        const libelleSeuil = comparaisonLot ? (fmt(seuilRefus) + '/lot') : (fmt(seuilRefus) + '/unité');
+        toast('Prix refusé : inférieur au prix d\'achat (' + libelleSeuil + ') pour ce produit.', 'error');
+        renderCart(); // réaffiche l'ancien prix (le champ avait déjà changé visuellement)
+        return;
+    }
+
+    item.prix = nouveauPrix;
     item.prixManuel = true;
     if (aPrixLotConfigure(item)) {
         // "le prix que l'utilisateur va saisir sera le nouveau prix du lot"
@@ -1369,6 +869,12 @@ window.updatePrice = function(code, newPrice) {
         // Pas de prix de lot configuré (ou vente à l'unité) : c'est le prix
         // unitaire du produit qui vient d'être modifié.
         item.prixUnitaire = item.prix;
+    }
+    const estEgalAuSeuil = comparaisonLot
+        ? (seuilRefus > 0 && nouveauPrix === seuilRefus)
+        : (seuilRefus > 0 && uniteEquivalentPourEgalite === seuilRefus);
+    if (estEgalAuSeuil) {
+        toast('Attention : prix de vente égal au prix d\'achat pour ce produit (marge nulle).', 'success');
     }
     recalculerMontantComptoir(item);
     renderCart();
@@ -1620,9 +1126,22 @@ gid('btnCheckout').addEventListener('click', function() {
 gid('btnBonCommande').addEventListener('click', function() {
     if (cart.length === 0) { toast('Panier vide', 'error'); return; }
 
-    confirmModal('Créer un bon de commande en attente pour ' + fmt(getTTC()) + ' FCFA ?', function() {
+    const clientId = gid('clientSelect').value || '';
+
+    // Un client est déjà sélectionné : pas besoin de confirmation, on crée
+    // directement le bon de commande.
+    if (clientId !== '') {
         creerBonAttente();
-    });
+        return;
+    }
+
+    // Aucun client sélectionné : on demande confirmation avant de basculer
+    // sur "Client comptoir", pour éviter les oublis de sélection de client.
+    const montantBon = fmt(getTTC());
+    confirmModal(
+        "Aucun client n'est sélectionné : ce bon de commande de " + montantBon + " sera créé au \"Client comptoir\". Continuer ?",
+        function() { creerBonAttente(); }
+    );
 });
 
 async function creerBonAttente() {
@@ -1697,6 +1216,19 @@ function validatePayment() {
     const ttc = getTTC();
     if (received < ttc) {
         toast('Paiement insuffisant : la vente comptoir se règle intégralement en espèces', 'error');
+        return;
+    }
+    // Le client est souvent oublié par inadvertance : si aucun client n'est
+    // sélectionné, on demande confirmation explicite plutôt que de basculer
+    // silencieusement sur "Client comptoir". Ça laisse une dernière chance
+    // de sélectionner le bon client avant que la vente ne soit enregistrée.
+    const clientId = gid('clientSelect').value || '';
+    if (clientId === '') {
+        confirmModal(
+            "Aucun client n'est sélectionné. Voulez-vous vraiment enregistrer cette vente au \"Client comptoir\" ?",
+            function() { validateSale(received); },
+            'Vente au client comptoir ?'
+        );
         return;
     }
     validateSale(received);

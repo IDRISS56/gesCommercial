@@ -4,6 +4,7 @@
 // ==========================================
 ob_start();
 require 'databases/database.php';
+require_once 'config/upload_validation.php';
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: utilisateur/login');
@@ -78,12 +79,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
 
             $photo = null;
             $type_photo = null;
+            $errors = [];
             if (isset($_FILES['photo_produit']) && $_FILES['photo_produit']['error'] === UPLOAD_ERR_OK) {
-                $photo = file_get_contents($_FILES['photo_produit']['tmp_name']);
-                $type_photo = $_FILES['photo_produit']['type'];
+                $validation = validerImageUploadee($_FILES['photo_produit']);
+                if ($validation['ok']) {
+                    $photo = $validation['contenu'];
+                    $type_photo = $validation['type_mime'];
+                } else {
+                    $errors[] = $validation['erreur'];
+                }
             }
 
-            $errors = [];
             if (empty($code)) $errors[] = 'Le code produit est requis.';
             if (empty($titre)) $errors[] = 'Le titre est requis.';
 

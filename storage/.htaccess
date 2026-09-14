@@ -1,0 +1,2 @@
+# Bloque tout accès direct aux fichiers de ce dossier (logs, etc.)
+Require all denied

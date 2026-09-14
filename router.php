@@ -1,4 +1,9 @@
 <?php
+// Bootstrap d'environnement : doit être chargé en tout premier, avant tout
+// autre code, pour que display_errors/error_log soient corrects même si une
+// erreur survient très tôt (ex. dans un controller au chargement).
+require __DIR__ . '/config/environment.php';
+
 // Certains fichiers de controllers/ sont enregistrés avec un BOM UTF-8 en
 // tête. Comme ils sont tous inclus ci-dessous à chaque requête, ce BOM se
 // retrouve au tout début de CHAQUE réponse — invisible dans un navigateur,

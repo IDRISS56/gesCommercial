@@ -11,13 +11,23 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
+// Boutique(s) auxquelles cet utilisateur a accès : toutes les boutiques
+// actives pour Administrateur/Superviseur, uniquement la sienne (+ accès
+// supplémentaire éventuel) pour les autres rôles — même mécanisme que le
+// reste de l'application (config/authentification.php).
+$boutiquesAutoriseesTransaction = getBoutiquesAutorisees($pdo, $_SESSION['role'] ?? null, $_SESSION['boutique_id'] ?? null);
+
+require 'views/transaction/transaction_pdf.php';
+
+
 $message = '';
 $messageType = '';
 
 // ============================================================
 // FONCTION : RÉCUPÉRATION DU CONTENU DU TABLEAU
 // ============================================================
-function getTableContent($pdo, $search, $filtres, $page, $perPage = 25) {
+function getTableContent($pdo, $search, $filtres, $page, $boutiquesAutorisees, $perPage = 25) {
+    $placeholdersBqTr = !empty($boutiquesAutorisees) ? implode(',', array_fill(0, count($boutiquesAutorisees), '?')) : "''";
     // Requête adaptée au schéma réel de la table transaction
     $sql = "SELECT 
                 t.numero_transaction,
@@ -45,8 +55,8 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 25) {
             LEFT JOIN facture f ON f.numero_facture = t.facture_id
             LEFT JOIN contact ct ON ct.code_contact = f.contact_id
             LEFT JOIN utilisateur u ON u.id = t.utilisateur_id
-            WHERE 1=1";
-    $params = [];
+            WHERE (c.boutique_id IN ($placeholdersBqTr) OR c.boutique_id IS NULL)";
+    $params = $boutiquesAutorisees;
 
     // Recherche textuelle
     if (!empty($search)) {
@@ -167,8 +177,12 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 25) {
             case 'Succes': $etatClass = 'on'; $etatIcon = 'check-circle-fill'; break;
             case 'Echec': $etatClass = 'off'; $etatIcon = 'x-circle-fill'; break;
             case 'En attente': $etatClass = 'warn'; $etatIcon = 'clock-fill'; break;
+            case 'Annulee': $etatClass = 'off'; $etatIcon = 'arrow-counterclockwise'; break;
             default: $etatClass = 'off'; $etatIcon = 'question-circle-fill';
         }
+        $peutAnnuler = ($tr['etat_transaction'] === 'Succes')
+            && (($tr['objet_transaction'] ?? '') !== 'Vente comptoir')
+            && in_array($_SESSION['role'] ?? '', ['Administrateur', 'Superviseur', 'Proprietaire', 'Caisse'], true);
     ?>
     <tr>
         <td class="td-bold">
@@ -229,11 +243,21 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 25) {
                 <i class="bi bi-<?= $etatIcon ?>"></i>
                 <?= e($tr['etat_transaction']) ?>
             </span>
+            <?php if ($tr['etat_transaction'] === 'Annulee' && !empty($tr['motif_annulation'])): ?>
+                <small class="d-block text-muted" style="font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="<?= e($tr['motif_annulation']) ?>">
+                    <?= e($tr['motif_annulation']) ?>
+                </small>
+            <?php endif; ?>
         </td>
-        <td class="text-end">
+        <td class="text-end" style="white-space:nowrap;">
             <button class="act-btn view" data-code="<?= e($tr['numero_transaction']) ?>" title="Voir le détail">
                 <i class="bi bi-eye"></i>
             </button>
+            <?php if ($peutAnnuler): ?>
+            <button class="act-btn delete btn-annuler-transaction" data-code="<?= e($tr['numero_transaction']) ?>" title="Annuler cette transaction">
+                <i class="bi bi-arrow-counterclockwise"></i>
+            </button>
+            <?php endif; ?>
         </td>
     </tr>
     <?php endforeach; ?>
@@ -293,13 +317,122 @@ function getTableContent($pdo, $search, $filtres, $page, $perPage = 25) {
 }
 
 // ============================================================
+// ANNULATION D'UNE TRANSACTION (avec trace complète)
+// ============================================================
+if (isset($_POST['action']) && $_POST['action'] === 'annuler_transaction') {
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json');
+
+    if (($_POST['csrf_token'] ?? '') !== $csrf_token) {
+        echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
+        exit;
+    }
+    // Annuler une transaction déplace de l'argent (caisse, solde client/fournisseur,
+    // facture) : réservé aux rôles qui peuvent déjà supprimer une facture payée.
+    if (!in_array($_SESSION['role'] ?? '', ['Administrateur', 'Superviseur'], true)) {
+        echo json_encode(['success' => false, 'message' => "Seul un administrateur ou un superviseur peut annuler une transaction."]);
+        exit;
+    }
+
+    $numero = trim($_POST['numero'] ?? '');
+    $motif = trim($_POST['motif'] ?? '');
+    if ($numero === '') {
+        echo json_encode(['success' => false, 'message' => 'Transaction manquante.']);
+        exit;
+    }
+    if ($motif === '') {
+        echo json_encode(['success' => false, 'message' => "Le motif d'annulation est obligatoire (ex. : mauvais montant, mauvaise facture)."]);
+        exit;
+    }
+
+    try {
+        $pdo->beginTransaction();
+
+        $stmt = $pdo->prepare("SELECT * FROM transaction WHERE numero_transaction = ? FOR UPDATE");
+        $stmt->execute([$numero]);
+        $tr = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$tr) throw new Exception("Transaction introuvable.");
+        if ($tr['etat_transaction'] !== 'Succes') {
+            throw new Exception("Seule une transaction réussie peut être annulée (état actuel : " . $tr['etat_transaction'] . ").");
+        }
+        // Une vente comptoir a d'autres effets (stock notamment) qui ne sont pas
+        // réversibles depuis cet écran : on la laisse de côté ici plutôt que de
+        // ne réverser que l'argent et laisser le stock incohérent.
+        if (($tr['objet_transaction'] ?? '') === 'Vente comptoir') {
+            throw new Exception("Les ventes comptoir ne peuvent pas être annulées depuis cet écran (elles affectent aussi le stock).");
+        }
+
+        $montant = floatval($tr['montant_transaction']);
+
+        // 1) Réversion du solde de caisse (toujours calculable de façon fiable).
+        $stmtCaisse = $pdo->prepare("SELECT * FROM caisse WHERE caisse_id = ? FOR UPDATE");
+        $stmtCaisse->execute([$tr['caisse_id']]);
+        $caisse = $stmtCaisse->fetch(PDO::FETCH_ASSOC);
+        if ($caisse) {
+            $nouveauSolde = ($tr['type_transaction'] === 'Entree')
+                ? floatval($caisse['solde']) - $montant
+                : floatval($caisse['solde']) + $montant;
+            $pdo->prepare("UPDATE caisse SET solde = ? WHERE caisse_id = ?")->execute([$nouveauSolde, $tr['caisse_id']]);
+        }
+
+        // 2) Réversion du solde du contact (client/fournisseur), quand connu.
+        //    Exclut explicitement les décaissements directs (dépenses) : ce type
+        //    d'opération ne touche jamais solde_contact à la création (seule la
+        //    caisse est impactée) — le reverser ici créditerait le contact à tort.
+        $estDecaissementDirect = (strpos($tr['objet_transaction'] ?? '', 'Décaissement fournisseur (dépense)') === 0);
+        if (!empty($tr['contact_id']) && !$estDecaissementDirect) {
+            $pdo->prepare("SELECT solde_contact FROM contact WHERE code_contact = ? FOR UPDATE")->execute([$tr['contact_id']]);
+            $pdo->prepare("UPDATE contact SET solde_contact = solde_contact + ? WHERE code_contact = ?")->execute([$montant, $tr['contact_id']]);
+        }
+
+        // 3) Réversion de la facture DIRECTEMENT liée : on utilise le montant
+        //    exact qui lui avait été appliqué, mémorisé à la création de cette
+        //    transaction (voir reglement_client.php / reglement_fournisseur.php),
+        //    pas le montant total de la transaction (qui a pu déborder sur
+        //    d'autres factures — voir avertissement plus bas).
+        $avertissementSurplus = null;
+        if (!empty($tr['facture_id']) && $tr['montant_applique_facture'] !== null) {
+            $montantAppliqueFacture = floatval($tr['montant_applique_facture']);
+            $stmtF = $pdo->prepare("SELECT * FROM facture WHERE numero_facture = ? FOR UPDATE");
+            $stmtF->execute([$tr['facture_id']]);
+            $facture = $stmtF->fetch(PDO::FETCH_ASSOC);
+            if ($facture) {
+                $nouvelleAvance = max(0, round(floatval($facture['avance']) - $montantAppliqueFacture, 2));
+                $nouveauReste = round(floatval($facture['montant_ttc']) - $nouvelleAvance, 2);
+                if ($nouveauReste < 0) $nouveauReste = 0;
+                $nouvelEtat = ($nouvelleAvance <= 0) ? 'Impayee' : (($nouveauReste <= 0) ? 'Payee' : 'Partielle');
+                $pdo->prepare("UPDATE facture SET avance = ?, reste = ?, etat_facture = ? WHERE numero_facture = ?")
+                    ->execute([$nouvelleAvance, $nouveauReste, $nouvelEtat, $tr['facture_id']]);
+            }
+            if (round($montant - $montantAppliqueFacture, 2) > 0) {
+                $avertissementSurplus = "Cette transaction avait aussi couvert "
+                    . number_format($montant - $montantAppliqueFacture, 0, ',', ' ')
+                    . " F sur d'autres factures du même contact (ou en avance) : elles n'ont PAS été modifiées automatiquement, seul le solde global du contact a été réajusté. Vérifiez-les si besoin.";
+            }
+        }
+
+        // 4) Marquer la transaction comme annulée — la trace demandée.
+        $libelleAnnulePar = trim(($_SESSION['nom_prenom'] ?? ''));
+        $pdo->prepare("UPDATE transaction SET etat_transaction = 'Annulee', annule_par = ?, date_annulation = NOW(), motif_annulation = ? WHERE numero_transaction = ?")
+            ->execute([$libelleAnnulePar, $motif, $numero]);
+
+        $pdo->commit();
+        echo json_encode(['success' => true, 'message' => 'Transaction annulée.', 'warning' => $avertissementSurplus]);
+    } catch (Exception $ex) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => $ex->getMessage()]);
+    }
+    exit;
+}
+
+// ============================================================
 // REQUÊTE AJAX : DÉTAIL D'UNE TRANSACTION
 // ============================================================
 if (isset($_POST['action']) && $_POST['action'] === 'get_detail') {
     while (ob_get_level()) ob_end_clean();
     header('Content-Type: application/json');
     $numero = trim($_POST['numero'] ?? '');
-    $stmt = $pdo->prepare("SELECT t.*, c.nom_caisse, f.titre_facture, f.type_facture, f.categorie_facture,
+    $stmt = $pdo->prepare("SELECT t.*, c.nom_caisse, c.boutique_id, f.titre_facture, f.type_facture, f.categorie_facture,
                                    ct.nom_prenom_contact, ct.telephone_contact, u.nom_prenom AS utilisateur_nom
                             FROM transaction t
                             LEFT JOIN caisse c ON c.caisse_id = t.caisse_id
@@ -311,6 +444,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'get_detail') {
     $t = $stmt->fetch(PDO::FETCH_ASSOC);
     if (!$t) {
         echo json_encode(['success' => false, 'message' => 'Transaction introuvable.']);
+        exit;
+    }
+    if (!empty($t['boutique_id']) && !in_array($t['boutique_id'], $boutiquesAutoriseesTransaction, true)) {
+        echo json_encode(['success' => false, 'message' => 'Vous n\'avez pas accès à cette transaction (autre boutique).']);
         exit;
     }
     echo json_encode(['success' => true, 'transaction' => $t]);
@@ -334,7 +471,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
         'date_fin' => trim($_POST['date_fin'] ?? '')
     ];
     $page = max(1, (int)($_POST['page'] ?? 1));
-    $result = getTableContent($pdo, $search, $filtres, $page);
+    $result = getTableContent($pdo, $search, $filtres, $page, $boutiquesAutoriseesTransaction);
     while (ob_get_level()) ob_end_clean();
     header('Content-Type: application/json');
     echo json_encode($result);
@@ -344,18 +481,30 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
 // ============================================================
 // DONNÉES POUR LES FILTRES
 // ============================================================
-$caisses = $pdo->query("SELECT caisse_id, nom_caisse FROM caisse ORDER BY nom_caisse")->fetchAll(PDO::FETCH_ASSOC);
-$utilisateurs = $pdo->query("SELECT id, nom_prenom FROM utilisateur WHERE etat = 'Actif' ORDER BY nom_prenom")->fetchAll(PDO::FETCH_ASSOC);
-$factures = $pdo->query("SELECT numero_facture, titre_facture FROM facture ORDER BY numero_facture DESC LIMIT 500")->fetchAll(PDO::FETCH_ASSOC);
+$placeholdersBqTr2 = !empty($boutiquesAutoriseesTransaction) ? implode(',', array_fill(0, count($boutiquesAutoriseesTransaction), '?')) : "''";
+
+$stmtCaisses = $pdo->prepare("SELECT caisse_id, nom_caisse FROM caisse WHERE (boutique_id IN ($placeholdersBqTr2) OR boutique_id IS NULL) ORDER BY nom_caisse");
+$stmtCaisses->execute($boutiquesAutoriseesTransaction);
+$caisses = $stmtCaisses->fetchAll(PDO::FETCH_ASSOC);
+
+$stmtUtil = $pdo->prepare("SELECT id, nom_prenom FROM utilisateur WHERE etat = 'Actif' AND (boutique_id IN ($placeholdersBqTr2) OR boutique_id IS NULL) ORDER BY nom_prenom");
+$stmtUtil->execute($boutiquesAutoriseesTransaction);
+$utilisateurs = $stmtUtil->fetchAll(PDO::FETCH_ASSOC);
+
+$stmtFact = $pdo->prepare("SELECT numero_facture, titre_facture FROM facture f
+                            WHERE EXISTS (SELECT 1 FROM commande cmd WHERE cmd.facture_id = f.numero_facture AND (cmd.boutique_id IN ($placeholdersBqTr2) OR cmd.boutique_id IS NULL))
+                            ORDER BY numero_facture DESC LIMIT 500");
+$stmtFact->execute($boutiquesAutoriseesTransaction);
+$factures = $stmtFact->fetchAll(PDO::FETCH_ASSOC);
 
 $modes_reglement = ['Espèce', 'Virement', 'Carte', 'Mobile money', 'Chèque', 'Autres'];
 $types_transaction = ['Entree', 'Sortie'];
-$etats_transaction = ['Succes', 'Echec', 'En attente'];
+$etats_transaction = ['Succes', 'Echec', 'En attente', 'Annulee'];
 
 // Données initiales
 $search = '';
 $filtres = ['type' => '', 'mode_reglement' => '', 'etat' => '', 'caisse' => '', 'utilisateur' => '', 'facture' => '', 'objet' => '', 'date_debut' => '', 'date_fin' => ''];
-$initialData = getTableContent($pdo, $search, $filtres, 1);
+$initialData = getTableContent($pdo, $search, $filtres, 1, $boutiquesAutoriseesTransaction);
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -418,10 +567,16 @@ $initialData = getTableContent($pdo, $search, $filtres, 1);
         .act-btn { width: 32px; height: 32px; border-radius: 6px; border: 1px solid var(--brd); background: transparent; color: var(--lt); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: all .2s; }
         .act-btn:hover { transform: scale(1.1); }
         .act-btn.view:hover { color: var(--b); background: var(--bl); border-color: var(--bb); }
+        .act-btn.delete:hover { color: #dc2626; background: #fef2f2; border-color: #fecaca; }
         .pagination .page-link { border: 1px solid var(--brd); color: var(--mt); font-size: 12px; font-weight: 600; padding: 6px 12px; }
         .pagination .page-item.active .page-link { background: var(--b); color: #fff; border-color: var(--b); }
         .bootstrap-select .dropdown-toggle { background: var(--bg) !important; border: 1.5px solid var(--brd) !important; border-radius: 8px !important; font-size: 13px !important; }
         .modal-content { border-radius: var(--R); border: none; box-shadow: 0 12px 40px rgba(15,23,42,.08); }
+        /* Toast (remplace alert() — même composant que vente_comptoir) */
+        .toast-msg { position: fixed; top: 20px; right: 20px; background: var(--suc); color: #fff; padding: 12px 20px; border-radius: 10px; font-weight: 600; z-index: 2000; display: none; box-shadow: 0 4px 12px rgba(0,0,0,.15); }
+        .toast-msg.error { background: var(--dng); }
+        .toast-msg.show { display: block; animation: slideIn .3s ease; }
+        @keyframes slideIn { from { transform: translateX(30px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
         .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--brd); font-size: 13px; }
         .detail-row:last-child { border-bottom: none; }
         .detail-row .label { color: var(--mt); font-weight: 600; }
@@ -580,18 +735,67 @@ $initialData = getTableContent($pdo, $search, $filtres, 1);
             <div class="modal-body" id="detailContent">
                 <div class="text-center py-4"><i class="bi bi-arrow-repeat spin"></i> Chargement...</div>
             </div>
+            <div class="modal-footer" style="position: relative;">
+                <button type="button" class="btn btn-outline-secondary rounded-3" id="btnImprimerRecu"><i class="bi bi-printer"></i> Imprimer</button>
+                <button type="button" class="btn btn-outline-success rounded-3" id="btnPartagerRecu"><i class="bi bi-whatsapp"></i> Partager</button>
+            </div>
         </div>
     </div>
 </div>
+
+<!-- Modal annulation d'une transaction (motif obligatoire = trace) -->
+<div class="modal fade" id="annulerModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:16px;border:none;">
+            <div class="modal-body p-4">
+                <div class="text-center mb-3">
+                    <i class="bi bi-arrow-counterclockwise text-danger" style="font-size:2.5rem;"></i>
+                    <h5 class="mt-2 mb-1 fw-bold">Annuler la transaction</h5>
+                    <p class="text-muted small mb-0">
+                        <strong id="annulerNumero"></strong><br>
+                        Le solde de caisse, le solde du contact et les factures liées seront
+                        réajustés automatiquement.
+                    </p>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small fw-semibold">Motif de l'annulation <span class="text-danger">*</span></label>
+                    <textarea class="form-control" id="annulerMotif" rows="2" placeholder="Ex. : mauvais montant saisi, mauvaise facture sélectionnée..."></textarea>
+                </div>
+                <div id="annulerErreur" class="alert alert-danger py-2 small mb-3" style="display:none;"></div>
+                <div class="d-flex gap-2 justify-content-center">
+                    <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">Retour</button>
+                    <button type="button" class="btn btn-danger rounded-3" id="confirmAnnulerBtn">
+                        <i class="bi bi-arrow-counterclockwise me-1"></i> Confirmer l'annulation
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast (remplace alert()) -->
+<div class="toast-msg" id="toastMsg"></div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
 <script>
+// Toast — remplace alert() (même composant que vente_comptoir)
+function toast(msg, type = 'success') {
+    const t = document.getElementById('toastMsg');
+    t.textContent = msg;
+    t.className = 'toast-msg show' + (type === 'error' ? ' error' : '');
+    setTimeout(() => t.classList.remove('show'), 2500);
+}
+
 $(document).ready(function() {
     $('.selectpicker').selectpicker();
     const detailModal = new bootstrap.Modal(document.getElementById('detailModal'));
+    const annulerModal = new bootstrap.Modal(document.getElementById('annulerModal'));
+    const CSRF_TOKEN_TR = <?= json_encode($csrf_token) ?>;
+    const baseUrlTr = window.location.pathname;
+    let numeroATransaction = null;
 
     // Recherche AJAX (tout en POST)
     function rechercher(page) {
@@ -668,6 +872,10 @@ $(document).ready(function() {
                     return;
                 }
                 const t = data.transaction;
+                $('#detailContent')
+                    .data('numero-transaction', t.numero_transaction)
+                    .data('contact-name', t.nom_prenom_contact || '')
+                    .data('objet-transaction', t.objet_transaction || '');
                 const ligne = (label, valeur) => valeur ? `
                     <tr><td class="text-muted" style="width:40%;">${label}</td><td class="fw-semibold">${valeur}</td></tr>
                 ` : '';
@@ -678,12 +886,19 @@ $(document).ready(function() {
                     ? '<span class="badge bg-success-subtle text-success">Succès</span>'
                     : (t.etat_transaction === 'Echec'
                         ? '<span class="badge bg-danger-subtle text-danger">Échec</span>'
-                        : '<span class="badge bg-warning-subtle text-warning">En attente</span>');
+                        : (t.etat_transaction === 'Annulee'
+                            ? '<span class="badge bg-secondary-subtle text-secondary">Annulée</span>'
+                            : '<span class="badge bg-warning-subtle text-warning">En attente</span>'));
                 $('#detailContent').html(`
                     <div class="alert alert-info d-flex justify-content-between align-items-center">
                         <span><i class="bi bi-info-circle"></i> Transaction : <strong>${t.numero_transaction}</strong></span>
                         <span>${badgeType} ${badgeEtat}</span>
                     </div>
+                    ${t.etat_transaction === 'Annulee' ? `
+                    <div class="alert alert-secondary">
+                        <i class="bi bi-arrow-counterclockwise"></i> Annulée par <strong>${t.annule_par || '—'}</strong> le ${t.date_annulation || '—'}<br>
+                        Motif : ${t.motif_annulation || '—'}
+                    </div>` : ''}
                     <table class="table table-sm">
                         <tbody>
                             ${ligne('Date', (t.date_transaction || '') + ' ' + (t.heure_transaction || ''))}
@@ -706,6 +921,179 @@ $(document).ready(function() {
                 $('#detailContent').html('<div class="alert alert-danger">Erreur lors du chargement du détail.</div>');
             }
         });
+    });
+
+    // Annuler une transaction (motif obligatoire = trace)
+    $(document).on('click', '.btn-annuler-transaction', function() {
+        numeroATransaction = $(this).data('code');
+        $('#annulerNumero').text(numeroATransaction);
+        $('#annulerMotif').val('');
+        $('#annulerErreur').hide().text('');
+        annulerModal.show();
+    });
+
+    $('#confirmAnnulerBtn').on('click', function() {
+        const motif = $('#annulerMotif').val().trim();
+        if (!motif) {
+            $('#annulerErreur').text("Le motif est obligatoire.").show();
+            return;
+        }
+        const btn = $(this);
+        btn.prop('disabled', true).html('<i class="bi bi-hourglass-split"></i> Annulation...');
+        $.ajax({
+            url: window.location.pathname,
+            method: 'POST',
+            data: {
+                action: 'annuler_transaction',
+                numero: numeroATransaction,
+                motif: motif,
+                csrf_token: <?= json_encode($csrf_token) ?>
+            },
+            dataType: 'json',
+            success: function(resp) {
+                btn.prop('disabled', false).html('<i class="bi bi-arrow-counterclockwise me-1"></i> Confirmer l\'annulation');
+                if (resp.success) {
+                    annulerModal.hide();
+                    var msg = resp.message || 'Transaction annulée.';
+                    if (resp.warning) msg += ' ' + resp.warning;
+                    toast(msg);
+                    rechercher(1);
+                } else {
+                    $('#annulerErreur').text(resp.message || 'Erreur inconnue.').show();
+                }
+            },
+            error: function() {
+                btn.prop('disabled', false).html('<i class="bi bi-arrow-counterclockwise me-1"></i> Confirmer l\'annulation');
+                $('#annulerErreur').text('Erreur de communication avec le serveur.').show();
+            }
+        });
+    });
+
+    // ============================================================
+    // IMPRIMER / PARTAGER LE REÇU (même mécanisme hybride que pour
+    // les bons de commande : partage natif si disponible, sinon menu
+    // de repli WhatsApp/Email/Telegram/Télécharger).
+    // ============================================================
+    function submitRecuPdf(numero, mode) {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = baseUrlTr;
+        form.target = '_self';
+        const champs = { action: 'pdf', numero: numero, mode: mode, csrf_token: CSRF_TOKEN_TR };
+        Object.keys(champs).forEach(function(k) {
+            const input = document.createElement('input');
+            input.type = 'hidden'; input.name = k; input.value = champs[k];
+            form.appendChild(input);
+        });
+        document.body.appendChild(form);
+        form.submit();
+        form.remove();
+    }
+
+    $('#btnImprimerRecu').click(function() {
+        const numero = $('#detailContent').data('numero-transaction');
+        if (!numero) return;
+        submitRecuPdf(numero, 'I');
+    });
+
+    function fermerMenuPartageRecu() {
+        $('#menuPartageRecuRepli').remove();
+        $(document).off('click.menuPartageRecu');
+    }
+
+    function ouvrirMenuPartageRecu(btn, blob, numero, nomContact, messageTexte) {
+        fermerMenuPartageRecu();
+        const url = URL.createObjectURL(blob);
+        const nomFichier = 'recu-' + numero + '.pdf';
+        const declencherTelechargement = function() {
+            const a = document.createElement('a');
+            a.href = url; a.download = nomFichier;
+            document.body.appendChild(a); a.click(); a.remove();
+        };
+        const $menu = $(`
+            <div id="menuPartageRecuRepli" style="position:absolute; bottom:100%; right:0; margin-bottom:8px; background:#fff; border-radius:12px; box-shadow:0 10px 30px rgba(15,23,42,.2); padding:8px; z-index:2000; min-width:220px;">
+                <div class="small text-muted px-2 pb-1" style="font-size:11px;">Le PDF sera téléchargé, à joindre au message</div>
+                <button type="button" class="dropdown-item-partage-recu" data-canal="whatsapp" style="display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;padding:8px;border-radius:8px;text-align:left;"><i class="bi bi-whatsapp" style="color:#25D366;"></i> WhatsApp</button>
+                <button type="button" class="dropdown-item-partage-recu" data-canal="email" style="display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;padding:8px;border-radius:8px;text-align:left;"><i class="bi bi-envelope-fill" style="color:#3b82f6;"></i> Email</button>
+                <button type="button" class="dropdown-item-partage-recu" data-canal="telegram" style="display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;padding:8px;border-radius:8px;text-align:left;"><i class="bi bi-telegram" style="color:#229ED9;"></i> Telegram</button>
+                <button type="button" class="dropdown-item-partage-recu" data-canal="telecharger" style="display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;padding:8px;border-radius:8px;text-align:left;"><i class="bi bi-download" style="color:#64748b;"></i> Télécharger seulement</button>
+            </div>
+        `);
+        $menu.find('.dropdown-item-partage-recu').on('mouseenter', function() { $(this).css('background', '#f1f5f9'); }).on('mouseleave', function() { $(this).css('background', 'none'); });
+        $menu.on('click', '.dropdown-item-partage-recu', function() {
+            const canal = $(this).data('canal');
+            declencherTelechargement();
+            if (canal === 'whatsapp') {
+                window.open('https://api.whatsapp.com/send?text=' + encodeURIComponent(messageTexte), '_blank');
+            } else if (canal === 'email') {
+                window.open('mailto:?subject=' + encodeURIComponent('Reçu N°' + numero) + '&body=' + encodeURIComponent(messageTexte), '_blank');
+            } else if (canal === 'telegram') {
+                window.open('https://t.me/share/url?url=&text=' + encodeURIComponent(messageTexte), '_blank');
+            }
+            fermerMenuPartageRecu();
+        });
+        btn.parent().css('position', 'relative').append($menu);
+        setTimeout(function() {
+            $(document).on('click.menuPartageRecu', function(e) {
+                if (!$(e.target).closest('#menuPartageRecuRepli, #btnPartagerRecu').length) fermerMenuPartageRecu();
+            });
+        }, 0);
+    }
+
+    $('#btnPartagerRecu').click(async function() {
+        const numero = $('#detailContent').data('numero-transaction');
+        if (!numero) return;
+        const nomContact = $('#detailContent').data('contact-name') || '';
+        const objet = $('#detailContent').data('objet-transaction') || '';
+        const estTicket = objet === 'Vente comptoir';
+        const messageTexte = 'Bonjour' + (nomContact ? ' ' + nomContact : '') + ', voici ' + (estTicket ? 'votre ticket' : 'votre reçu de paiement') + ' N°' + numero + '. Le fichier PDF est joint.';
+        const btn = $(this);
+        const originalHtml = btn.html();
+        fermerMenuPartageRecu();
+        const params = new URLSearchParams({ action: 'pdf', numero: numero, csrf_token: CSRF_TOKEN_TR });
+
+        btn.prop('disabled', true).html('<i class="bi bi-hourglass-split"></i> Préparation...');
+        let blob;
+        try {
+            const resp = await fetch(baseUrlTr, { method: 'POST', body: params, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            blob = await resp.blob();
+            if (!resp.ok || (blob.type && blob.type.indexOf('pdf') === -1)) {
+                let detail = '';
+                try { detail = (await blob.text()); } catch (e2) {}
+                console.error('Échec de préparation du reçu (partage) — statut HTTP', resp.status, '— réponse :', detail.slice(0, 300));
+                throw new Error('pdf_invalide');
+            }
+        } catch (e) {
+            btn.prop('disabled', false).html(originalHtml);
+            toast('Impossible de préparer le reçu pour le partage.', 'error');
+            return;
+        }
+
+        let raisonRepli = null;
+        if (!window.isSecureContext) raisonRepli = 'HTTPS requis pour le partage natif';
+        else if (!navigator.share) raisonRepli = 'navigateur non compatible avec le partage natif';
+        else if (!navigator.canShare) raisonRepli = 'partage de fichiers non supporté';
+
+        if (!raisonRepli) {
+            const file = new File([blob], 'recu-' + numero + '.pdf', { type: 'application/pdf' });
+            if (navigator.canShare({ files: [file] })) {
+                try {
+                    await navigator.share({ files: [file], title: 'Reçu N°' + numero, text: messageTexte });
+                    btn.prop('disabled', false).html(originalHtml);
+                    return;
+                } catch (e) {
+                    btn.prop('disabled', false).html(originalHtml);
+                    if (e && e.name === 'AbortError') return;
+                    raisonRepli = 'le partage natif a échoué';
+                }
+            } else {
+                raisonRepli = 'cet appareil ne peut pas partager de fichier PDF';
+            }
+        }
+
+        btn.prop('disabled', false).html(originalHtml);
+        console.warn('Partage natif indisponible (' + raisonRepli + '), affichage des options de repli');
+        ouvrirMenuPartageRecu(btn, blob, numero, nomContact, messageTexte);
     });
 });
 </script>

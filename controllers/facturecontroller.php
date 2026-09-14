@@ -4,20 +4,20 @@ class facture
     // Suivi et enregistrement des règlements des factures CLIENTS
     public function reglementClient()
     {
-        requirePermission(['Administrateur', 'Superviseur', 'Caisse']);
+        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire', 'Caisse']);
         include "views/facture/reglement_client.php";
     }
 
     // Suivi et enregistrement des règlements des factures FOURNISSEURS
     public function reglementFournisseur()
     {
-        requirePermission(['Administrateur', 'Superviseur',  'Caisse']);
+        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire', 'Caisse']);
         include "views/facture/reglement_fournisseur.php";
     }
      // Suivi et enregistrement des règlements des factures FOURNISSEURS
     public function bonLivraison()
     {
-        requirePermission(['Administrateur', 'Superviseur',  'Caisse', 'Vendeur']);
+        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire', 'Caisse', 'Vendeur']);
         include "views/facture/bon_livraison.php";
     }
 

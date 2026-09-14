@@ -14,6 +14,19 @@ function fmt($n) {
     return number_format(floatval($n), 0, ',', ' ');
 }
 
+if (!isset($_SESSION['user_id'])) {
+    header('Location: utilisateur/login');
+    exit;
+}
+$stmtUser = $pdo->prepare("SELECT id, nom_prenom, role, boutique_id FROM utilisateur WHERE id = ? AND etat = 'Actif'");
+$stmtUser->execute([$_SESSION['user_id']]);
+$user = $stmtUser->fetch(PDO::FETCH_ASSOC);
+if (!$user) {
+    session_destroy();
+    header('Location: utilisateur/login');
+    exit;
+}
+
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
@@ -598,7 +611,7 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
                                 <?php endforeach; ?>
                             </select>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-md-6" hidden>
                             <label class="form-label">Lot / Unité</label>
                             <select name="lot_id" class="form-select selectpicker" data-live-search="true">
                                 <option value="">Unité</option>

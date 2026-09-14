@@ -12,7 +12,7 @@ class caisse
     // Accessible à tous les rôles habilités à encaisser
     public function journee()
     {
-        requirePermission(['Administrateur', 'Superviseur', 'Caisse']);
+        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire', 'Caisse']);
         include "views/caisse/journee.php";
     }
 }

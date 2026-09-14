@@ -27,7 +27,7 @@ if (!function_exists('checkAccessConditions')) {
             exit;
         }
 
-        if (!isset($_SESSION['login']) || !isset($_SESSION['mdp']) || !isset($_SESSION['role'])) {
+        if (!isset($_SESSION['login']) || !isset($_SESSION['authenticated']) || !isset($_SESSION['role'])) {
             $protocol = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https://' : 'http://';
             $base_url = $protocol . $_SERVER['HTTP_HOST'] . (dirname($_SERVER['PHP_SELF']) === '/' ? '' : rtrim(dirname($_SERVER['PHP_SELF']), '/\\'));
             header("Location: " . $base_url . "/utilisateur/deconnexion");
@@ -130,6 +130,74 @@ if (!function_exists('hasPermission')) {
     function hasPermission($rolesAutorises) {
         checkAccessConditions();
         return userHasPermission($rolesAutorises);
+    }
+}
+
+// ----------------------------------------------------
+// Boutiques auxquelles l'utilisateur connecté a accès
+// ----------------------------------------------------
+// - Administrateur / Superviseur : toutes les boutiques actives.
+// - Proprietaire : uniquement sa propre boutique (pas d'extension).
+// - Vendeur / Caisse : leur propre boutique, plus toute boutique déclarée
+//   dans `acces_boutique_supplementaire` pour leur boutique d'origine
+//   (ex : Ets Dankan -> STADE). Pour ajouter une nouvelle exception,
+//   il suffit d'ajouter une ligne dans cette table, sans toucher au code.
+// Retourne un tableau de code_boutique (jamais vide si l'utilisateur a une
+// boutique valide ; tableau vide si rien n'est déterminable).
+if (!function_exists('getBoutiquesAutorisees')) {
+    function getBoutiquesAutorisees($pdo, $role = null, $userBoutique = null) {
+        $role = $role ?? ($_SESSION['role'] ?? null);
+        $userBoutique = $userBoutique ?? ($_SESSION['boutique_id'] ?? null);
+
+        if (in_array($role, ['Administrateur', 'Superviseur'], true)) {
+            $stmt = $pdo->query("SELECT code_boutique FROM boutique WHERE etat_boutique = 'Actif'");
+            return $stmt->fetchAll(PDO::FETCH_COLUMN);
+        }
+
+        if (empty($userBoutique)) return [];
+
+        $liste = [$userBoutique];
+
+        if ($role !== 'Proprietaire') {
+            $stmt = $pdo->prepare(
+                "SELECT boutique_cible FROM acces_boutique_supplementaire
+                 WHERE boutique_origine = ? AND etat = 'Actif'"
+            );
+            $stmt->execute([$userBoutique]);
+            $liste = array_merge($liste, $stmt->fetchAll(PDO::FETCH_COLUMN));
+        }
+
+        return array_values(array_unique($liste));
+    }
+}
+
+// ----------------------------------------------------
+// Catégories de produits autorisées pour UNE boutique donnée.
+// - Administrateur / Superviseur : jamais restreints, quelle que soit la
+//   boutique (retourne null = pas de restriction).
+// - Toute autre boutique : si aucune ligne n'existe pour elle dans
+//   `boutique_categorie_autorisee`, elle n'est pas restreinte non plus
+//   (comportement par défaut, rétrocompatible — aucune boutique existante
+//   n'est bloquée tant que personne n'a explicitement configuré de
+//   restriction pour elle). Si des lignes existent, seules ces catégories
+//   sont autorisées.
+// Retourne null (pas de restriction) ou un tableau de code_categorie.
+if (!function_exists('getCategoriesAutoriseesBoutique')) {
+    function getCategoriesAutoriseesBoutique($pdo, $role = null, $boutiqueId = null) {
+        $role = $role ?? ($_SESSION['role'] ?? null);
+
+        if (in_array($role, ['Administrateur', 'Superviseur'], true)) {
+            return null;
+        }
+        if (empty($boutiqueId)) {
+            return null;
+        }
+
+        $stmt = $pdo->prepare("SELECT categorie_id FROM boutique_categorie_autorisee WHERE boutique_id = ?");
+        $stmt->execute([$boutiqueId]);
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+        return empty($ids) ? null : $ids;
     }
 }
 ?>

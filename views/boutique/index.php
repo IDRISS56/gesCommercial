@@ -1,6 +1,7 @@
 <?php
 ob_start();
 require 'databases/database.php';
+require_once 'config/upload_validation.php';
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
@@ -59,15 +60,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'])) {
             
             $logo = null;
             $type_logo = null;
+            $logoError = null;
             if (isset($_FILES['logo']) && $_FILES['logo']['error'] === UPLOAD_ERR_OK) {
-                $logoData = file_get_contents($_FILES['logo']['tmp_name']);
-                if ($logoData !== false) {
-                    $logo = $logoData;
-                    $type_logo = $_FILES['logo']['type'];
+                $validation = validerImageUploadee($_FILES['logo']);
+                if ($validation['ok']) {
+                    $logo = $validation['contenu'];
+                    $type_logo = $validation['type_mime'];
+                } else {
+                    $logoError = $validation['erreur'];
                 }
             }
-            
-            if (!empty($latitude) && !is_numeric($latitude)) {
+
+            if ($logoError !== null) {
+                $message = $logoError;
+                $messageType = 'warning';
+            } elseif (!empty($latitude) && !is_numeric($latitude)) {
                 $message = 'La latitude doit être un nombre valide.';
                 $messageType = 'warning';
             } elseif (!empty($longitude) && !is_numeric($longitude)) {
@@ -80,6 +87,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'])) {
                 
                 if (empty($errors)) {
                     try {
+                        // Catégories cochées dans le formulaire (peut être vide = aucune restriction).
+                        $categoriesAutoriseesSoumises = array_values(array_filter(array_map('trim', $_POST['categories_autorisees'] ?? [])));
+
                         if ($action === 'add') {
                             if (empty($code)) $code = generateBoutiqueId($pdo);
                             $stmt = $pdo->prepare("SELECT COUNT(*) FROM boutique WHERE code_boutique = ?");
@@ -92,6 +102,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'])) {
                                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
                                 $stmt = $pdo->prepare($sql);
                                 $stmt->execute([$code, $nom, $telephone, $email, $pays, $ville, $quartier, $adresse, $latitude ?: null, $longitude ?: null, $etat, $logo, $type_logo]);
+                                foreach ($categoriesAutoriseesSoumises as $catId) {
+                                    $pdo->prepare("INSERT INTO boutique_categorie_autorisee (boutique_id, categorie_id) VALUES (?, ?)")->execute([$code, $catId]);
+                                }
                                 $message = "Boutique « $nom » ajoutée avec succès. Code : $code";
                                 $messageType = 'success';
                             }
@@ -105,6 +118,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'])) {
                                 $sql = "UPDATE boutique SET nom_boutique=?, telephone_boutique=?, email_boutique=?, pays_boutique=?, ville_boutique=?, quartier_boutique=?, adresse_boutique=?, latitude=?, longitude=?, etat_boutique=? WHERE code_boutique = ?";
                                 $stmt = $pdo->prepare($sql);
                                 $stmt->execute([$nom, $telephone, $email, $pays, $ville, $quartier, $adresse, $latitude ?: null, $longitude ?: null, $etat, $oldCode]);
+                            }
+                            // Resynchronisation complète : on retire les anciennes, on remet celles cochées.
+                            $pdo->prepare("DELETE FROM boutique_categorie_autorisee WHERE boutique_id = ?")->execute([$oldCode]);
+                            foreach ($categoriesAutoriseesSoumises as $catId) {
+                                $pdo->prepare("INSERT INTO boutique_categorie_autorisee (boutique_id, categorie_id) VALUES (?, ?)")->execute([$oldCode, $catId]);
                             }
                             $message = "Boutique « $nom » mise à jour.";
                             $messageType = 'success';
@@ -254,6 +272,16 @@ if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $stmt = $pdo->prepare("SELECT * FROM boutique WHERE code_boutique = ?");
     $stmt->execute([$code]);
     $editBoutique = $stmt->fetch(PDO::FETCH_ASSOC);
+}
+
+// Catégories actives (pour la sélection "catégories autorisées" par boutique)
+// et, en édition, celles déjà cochées pour la boutique en cours.
+$categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie = 'ACTIF' ORDER BY titre_categorie")->fetchAll(PDO::FETCH_ASSOC);
+$categoriesAutoriseesActuelles = [];
+if ($editBoutique) {
+    $stmtCatAut = $pdo->prepare("SELECT categorie_id FROM boutique_categorie_autorisee WHERE boutique_id = ?");
+    $stmtCatAut->execute([$editBoutique['code_boutique']]);
+    $categoriesAutoriseesActuelles = $stmtCatAut->fetchAll(PDO::FETCH_COLUMN);
 }
 
 // Statistiques
@@ -604,6 +632,32 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
                                 <option value="Actif" <?= (isset($editBoutique) && $editBoutique['etat_boutique'] === 'Actif') ? 'selected' : '' ?>>Actif</option>
                                 <option value="Inactif" <?= (isset($editBoutique) && $editBoutique['etat_boutique'] === 'Inactif') ? 'selected' : '' ?>>Inactif</option>
                             </select>
+                        </div>
+                    </div>
+
+                    <h6 class="text-uppercase fw-bold mb-3" style="font-size:11px;letter-spacing:0.8px;color:var(--color-primary);display:flex;align-items:center;gap:8px;">
+                        <i class="bi bi-tags-fill"></i> Catégories autorisées
+                    </h6>
+                    <div class="row g-3 mb-4">
+                        <div class="col-12">
+                            <div class="form-text mb-2" style="font-size:11px;color:var(--text-tertiary);">
+                                Laissez tout décoché pour qu'aucune restriction ne s'applique (la boutique gère toutes les catégories, comportement par défaut). Cochez une ou plusieurs catégories pour limiter cette boutique à elles uniquement.
+                            </div>
+                            <div class="d-flex flex-wrap gap-3" style="max-height:160px;overflow-y:auto;padding:8px;border:1px solid var(--border-color);border-radius:8px;">
+                                <?php foreach ($categories as $cat): ?>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="categories_autorisees[]"
+                                           id="cat_<?= e($cat['code_categorie']) ?>" value="<?= e($cat['code_categorie']) ?>"
+                                           <?= in_array($cat['code_categorie'], $categoriesAutoriseesActuelles, true) ? 'checked' : '' ?>>
+                                    <label class="form-check-label" for="cat_<?= e($cat['code_categorie']) ?>" style="font-size:13px;">
+                                        <?= e($cat['titre_categorie']) ?>
+                                    </label>
+                                </div>
+                                <?php endforeach; ?>
+                                <?php if (empty($categories)): ?>
+                                <span class="text-muted" style="font-size:12px;">Aucune catégorie active pour le moment.</span>
+                                <?php endif; ?>
+                            </div>
                         </div>
                     </div>
 

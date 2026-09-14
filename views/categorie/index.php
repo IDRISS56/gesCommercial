@@ -1,6 +1,7 @@
 <?php
 ob_start();
 require 'databases/database.php';
+require_once 'config/upload_validation.php';
 
 if (!isset($_SESSION['user_id'])) {
     header('Location: ../utilisateur/login');
@@ -42,15 +43,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'])) {
             
             $photo = null;
             $type_photo = null;
+            $errors = [];
             if (isset($_FILES['photo']) && $_FILES['photo']['error'] === UPLOAD_ERR_OK) {
-                $photoData = file_get_contents($_FILES['photo']['tmp_name']);
-                if ($photoData !== false) {
-                    $photo = $photoData;
-                    $type_photo = $_FILES['photo']['type'];
+                $validation = validerImageUploadee($_FILES['photo']);
+                if ($validation['ok']) {
+                    $photo = $validation['contenu'];
+                    $type_photo = $validation['type_mime'];
+                } else {
+                    $errors[] = $validation['erreur'];
                 }
             }
-            
-            $errors = [];
+
             if (empty($titre)) $errors[] = 'Le titre est requis.';
             
             if (empty($errors)) {

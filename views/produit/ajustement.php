@@ -22,6 +22,17 @@ if (!$user) {
     header('Location: utilisateur/login');
     exit;
 }
+
+// ==========================================
+// BOUTIQUES AUTORISÉES POUR CET UTILISATEUR
+// Même logique centralisée que vente_comptoir.php (getBoutiquesAutorisees) :
+// le filtrage ne se base que sur la boutique à laquelle l'utilisateur est
+// réellement rattaché (boutique_id), avec les mêmes règles/exceptions que
+// partout ailleurs dans l'application. On évite ainsi une deuxième version
+// de la règle qui pourrait diverger de celle de la vente comptoir.
+// ==========================================
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $user['role'] ?? '', $user['boutique_id'] ?? null);
+
 // - Statuts d'ajustement (exclure les statuts réservés) -
 $statutsReserves = ['008', '009', '010', '011', '012', '016', '017'];
 $statutsAjustement = $pdo->query("SELECT code_statut, titre_statut, type_statut
@@ -37,6 +48,9 @@ FROM produit
 ORDER BY CASE WHEN etat_produit = 'Inactif' THEN 1 ELSE 0 END, titre_produit")->fetchAll(PDO::FETCH_ASSOC);
 
 $boutiquesList = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
+$boutiquesList = array_values(array_filter($boutiquesList, function ($b) use ($boutiquesAutorisees) {
+    return in_array($b['code_boutique'], $boutiquesAutorisees, true);
+}));
 
 // - Traitement POST (ajustement uniquement) -
 $message = '';
@@ -59,6 +73,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (empty($produitId) || empty($boutiqueId) || !in_array($statutId, $statutsCodes) || $quantite <= 0) {
             $message = "Veuillez renseigner le produit, la boutique, le motif et une quantité positive.";
+            $messageType = 'error';
+        } elseif (!in_array($boutiqueId, $boutiquesAutorisees, true)) {
+            $message = "Vous n'êtes pas autorisé à effectuer un ajustement pour cette boutique.";
             $messageType = 'error';
         } elseif ($commentaire === '') {
             $message = "Un commentaire est obligatoire pour justifier ce mouvement (traçabilité).";
@@ -138,25 +155,52 @@ if (empty($_SESSION['csrf_token'])) {
 }
 $csrf_token = $_SESSION['csrf_token'];
 
-// - Historique des ajustements (30 derniers) -
-$historiqueAjustements = $pdo->query("SELECT c.numero_commande, c.produit_id, c.boutique_id, c.statut_id,
-    s.titre_statut, s.type_statut, c.quantite_commande, c.date_commande, c.heure_commande,
-    p.titre_produit, b.nom_boutique
-    FROM commande c
-    LEFT JOIN statut s ON c.statut_id = s.code_statut
-    LEFT JOIN produit p ON c.produit_id = p.code_produit
-    LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
-    WHERE c.statut_id NOT IN ('008','009','010','011','012','016','017')
-    AND c.etat_commande = 'VALIDEE'
-    ORDER BY c.date_commande DESC, c.heure_commande DESC
-    LIMIT 30")->fetchAll(PDO::FETCH_ASSOC);
+// - Historique des ajustements (30 derniers), restreint aux boutiques autorisées -
+if (!empty($boutiquesAutorisees)) {
+    $placeholders = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtHistAj = $pdo->prepare("SELECT c.numero_commande, c.produit_id, c.boutique_id, c.statut_id,
+        s.titre_statut, s.type_statut, c.quantite_commande, c.date_commande, c.heure_commande,
+        p.titre_produit, b.nom_boutique
+        FROM commande c
+        LEFT JOIN statut s ON c.statut_id = s.code_statut
+        LEFT JOIN produit p ON c.produit_id = p.code_produit
+        LEFT JOIN boutique b ON c.boutique_id = b.code_boutique
+        WHERE c.statut_id NOT IN ('008','009','010','011','012','016','017')
+        AND c.etat_commande = 'VALIDEE'
+        AND c.boutique_id IN ($placeholders)
+        ORDER BY c.date_commande DESC, c.heure_commande DESC
+        LIMIT 30");
+    $stmtHistAj->execute($boutiquesAutorisees);
+    $historiqueAjustements = $stmtHistAj->fetchAll(PDO::FETCH_ASSOC);
+} else {
+    $historiqueAjustements = [];
+}
 
-// - Statistiques (mêmes indicateurs que sortie_stock.php, mais sur le périmètre "ajustement") -
+// - Statistiques (mêmes indicateurs que sortie_stock.php, mais sur le périmètre "ajustement"), restreintes aux boutiques autorisées -
 $reservesSql = "'008','009','010','011','012','016','017'";
-$totalAjustements  = $pdo->query("SELECT COUNT(*) FROM commande c WHERE c.statut_id NOT IN ($reservesSql) AND c.etat_commande = 'VALIDEE'")->fetchColumn();
-$ajustAujourdhui   = $pdo->query("SELECT COUNT(*) FROM commande c WHERE c.statut_id NOT IN ($reservesSql) AND c.etat_commande = 'VALIDEE' AND c.date_commande = CURDATE()")->fetchColumn();
-$ajustSemaine      = $pdo->query("SELECT COUNT(*) FROM commande c WHERE c.statut_id NOT IN ($reservesSql) AND c.etat_commande = 'VALIDEE' AND c.date_commande >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)")->fetchColumn();
-$valeurAjust30j    = $pdo->query("SELECT COALESCE(SUM(c.montant_commande),0) FROM commande c WHERE c.statut_id NOT IN ($reservesSql) AND c.etat_commande = 'VALIDEE' AND c.date_commande >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)")->fetchColumn();
+if (!empty($boutiquesAutorisees)) {
+    $placeholders = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtT = $pdo->prepare("SELECT COUNT(*) FROM commande c WHERE c.statut_id NOT IN ($reservesSql) AND c.etat_commande = 'VALIDEE' AND c.boutique_id IN ($placeholders)");
+    $stmtT->execute($boutiquesAutorisees);
+    $totalAjustements = $stmtT->fetchColumn();
+
+    $stmtJ = $pdo->prepare("SELECT COUNT(*) FROM commande c WHERE c.statut_id NOT IN ($reservesSql) AND c.etat_commande = 'VALIDEE' AND c.date_commande = CURDATE() AND c.boutique_id IN ($placeholders)");
+    $stmtJ->execute($boutiquesAutorisees);
+    $ajustAujourdhui = $stmtJ->fetchColumn();
+
+    $stmtS = $pdo->prepare("SELECT COUNT(*) FROM commande c WHERE c.statut_id NOT IN ($reservesSql) AND c.etat_commande = 'VALIDEE' AND c.date_commande >= DATE_SUB(CURDATE(), INTERVAL 7 DAY) AND c.boutique_id IN ($placeholders)");
+    $stmtS->execute($boutiquesAutorisees);
+    $ajustSemaine = $stmtS->fetchColumn();
+
+    $stmtV = $pdo->prepare("SELECT COALESCE(SUM(c.montant_commande),0) FROM commande c WHERE c.statut_id NOT IN ($reservesSql) AND c.etat_commande = 'VALIDEE' AND c.date_commande >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND c.boutique_id IN ($placeholders)");
+    $stmtV->execute($boutiquesAutorisees);
+    $valeurAjust30j = $stmtV->fetchColumn();
+} else {
+    $totalAjustements = 0;
+    $ajustAujourdhui = 0;
+    $ajustSemaine = 0;
+    $valeurAjust30j = 0;
+}
 
 $stats = [
     ['suc', 'arrow-left-right',   'Total mouvements',   $totalAjustements, false],

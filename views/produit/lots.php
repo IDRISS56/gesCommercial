@@ -124,7 +124,7 @@ function getLotsTableContent($pdo, $search, $filtres, $page, $perPage = 20) {
         <td class="text-end">
             <div class="d-inline-flex gap-1">
                 <button type="button" class="act-btn e editLotBtn" data-code="<?= e($l['code_lot']) ?>" title="Modifier"><i class="bi bi-pencil"></i></button>
-                <button type="button" class="act-btn d toggleLotBtn" data-code="<?= e($l['code_lot']) ?>" data-produit="<?= e($l['titre_produit'] ?? $l['code_produit']) ?>" title="Activer/Désactiver"><i class="bi bi-power"></i></button>
+                <button type="button" class="act-btn d deleteLotBtn" data-code="<?= e($l['code_lot']) ?>" data-produit="<?= e($l['titre_produit'] ?? $l['code_produit']) ?>" title="Supprimer"><i class="bi bi-trash"></i></button>
             </div>
         </td>
     </tr>
@@ -320,17 +320,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             exit;
         }
 
-        // ----- Activer / désactiver un lot -----
-        if ($action === 'toggle_lot') {
+        // ----- Supprimer un lot -----
+        if ($action === 'delete_lot') {
             $codeLot = trim($_POST['code_lot'] ?? '');
             if ($codeLot === '') throw new Exception("Lot manquant.");
-            $stmt = $pdo->prepare("SELECT etat_lot FROM lot WHERE code_lot = ?");
+
+            $stmt = $pdo->prepare("SELECT code_lot FROM lot WHERE code_lot = ?");
             $stmt->execute([$codeLot]);
-            $etatActuel = $stmt->fetchColumn();
-            if ($etatActuel === false) throw new Exception("Lot introuvable.");
-            $nouvelEtat = ($etatActuel === 'Actif') ? 'Inactif' : 'Actif';
-            $pdo->prepare("UPDATE lot SET etat_lot = ? WHERE code_lot = ?")->execute([$nouvelEtat, $codeLot]);
-            echo json_encode(['success' => true, 'message' => "Lot " . strtolower($nouvelEtat) . ".", 'etat' => $nouvelEtat]);
+            if ($stmt->fetchColumn() === false) throw new Exception("Lot introuvable.");
+
+            // Un lot déjà utilisé dans un mouvement/une vente/un achat historique
+            // ne doit pas être supprimé : ça laisserait ces documents pointer
+            // vers un lot qui n'existe plus. Dans ce cas, on refuse la
+            // suppression plutôt que de casser l'historique.
+            $stmtUsage = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE lot_id = ?");
+            $stmtUsage->execute([$codeLot]);
+            if ((int) $stmtUsage->fetchColumn() > 0) {
+                throw new Exception("Ce lot a déjà été utilisé dans des mouvements de stock et ne peut pas être supprimé (l'historique en dépend).");
+            }
+
+            $pdo->prepare("DELETE FROM lot WHERE code_lot = ?")->execute([$codeLot]);
+            echo json_encode(['success' => true, 'message' => 'Lot supprimé.']);
             exit;
         }
 
@@ -650,18 +660,18 @@ $produitsConfigures = (int)$pdo->query("SELECT COUNT(DISTINCT produit_id) FROM l
     </div>
 </div>
 
-<!-- Modal confirmation activer/désactiver -->
+<!-- Modal confirmation suppression -->
 <div class="modal fade" id="toggleConfirmModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered modal-md">
         <div class="modal-content" style="border-radius:16px;border:none;">
             <div class="modal-body text-center p-4">
-                <div class="mb-3"><i class="bi bi-power text-warning" style="font-size:3rem;"></i></div>
-                <h5 class="mb-2 fw-bold">Changer l'état du lot</h5>
-                <p class="text-muted small mb-4">Voulez-vous vraiment changer l'état du lot <strong id="toggleLotNom" class="text-primary"></strong> ?</p>
+                <div class="mb-3"><i class="bi bi-trash text-danger" style="font-size:3rem;"></i></div>
+                <h5 class="mb-2 fw-bold">Supprimer le lot</h5>
+                <p class="text-muted small mb-4">Voulez-vous vraiment supprimer le lot <strong id="toggleLotNom" class="text-primary"></strong> ? Cette action est irréversible.</p>
                 <div class="d-flex gap-2 justify-content-center">
                     <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">Annuler</button>
-                    <button type="button" class="btn btn-warning rounded-3" id="confirmToggleBtn">
-                        <i class="bi bi-power me-1"></i> Confirmer
+                    <button type="button" class="btn btn-danger rounded-3" id="confirmToggleBtn">
+                        <i class="bi bi-trash me-1"></i> Supprimer
                     </button>
                 </div>
             </div>
@@ -888,19 +898,19 @@ $(document).ready(function() {
         });
     });
 
-    // --------- Confirmation activer/désactiver ---------
-    var codeLotToToggle = null;
-    $(document).on('click', '.toggleLotBtn', function() {
-        codeLotToToggle = $(this).data('code');
+    // --------- Confirmation suppression ---------
+    var codeLotToDelete = null;
+    $(document).on('click', '.deleteLotBtn', function() {
+        codeLotToDelete = $(this).data('code');
         $('#toggleLotNom').text($(this).data('produit') || '');
         toggleModal.show();
     });
 
     $('#confirmToggleBtn').on('click', function() {
-        if (!codeLotToToggle) return;
-        $.post(window.location.href, { action: 'toggle_lot', csrf_token: CSRF, code_lot: codeLotToToggle }, function(res) {
+        if (!codeLotToDelete) return;
+        $.post(window.location.href, { action: 'delete_lot', csrf_token: CSRF, code_lot: codeLotToDelete }, function(res) {
             toggleModal.hide();
-            showToast(res.message || (res.success ? 'État modifié.' : 'Erreur'), res.success ? 'success' : 'error');
+            showToast(res.message || (res.success ? 'Lot supprimé.' : 'Erreur'), res.success ? 'success' : 'error');
             if (res.success) rechercher(currentPage);
         }, 'json').fail(function() {
             toggleModal.hide();

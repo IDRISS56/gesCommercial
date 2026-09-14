@@ -23,6 +23,8 @@ if (!function_exists('calculerEtatProduit')) {
     }
 }
 
+require_once __DIR__ . '/id_generator.php';
+
 if (!function_exists('enregistrerMouvementStock')) {
     /**
      * Enregistre un mouvement de stock immédiat (hors achat/vente qui suivent
@@ -93,30 +95,32 @@ if (!function_exists('enregistrerMouvementStock')) {
                 );
             }
 
-            // Générer un numéro de commande
-            $jour = date('Ymd');
-            $stmtCode = $pdo->prepare("SELECT COUNT(*) FROM commande WHERE numero_commande LIKE ?");
-            $stmtCode->execute(["MV-$jour-%"]);
-            $numero_commande = sprintf('MV-%s-%03d', $jour, ((int) $stmtCode->fetchColumn()) + 1);
-
-            // Insérer la commande (mouvement) avec les colonnes existantes
-            $pdo->prepare(
-                "INSERT INTO commande
-                    (numero_commande, produit_id, boutique_id, statut_id,
-                     date_commande, heure_commande, prix_achat, prix_commande,
-                     quantite_commande, montant_commande,
-                     utilisateur_id, etat_commande)
-                 VALUES (?, ?, ?, ?, CURDATE(), CURTIME(), ?, 0, ?, ?, ?, 'VALIDEE')"
-            )->execute([
-                $numero_commande,
-                $produit_id,
-                $boutique_id,
-                $statut_id,
-                $prix_unitaire,
-                $quantite,
-                $quantite * $prix_unitaire,
-                $utilisateur_id,
-            ]);
+            // Générer un numéro de commande et l'insérer, avec réessai
+            // automatique en cas de collision entre deux mouvements
+            // simultanés (voir databases/id_generator.php — pas de table
+            // supplémentaire, juste un retry sur la contrainte PRIMARY KEY
+            // déjà existante sur numero_commande).
+            $numero_commande = genererEtInsererIdSequence($pdo, 'MV', function (string $numero) use (
+                $pdo, $produit_id, $boutique_id, $statut_id, $prix_unitaire, $quantite, $utilisateur_id
+            ) {
+                $pdo->prepare(
+                    "INSERT INTO commande
+                        (numero_commande, produit_id, boutique_id, statut_id,
+                         date_commande, heure_commande, prix_achat, prix_commande,
+                         quantite_commande, montant_commande,
+                         utilisateur_id, etat_commande)
+                     VALUES (?, ?, ?, ?, CURDATE(), CURTIME(), ?, 0, ?, ?, ?, 'VALIDEE')"
+                )->execute([
+                    $numero,
+                    $produit_id,
+                    $boutique_id,
+                    $statut_id,
+                    $prix_unitaire,
+                    $quantite,
+                    $quantite * $prix_unitaire,
+                    $utilisateur_id,
+                ]);
+            }, 3);
 
             // Mettre à jour le stock dans la table `stock`
             $pdo->prepare(

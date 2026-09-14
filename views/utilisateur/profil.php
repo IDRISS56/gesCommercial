@@ -536,7 +536,7 @@ h1, h2, h3, h4, h5, h6 {
                 <form method="post" style="display:inline;">
                     <input type="hidden" name="action" value="deconnexion">
                     <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
-                    <button type="submit" class="btn-chic btn-chic-danger" formtarget="_top">
+                    <button hidden class="btn-chic btn-chic-danger" formtarget="_top">
                         <i class="bi bi-box-arrow-right"></i>
                         <span>Déconnexion</span>
                     </button>

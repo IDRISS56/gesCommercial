@@ -11,7 +11,7 @@ class rapport
 
     public function rapportFinancier()
     {
-        requirePermission(['Administrateur', 'Superviseur','Proprietaire']);
+        requirePermission(['Administrateur', 'Superviseur','Proprietaire', 'Caisse']);
         include "views/rapport/rapport_financier.php";
     }
 

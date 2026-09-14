@@ -4,6 +4,14 @@
 // ==========================================
 require 'databases/database.php';
 require 'librairies/fpdf/fpdf.php';
+require_once 'config/csrf.php';
+
+// Boutiques que cet utilisateur a le droit de voir (bons de livraison limités
+// à ces boutiques pour Vendeur/Caisse/Proprietaire ; toutes pour
+// Administrateur/Superviseur). La boutique d'un bon de livraison se déduit
+// des lignes `commande` de sa facture (bon_livraison n'a pas de boutique_id
+// propre).
+$boutiquesAutorisees = getBoutiquesAutorisees($pdo, $_SESSION['role'] ?? null, $_SESSION['boutique_id'] ?? null);
 
 // ==========================================
 // 2. GÉNÉRATION DU PDF (mode Portrait)
@@ -30,6 +38,13 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
             WHERE c.facture_id = ?");
         $stmtCmd->execute([$bon['facture_id']]);
         $commandes = $stmtCmd->fetchAll(PDO::FETCH_ASSOC);
+
+        // Sécurité : un utilisateur ne peut imprimer que les bons de livraison
+        // d'une boutique à laquelle il a accès.
+        $boutiquesLignesPdfBL = array_unique(array_filter(array_column($commandes, 'boutique_id')));
+        if (!empty($boutiquesLignesPdfBL) && !array_intersect($boutiquesLignesPdfBL, $boutiquesAutorisees)) {
+            die("Accès refusé : ce bon de livraison appartient à une autre boutique.");
+        }
 
         $boutique_id = $commandes[0]['boutique_id'] ?? null;
         if (empty($boutique_id) && !empty($bon['utilisateur_id'] ?? null)) {
@@ -76,6 +91,41 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
         }
         function MultiCell($w, $h, $txt, $border = 0, $align = 'J', $fill = false) {
             parent::MultiCell($w, $h, $this->txt($txt), $border, $align, $fill);
+        }
+        // Calcule le nombre RÉEL de lignes qu'occupera un MultiCell(w, ..., txt)
+        // une fois converti dans l'encodage imprimé — remplace l'estimation
+        // approximative par nombre de caractères (strlen/22) qui sous-évaluait
+        // la hauteur de certaines lignes et causait un chevauchement de texte
+        // avec la ligne suivante du tableau.
+        function NbLines($w, $txt) {
+            $txt = $this->txt($txt);
+            $cw = &$this->CurrentFont['cw'];
+            if ($w == 0) $w = $this->w - $this->rMargin - $this->x;
+            $wmax = ($w - 2 * $this->cMargin) * 1000 / $this->FontSize;
+            $s = str_replace("\r", '', $txt);
+            $nb = strlen($s);
+            if ($nb > 0 && $s[$nb - 1] == "\n") $nb--;
+            $sep = -1; $i = 0; $j = 0; $l = 0; $nl = 1;
+            while ($i < $nb) {
+                $c = $s[$i];
+                if ($c == "\n") {
+                    $i++; $sep = -1; $j = $i; $l = 0; $nl++;
+                    continue;
+                }
+                if ($c == ' ') $sep = $i;
+                $l += $cw[$c] ?? 500;
+                if ($l > $wmax) {
+                    if ($sep == -1) {
+                        if ($i == $j) $i++;
+                    } else {
+                        $i = $sep + 1;
+                    }
+                    $sep = -1; $j = $i; $l = 0; $nl++;
+                } else {
+                    $i++;
+                }
+            }
+            return $nl;
         }
     }
 
@@ -146,14 +196,14 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $yAfterDest = $pdf->GetY();
     $pdf->SetY(max($yAfterExp, $yAfterDest) + 6);
 
-    $widths = ['ref' => 18, 'design' => 40, 'lot' => 18, 'qte' => 32, 'livreur' => 18, 'controleur' => 20, 'responsable' => 24, 'visa' => 20];
+    $widths = ['ref' => 18, 'design' => 55, 'lot' => 15, 'qte' => 30, 'livreur' => 16, 'controleur' => 18, 'responsable' => 22, 'visa' => 16];
     $pdf->SetFillColor($navy[0], $navy[1], $navy[2]);
     $pdf->SetTextColor(255, 255, 255);
     $pdf->SetFont('Arial', 'B', 8);
     $pdf->Cell($widths['ref'], 7, 'REF.', 0, 0, 'C', true);
     $pdf->Cell($widths['design'], 7, 'DESIGNATION', 0, 0, 'C', true);
     $pdf->Cell($widths['lot'], 7, 'CARTON/UNITE', 0, 0, 'C', true);
-    $pdf->Cell($widths['qte'], 7, 'QUANTITE', 0, 0, 'C', true);
+    $pdf->Cell($widths['qte'], 7, 'QTE', 0, 0, 'C', true);
     $pdf->Cell($widths['livreur'], 7, 'LIVREUR', 0, 0, 'C', true);
     $pdf->Cell($widths['controleur'], 7, 'CONTROLEUR', 0, 0, 'C', true);
     $pdf->Cell($widths['responsable'], 7, 'RESPONSABLE', 0, 0, 'C', true);
@@ -176,7 +226,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
             $qteAffichee = $cmd['quantite_commande'] . ' Pièce(s)';
         }
         $totalBase += $cmd['quantite_commande'];
-        $nbLines = max(1, ceil(strlen($designation) / 22));
+        $nbLines = max(1, $pdf->NbLines($widths['ref'], $ref), $pdf->NbLines($widths['design'], $designation));
         $rowHeight = 6 * $nbLines;
         if ($pdf->GetY() + $rowHeight > 270) $pdf->AddPage();
         $x = $pdf->GetX(); $y = $pdf->GetY();
@@ -216,7 +266,26 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
 // 3. TRAITEMENT DES ACTIONS (AJAX / POST)
 // ==========================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    verifierCsrfToken();
     $action = $_POST['action'];
+
+    if ($action === 'liste_bons') {
+        $page = max(1, (int) ($_POST['page'] ?? 1));
+        $filtres = [
+            'statut' => trim($_POST['statut'] ?? ''),
+            'etat_facture' => trim($_POST['etat_facture'] ?? ''),
+            'statut_facture' => trim($_POST['statut_facture'] ?? ''),
+        ];
+        $resultat = getBonsListe($pdo, $boutiquesAutorisees, $filtres, $page);
+        header('Content-Type: application/json');
+        echo json_encode([
+            'success' => true,
+            'html' => $resultat['html'],
+            'pagination' => $resultat['pagination'],
+            'total' => $resultat['total'],
+        ]);
+        exit;
+    }
 
     if ($action === 'get_details') {
         $id = $_POST['id'];
@@ -229,6 +298,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $stmt->execute([$id]);
         $bon = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$bon) { echo json_encode(['error' => 'Bon introuvable']); exit; }
+
+        // Sécurité : un utilisateur ne peut ouvrir que les bons de livraison
+        // d'une boutique à laquelle il a accès.
+        $stmtBoutBL = $pdo->prepare("SELECT DISTINCT boutique_id FROM commande WHERE facture_id = ?");
+        $stmtBoutBL->execute([$bon['facture_id']]);
+        $boutiquesLignesBL = array_unique(array_filter($stmtBoutBL->fetchAll(PDO::FETCH_COLUMN)));
+        if (!empty($boutiquesLignesBL) && !array_intersect($boutiquesLignesBL, $boutiquesAutorisees)) {
+            echo json_encode(['error' => 'Accès refusé : ce bon de livraison appartient à une autre boutique.']); exit;
+        }
+
         $isLocked = false;
         if ($bon['statut_facture'] === 'Validee' && in_array(strtolower($bon['etat_facture']), ['payee', 'payee cash'])) {
             $isLocked = true;
@@ -281,12 +360,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         header('Content-Type: application/json');
         $id = $_POST['id'] ?? '';
         if (empty($id)) { echo json_encode(['success' => false, 'error' => 'ID manquant']); exit; }
-        $checkStmt = $pdo->prepare("SELECT bl.statut_facture, bl.etat_facture
+        $checkStmt = $pdo->prepare("SELECT bl.statut_facture, bl.etat_facture, bl.facture_id
             FROM bon_livraison bl
             LEFT JOIN facture f ON f.numero_facture = bl.facture_id
             WHERE bl.code_bon = ?");
         $checkStmt->execute([$id]);
         $bData = $checkStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$bData) { echo json_encode(['success' => false, 'error' => 'Bon introuvable']); exit; }
+        $stmtBoutDel = $pdo->prepare("SELECT DISTINCT boutique_id FROM commande WHERE facture_id = ?");
+        $stmtBoutDel->execute([$bData['facture_id']]);
+        $boutiquesLignesDel = array_unique(array_filter($stmtBoutDel->fetchAll(PDO::FETCH_COLUMN)));
+        if (!empty($boutiquesLignesDel) && !array_intersect($boutiquesLignesDel, $boutiquesAutorisees)) {
+            echo json_encode(['success' => false, 'error' => 'Accès refusé : ce bon de livraison appartient à une autre boutique.']); exit;
+        }
         $isLocked = $bData && $bData['statut_facture'] === 'Validee'
             && in_array(strtolower($bData['etat_facture']), ['payee', 'payee cash']);
         if ($isLocked) {
@@ -323,15 +409,201 @@ function getEtatFactureBadge($etat) {
     return ['secondary', 'question-circle'];
 }
 
-$bons = $pdo->query("SELECT bl.*, f.montant_ttc, f.etat_facture, f.statut_facture, c.nom_prenom_contact
-    FROM bon_livraison bl
-    LEFT JOIN facture f ON f.numero_facture = bl.facture_id
-    LEFT JOIN contact c ON c.code_contact = f.contact_id
-    ORDER BY bl.date_livraison DESC")->fetchAll(PDO::FETCH_ASSOC);
-$totalBons = count($bons);
-$enPreparation = count(array_filter($bons, fn($b) => $b['statut'] === 'En préparation'));
-$expedies = count(array_filter($bons, fn($b) => $b['statut'] === 'Expédié'));
-$livres = count(array_filter($bons, fn($b) => $b['statut'] === 'Livré'));
+/**
+ * Rendu HTML d'une carte "bon de livraison". Extrait dans une fonction
+ * réutilisable pour servir à la fois le chargement initial de la page ET
+ * les rafraîchissements AJAX paginés (voir getBonsListe ci-dessous) —
+ * auparavant ce même balisage était dupliqué entre les deux.
+ */
+function renderBonCard(array $bon): string {
+    $statutBadge = getStatutBadge($bon['statut']);
+    $isLivre = ($bon['statut'] === 'Livré');
+    $etatFactureBadge = getEtatFactureBadge($bon['etat_facture'] ?? 'Impayee');
+    $isLocked = ($bon['statut_facture'] === 'Validee' && in_array(strtolower($bon['etat_facture']), ['payee', 'payee cash']));
+    $peutSupprimer = ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur');
+
+    ob_start();
+    ?>
+    <div class="col-12 col-md-6 col-lg-4 col-xl-3 bon-item"
+         data-statut="<?= htmlspecialchars($bon['statut']) ?>"
+         data-etat-facture="<?= htmlspecialchars($bon['etat_facture'] ?? '') ?>"
+         data-statut-facture="<?= htmlspecialchars($bon['statut_facture'] ?? '') ?>"
+         data-id="<?= htmlspecialchars($bon['code_bon']) ?>">
+        <div class="bon-card <?= $isLivre ? 'livre' : '' ?>">
+            <div class="bc-top">
+                <div>
+                    <div class="bc-number"><?= htmlspecialchars($bon['code_bon']) ?></div>
+                    <div class="bc-date"><i class="bi bi-calendar3"></i> <?= date('d/m/Y', strtotime($bon['date_livraison'])) ?></div>
+                </div>
+                <?php if (!empty($bon['montant_ttc'])): ?>
+                <div class="fc-amount" style="font-size:14px;font-weight:800;color:var(--color-primary);font-family:'Outfit',sans-serif;line-height:1;">
+                    <?= number_format($bon['montant_ttc'], 0, ',', ' ') ?><small style="font-size:9px;color:var(--text-tertiary);margin-left:2px;">FCFA</small>
+                </div>
+                <?php endif; ?>
+            </div>
+            <div class="bc-middle">
+                <div class="bc-client">
+                    <i class="bi bi-person"></i>
+                    <span><?= htmlspecialchars($bon['nom_prenom_contact'] ?? 'N/C') ?></span>
+                </div>
+                <?php if (!empty($bon['adresse_livraison'])): ?>
+                <div class="bc-address" title="<?= htmlspecialchars($bon['adresse_livraison']) ?>">
+                    <i class="bi bi-geo-alt"></i>
+                    <span><?= htmlspecialchars($bon['adresse_livraison']) ?></span>
+                </div>
+                <?php endif; ?>
+                <div class="bc-badges">
+                    <span class="badge-pill bg-<?= $statutBadge[0] ?>-subtle text-<?= $statutBadge[0] ?>">
+                        <i class="bi bi-<?= $statutBadge[1] ?>" style="font-size:8px;"></i> <?= htmlspecialchars($bon['statut']) ?>
+                    </span>
+                    <?php if (!empty($bon['etat_facture'])): ?>
+                    <span class="badge-pill bg-<?= $etatFactureBadge[0] ?>-subtle text-<?= $etatFactureBadge[0] ?>">
+                        <i class="bi bi-<?= $etatFactureBadge[1] ?>" style="font-size:8px;"></i> <?= $bon['etat_facture'] ?>
+                    </span>
+                    <?php endif; ?>
+                    <?php if (!empty($bon['transporteur'])): ?>
+                    <span class="badge-pill bg-info-subtle text-info">
+                        <i class="bi bi-truck" style="font-size:8px;"></i> <?= htmlspecialchars($bon['transporteur']) ?>
+                    </span>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <div class="bc-bottom">
+                <button class="icon-btn view voir-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="Voir détails" title="Voir détails"><i class="bi bi-eye"></i></button>
+                <button class="icon-btn pdf pdf-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="PDF" title="PDF"><i class="bi bi-file-pdf"></i></button>
+                <?php if ($peutSupprimer): ?>
+                <?php if (!$isLocked): ?>
+                <button class="icon-btn delete supprimer-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="Supprimer" title="Supprimer"><i class="bi bi-trash"></i></button>
+                <?php else: ?>
+                <button class="icon-btn delete" disabled data-tooltip="Verrouillé" title="Verrouillé (facture payée)" style="opacity:0.4;cursor:not-allowed;"><i class="bi bi-lock-fill"></i></button>
+                <?php endif; ?>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+/**
+ * Liste paginée des bons de livraison (remplace le chargement complet de
+ * TOUS les bons en une seule requête, qui devenait de plus en plus lent à
+ * mesure que l'historique grandissait).
+ */
+function getBonsListe(PDO $pdo, array $boutiquesAutorisees, array $filtres, int $page, int $perPage = 24): array {
+    if (empty($boutiquesAutorisees)) {
+        return ['html' => '', 'pagination' => '', 'total' => 0, 'page' => 1, 'totalPages' => 1];
+    }
+
+    $inPh = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $where = "WHERE EXISTS (SELECT 1 FROM commande cm WHERE cm.facture_id = bl.facture_id AND cm.boutique_id IN ($inPh))";
+    $params = $boutiquesAutorisees;
+
+    if (!empty($filtres['statut'])) {
+        $where .= " AND bl.statut = ?";
+        $params[] = $filtres['statut'];
+    }
+    if (!empty($filtres['etat_facture'])) {
+        $where .= " AND f.etat_facture = ?";
+        $params[] = $filtres['etat_facture'];
+    }
+    if (!empty($filtres['statut_facture'])) {
+        $where .= " AND f.statut_facture = ?";
+        $params[] = $filtres['statut_facture'];
+    }
+
+    $baseSql = "FROM bon_livraison bl
+        LEFT JOIN facture f ON f.numero_facture = bl.facture_id
+        LEFT JOIN contact c ON c.code_contact = f.contact_id
+        $where";
+
+    $stmtCount = $pdo->prepare("SELECT COUNT(*) $baseSql");
+    $stmtCount->execute($params);
+    $total = (int) $stmtCount->fetchColumn();
+    $totalPages = max(1, (int) ceil($total / $perPage));
+    if ($page > $totalPages) $page = $totalPages;
+    if ($page < 1) $page = 1;
+
+    $sql = "SELECT bl.*, f.montant_ttc, f.etat_facture, f.statut_facture, c.nom_prenom_contact
+            $baseSql
+            ORDER BY bl.date_livraison DESC
+            LIMIT " . (($page - 1) * $perPage) . ", $perPage";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $bons = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    if (empty($bons)) {
+        $html = '<div class="col-12"><div class="bg-white border border-dashed rounded-3 p-5 text-center text-muted">'
+              . '<i class="bi bi-inbox d-block mb-2" style="font-size:56px;opacity:.2;"></i>'
+              . '<h5 class="text-dark">Aucun bon de livraison</h5>'
+              . '<p class="small mb-0">Les bons de livraison apparaîtront ici dès leur création.</p></div></div>';
+    } else {
+        $html = '';
+        foreach ($bons as $bon) {
+            $html .= renderBonCard($bon);
+        }
+    }
+
+    ob_start();
+    if ($totalPages > 1):
+    ?>
+    <div class="d-flex flex-wrap align-items-center justify-content-between p-3 border-top bg-light rounded-3 mt-2">
+        <span class="text-muted small">Affichage de <?= (($page - 1) * $perPage + 1) ?> à <?= min($page * $perPage, $total) ?> sur <?= $total ?></span>
+        <nav>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
+                    <a class="page-link" href="#" data-page="<?= $page - 1 ?>"><i class="bi bi-chevron-left"></i></a>
+                </li>
+                <?php
+                $start = max(1, $page - 2);
+                $end = min($totalPages, $page + 2);
+                if ($start > 1) {
+                    echo '<li class="page-item"><a class="page-link" href="#" data-page="1">1</a></li>';
+                    if ($start > 2) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+                }
+                for ($i = $start; $i <= $end; $i++):
+                ?>
+                <li class="page-item <?= ($i == $page) ? 'active' : '' ?>">
+                    <a class="page-link" href="#" data-page="<?= $i ?>"><?= $i ?></a>
+                </li>
+                <?php endfor;
+                if ($end < $totalPages) {
+                    if ($end < $totalPages - 1) echo '<li class="page-item disabled"><span class="page-link">…</span></li>';
+                    echo '<li class="page-item"><a class="page-link" href="#" data-page="' . $totalPages . '">' . $totalPages . '</a></li>';
+                }
+                ?>
+                <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
+                    <a class="page-link" href="#" data-page="<?= $page + 1 ?>"><i class="bi bi-chevron-right"></i></a>
+                </li>
+            </ul>
+        </nav>
+    </div>
+    <?php endif;
+    $paginationHtml = ob_get_clean();
+
+    return ['html' => $html, 'pagination' => $paginationHtml, 'total' => $total, 'page' => $page, 'totalPages' => $totalPages];
+}
+
+if (empty($boutiquesAutorisees)) {
+    $totalBons = 0; $enPreparation = 0; $expedies = 0; $livres = 0;
+} else {
+    $inPhBL = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+    $stmtStats = $pdo->prepare("SELECT bl.statut, COUNT(*) as n
+        FROM bon_livraison bl
+        WHERE EXISTS (SELECT 1 FROM commande cm WHERE cm.facture_id = bl.facture_id AND cm.boutique_id IN ($inPhBL))
+        GROUP BY bl.statut");
+    $stmtStats->execute($boutiquesAutorisees);
+    $statsParStatut = array_column($stmtStats->fetchAll(PDO::FETCH_ASSOC), 'n', 'statut');
+    $totalBons = array_sum($statsParStatut);
+    $enPreparation = $statsParStatut['En préparation'] ?? 0;
+    $expedies = $statsParStatut['Expédié'] ?? 0;
+    $livres = $statsParStatut['Livré'] ?? 0;
+}
+
+// Chargement initial : seulement la première page (voir getBonsListe ci-dessus).
+// Le reste se charge à la demande via l'action AJAX 'liste_bons'.
+$listeInitiale = getBonsListe($pdo, $boutiquesAutorisees, [], 1);
+$bons = null; // n'est plus utilisé directement dans le HTML ci-dessous (voir $listeInitiale)
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -676,80 +948,8 @@ $livres = count(array_filter($bons, fn($b) => $b['statut'] === 'Livré'));
     </div>
 
     <!-- Liste des bons -->
-    <div class="row g-3" id="bonsGrid">
-        <?php if (empty($bons)): ?>
-        <div class="col-12">
-            <div class="bg-white border border-dashed rounded-3 p-5 text-center text-muted">
-                <i class="bi bi-inbox d-block mb-2" style="font-size:56px;opacity:.2;"></i>
-                <h5 class="text-dark">Aucun bon de livraison</h5>
-                <p class="small mb-0">Les bons de livraison apparaîtront ici dès leur création.</p>
-            </div>
-        </div>
-        <?php else: foreach($bons as $bon):
-            $statutBadge = getStatutBadge($bon['statut']);
-            $isLivre = ($bon['statut'] === 'Livré');
-            $etatFactureBadge = getEtatFactureBadge($bon['etat_facture'] ?? 'Impayee');
-            $isLocked = ($bon['statut_facture'] === 'Validee' && in_array(strtolower($bon['etat_facture']), ['payee', 'payee cash']));
-        ?>
-        <div class="col-12 col-md-6 col-lg-4 col-xl-3 bon-item"
-             data-statut="<?= htmlspecialchars($bon['statut']) ?>"
-             data-etat-facture="<?= htmlspecialchars($bon['etat_facture'] ?? '') ?>"
-             data-statut-facture="<?= htmlspecialchars($bon['statut_facture'] ?? '') ?>"
-             data-id="<?= htmlspecialchars($bon['code_bon']) ?>">
-            <div class="bon-card <?= $isLivre ? 'livre' : '' ?>">
-                <div class="bc-top">
-                    <div>
-                        <div class="bc-number"><?= htmlspecialchars($bon['code_bon']) ?></div>
-                        <div class="bc-date"><i class="bi bi-calendar3"></i> <?= date('d/m/Y', strtotime($bon['date_livraison'])) ?></div>
-                    </div>
-                    <?php if (!empty($bon['montant_ttc'])): ?>
-                    <div class="fc-amount" style="font-size:14px;font-weight:800;color:var(--color-primary);font-family:'Outfit',sans-serif;line-height:1;">
-                        <?= number_format($bon['montant_ttc'], 0, ',', ' ') ?><small style="font-size:9px;color:var(--text-tertiary);margin-left:2px;">FCFA</small>
-                    </div>
-                    <?php endif; ?>
-                </div>
-                <div class="bc-middle">
-                    <div class="bc-client">
-                        <i class="bi bi-person"></i>
-                        <span><?= htmlspecialchars($bon['nom_prenom_contact'] ?? 'N/C') ?></span>
-                    </div>
-                    <?php if (!empty($bon['adresse_livraison'])): ?>
-                    <div class="bc-address" title="<?= htmlspecialchars($bon['adresse_livraison']) ?>">
-                        <i class="bi bi-geo-alt"></i>
-                        <span><?= htmlspecialchars($bon['adresse_livraison']) ?></span>
-                    </div>
-                    <?php endif; ?>
-                    <div class="bc-badges">
-                        <span class="badge-pill bg-<?= $statutBadge[0] ?>-subtle text-<?= $statutBadge[0] ?>">
-                            <i class="bi bi-<?= $statutBadge[1] ?>" style="font-size:8px;"></i> <?= htmlspecialchars($bon['statut']) ?>
-                        </span>
-                        <?php if (!empty($bon['etat_facture'])): ?>
-                        <span class="badge-pill bg-<?= $etatFactureBadge[0] ?>-subtle text-<?= $etatFactureBadge[0] ?>">
-                            <i class="bi bi-<?= $etatFactureBadge[1] ?>" style="font-size:8px;"></i> <?= $bon['etat_facture'] ?>
-                        </span>
-                        <?php endif; ?>
-                        <?php if (!empty($bon['transporteur'])): ?>
-                        <span class="badge-pill bg-info-subtle text-info">
-                            <i class="bi bi-truck" style="font-size:8px;"></i> <?= htmlspecialchars($bon['transporteur']) ?>
-                        </span>
-                        <?php endif; ?>
-                    </div>
-                </div>
-                <div class="bc-bottom">
-                    <button class="icon-btn view voir-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="Voir détails" title="Voir détails"><i class="bi bi-eye"></i></button>
-                    <button class="icon-btn pdf pdf-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="PDF" title="PDF"><i class="bi bi-file-pdf"></i></button>
-                    <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur'): ?>
-                    <?php if (!$isLocked): ?>
-                    <button class="icon-btn delete supprimer-bon" data-id="<?= $bon['code_bon'] ?>" data-tooltip="Supprimer" title="Supprimer"><i class="bi bi-trash"></i></button>
-                    <?php else: ?>
-                    <button class="icon-btn delete" disabled data-tooltip="Verrouillé" title="Verrouillé (facture payée)" style="opacity:0.4;cursor:not-allowed;"><i class="bi bi-lock-fill"></i></button>
-                    <?php endif; ?>
-                    <?php endif; ?>
-                </div>
-            </div>
-        </div>
-        <?php endforeach; endif; ?>
-    </div>
+    <div class="row g-3" id="bonsGrid"><?= $listeInitiale['html'] ?></div>
+    <div id="bonsPagination"><?= $listeInitiale['pagination'] ?></div>
 </div>
 
 <!-- Modal détails chic -->
@@ -772,7 +972,7 @@ $livres = count(array_filter($bons, fn($b) => $b['statut'] === 'Livré'));
                 <?php endif; ?>
                 <button class="btn-chic btn-chic-imprimer" id="btnImprimer"><i class="bi bi-printer-fill"></i><span>Imprimer PDF</span></button>
                 <button class="btn-chic btn-chic-imprimer" id="btnTelecharger"><i class="bi bi-download"></i><span>Télécharger PDF</span></button>
-                <button class="btn-chic btn-chic-partager" hidden id="btnPartager"><i class="bi bi-whatsapp"></i><span>Partager</span></button>
+                <button class="btn-chic btn-chic-partager" id="btnPartager" style="position: relative;"><i class="bi bi-whatsapp"></i><span>Partager</span></button>
                 <button class="btn-chic btn-chic-fermer" data-bs-dismiss="modal"><i class="bi bi-x-lg"></i><span>Fermer</span></button>
             </div>
         </div>
@@ -820,6 +1020,17 @@ $livres = count(array_filter($bons, fn($b) => $b['statut'] === 'Livré'));
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
 <script>
+const csrfTokenJs = <?= json_encode(csrfToken()) ?>;
+$.ajaxPrefilter(function(options) {
+    if ((options.type || options.method || '').toUpperCase() === 'POST') {
+        if (typeof options.data === 'string') {
+            options.data += (options.data ? '&' : '') + 'csrf_token=' + encodeURIComponent(csrfTokenJs);
+        } else {
+            options.data = options.data || {};
+            options.data.csrf_token = csrfTokenJs;
+        }
+    }
+});
 $(document).ready(function() {
     $('.selectpicker').selectpicker();
     const toastEl = document.getElementById('toastMsg');
@@ -889,7 +1100,7 @@ $(document).ready(function() {
                     });
                     html += `</tbody><tfoot><tr style="background:var(--color-gray-100);"><th colspan="3" class="text-end text-uppercase" style="font-size:11px;">Total</th><th class="text-end fw-bold" style="color:var(--color-primary);">${total.toLocaleString('fr-FR')} FCFA</th></tr></tfoot></table></div></div>`;
                 }
-                $('#bonDetails').html(html).data('bon-id', b.code_bon);
+                $('#bonDetails').html(html).data('bon-id', b.code_bon).data('contact-name', b.nom_prenom_contact || '');
                 if (data.is_locked) {
                     $('#btnModifier').prop('disabled', true).addClass('disabled').css('opacity', '0.5').attr('title', 'Bon lié à une facture validée et payée, modification impossible');
                 }
@@ -923,6 +1134,7 @@ $(document).ready(function() {
         addField('action', 'pdf');
         addField('id', id);
         addField('mode', mode);
+        addField('csrf_token', csrfTokenJs);
         document.body.appendChild(form);
         form.submit();
         form.remove();
@@ -938,12 +1150,64 @@ $(document).ready(function() {
         if (id) submitBonPdfPost(id, 'D', false);
     });
 
+    // Menu de partage de repli (WhatsApp / Email / Telegram) : télécharge le PDF
+    // sur l'appareil puis ouvre le canal choisi avec un message pré-rempli,
+    // à utiliser quand le partage natif (Web Share API avec fichier) est
+    // indisponible (HTTP, navigateur desktop, etc.).
+    function fermerMenuPartage() {
+        $('#menuPartageRepli').remove();
+        $(document).off('click.menuPartage');
+    }
+
+    function ouvrirMenuPartage(btn, blob, id, nomContact, messageTexte) {
+        fermerMenuPartage();
+        const url = URL.createObjectURL(blob);
+        const nomFichier = 'bon-livraison-' + id + '.pdf';
+        const declencherTelechargement = () => {
+            const a = document.createElement('a');
+            a.href = url; a.download = nomFichier;
+            document.body.appendChild(a); a.click(); a.remove();
+        };
+        const $menu = $(`
+            <div id="menuPartageRepli" style="position:absolute; bottom:100%; left:0; margin-bottom:8px; background:#fff; border-radius:12px; box-shadow:0 10px 30px rgba(15,23,42,.2); padding:8px; z-index:2000; min-width:220px;">
+                <div class="small text-muted px-2 pb-1" style="font-size:11px;">Le PDF sera téléchargé, à joindre au message</div>
+                <button type="button" class="dropdown-item-partage" data-canal="whatsapp" style="display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;padding:8px;border-radius:8px;text-align:left;"><i class="bi bi-whatsapp" style="color:#25D366;"></i> WhatsApp</button>
+                <button type="button" class="dropdown-item-partage" data-canal="email" style="display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;padding:8px;border-radius:8px;text-align:left;"><i class="bi bi-envelope-fill" style="color:#3b82f6;"></i> Email</button>
+                <button type="button" class="dropdown-item-partage" data-canal="telegram" style="display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;padding:8px;border-radius:8px;text-align:left;"><i class="bi bi-telegram" style="color:#229ED9;"></i> Telegram</button>
+                <button type="button" class="dropdown-item-partage" data-canal="telecharger" style="display:flex;align-items:center;gap:8px;width:100%;border:none;background:none;padding:8px;border-radius:8px;text-align:left;"><i class="bi bi-download" style="color:#64748b;"></i> Télécharger seulement</button>
+            </div>
+        `);
+        $menu.find('.dropdown-item-partage').on('mouseenter', function() { $(this).css('background', '#f1f5f9'); }).on('mouseleave', function() { $(this).css('background', 'none'); });
+        $menu.on('click', '.dropdown-item-partage', function() {
+            const canal = $(this).data('canal');
+            declencherTelechargement();
+            if (canal === 'whatsapp') {
+                window.open('https://api.whatsapp.com/send?text=' + encodeURIComponent(messageTexte), '_blank');
+            } else if (canal === 'email') {
+                window.open('mailto:?subject=' + encodeURIComponent('Bon de livraison N°' + id) + '&body=' + encodeURIComponent(messageTexte), '_blank');
+            } else if (canal === 'telegram') {
+                window.open('https://t.me/share/url?url=&text=' + encodeURIComponent(messageTexte), '_blank');
+            }
+            fermerMenuPartage();
+        });
+        btn.parent().css('position', 'relative').append($menu);
+        setTimeout(() => {
+            $(document).on('click.menuPartage', function(e) {
+                if (!$(e.target).closest('#menuPartageRepli, #btnPartager').length) fermerMenuPartage();
+            });
+        }, 0);
+    }
+
     $('#btnPartager').click(async function() {
         const id = $('#bonDetails').data('bon-id');
         if (!id) return;
+        const nomContact = $('#bonDetails').data('contact-name') || '';
+        const messageTexte = 'Bonjour voici le bon de livraison de' + (nomContact ? ' ' + nomContact : '');
         const btn = $(this);
         const originalHtml = btn.html();
-        const params = new URLSearchParams({ action: 'pdf', id: id });
+        fermerMenuPartage();
+        const params = new URLSearchParams({ action: 'pdf', id: id, csrf_token: csrfTokenJs });
+
         let raisonRepli = null;
         if (!window.isSecureContext) {
             raisonRepli = "Le partage natif exige HTTPS (site actuellement en HTTP)";
@@ -952,39 +1216,47 @@ $(document).ready(function() {
         } else if (!navigator.canShare) {
             raisonRepli = "Ce navigateur ne supporte pas le partage de fichiers";
         }
-        if (raisonRepli) console.warn('Partage natif indisponible :', raisonRepli);
-        if (window.isSecureContext && navigator.share && navigator.canShare) {
-            try {
-                btn.prop('disabled', true).html('<i class="bi bi-hourglass-split"></i><span>Préparation...</span>');
-                const resp = await fetch(baseUrl, { method: 'POST', body: params });
-                if (!resp.ok) throw new Error('pdf_fetch_failed');
-                const blob = await resp.blob();
-                if (blob.type && blob.type.indexOf('pdf') === -1) throw new Error('not_a_pdf');
-                const file = new File([blob], 'bon-livraison-' + id + '.pdf', { type: 'application/pdf' });
-                if (!navigator.canShare({ files: [file] })) {
-                    raisonRepli = "Cet appareil ne peut pas partager de fichier PDF";
-                } else {
-                    await navigator.share({
-                        files: [file],
-                        title: 'Bon de livraison N°' + id,
-                        text: 'Bonjour, voici votre bon de livraison N°' + id
-                    });
+
+        btn.prop('disabled', true).html('<i class="bi bi-hourglass-split"></i><span>Préparation...</span>');
+        let blob;
+        try {
+            const resp = await fetch(baseUrl, { method: 'POST', body: params, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+            blob = await resp.blob();
+            if (!resp.ok || (blob.type && blob.type.indexOf('pdf') === -1)) {
+                let detail = '';
+                try { detail = (await blob.text()); } catch (e2) {}
+                const titreMatch = detail.match(/<title>(.*?)<\/title>/i);
+                console.error('Échec de préparation du PDF (partage) — URL POSTée :', baseUrl, '— statut HTTP', resp.status, '— titre de la page reçue :', titreMatch ? titreMatch[1] : '(aucun)', '— début de la réponse :', detail.slice(0, 300));
+                throw new Error('pdf_invalide');
+            }
+        } catch (e) {
+            btn.prop('disabled', false).html(originalHtml);
+            showToast('Impossible de préparer le PDF pour le partage (voir la console du navigateur, F12, pour le détail).', 'danger');
+            return;
+        }
+
+        if (!raisonRepli) {
+            const file = new File([blob], 'bon-livraison-' + id + '.pdf', { type: 'application/pdf' });
+            if (navigator.canShare({ files: [file] })) {
+                try {
+                    await navigator.share({ files: [file], title: 'Bon de livraison N°' + id, text: messageTexte });
                     btn.prop('disabled', false).html(originalHtml);
                     return;
+                } catch (e) {
+                    btn.prop('disabled', false).html(originalHtml);
+                    if (e && e.name === 'AbortError') return;
+                    if (e && e.name === 'NotAllowedError') raisonRepli = "Le navigateur a refusé le partage (délai trop long)";
+                    else raisonRepli = "Erreur inattendue lors du partage natif";
+                    console.warn('Partage natif indisponible :', raisonRepli, e);
                 }
-            } catch (e) {
-                btn.prop('disabled', false).html(originalHtml);
-                if (e && e.name === 'AbortError') return;
-                if (e && e.name === 'NotAllowedError') raisonRepli = "Le navigateur a refusé le partage (délai trop long)";
-                else if (e && e.message === 'pdf_fetch_failed') raisonRepli = "Échec du téléchargement du PDF";
-                else if (e && e.message === 'not_a_pdf') raisonRepli = "Le fichier reçu n'est pas un PDF valide";
-                else raisonRepli = "Erreur inattendue lors du partage natif";
-                console.warn('Partage natif indisponible :', raisonRepli, e);
+            } else {
+                raisonRepli = "Cet appareil ne peut pas partager de fichier PDF";
             }
         }
+
         btn.prop('disabled', false).html(originalHtml);
-        if (raisonRepli) showToast('Partage natif indisponible (' + raisonRepli + '), ouverture de WhatsApp Web à la place', 'info');
-        window.open('https://api.whatsapp.com/send?text=' + encodeURIComponent('Bonjour, voici votre bon de livraison N°' + id), '_blank');
+        console.warn('Partage natif indisponible :', raisonRepli);
+        ouvrirMenuPartage(btn, blob, id, nomContact, messageTexte);
     });
 
     // PDF direct depuis la carte
@@ -1031,12 +1303,7 @@ $(document).ready(function() {
                     showToast('Bon ' + id + ' supprimé', 'success');
                     card.addClass('deleting');
                     setTimeout(function() {
-                        cardItem.fadeOut(300, function() {
-                            $(this).remove();
-                            if ($('.bon-item').length === 0) {
-                                $('#bonsGrid').html(`<div class="col-12"><div class="bg-white border border-dashed rounded-3 p-5 text-center text-muted"><i class="bi bi-inbox d-block mb-2" style="font-size:56px;opacity:.2;"></i><h5 class="text-dark">Aucun bon de livraison</h5><p class="small mb-0">Les bons de livraison apparaîtront ici dès leur création.</p></div></div>`);
-                            }
-                        });
+                        chargerBons(currentPage);
                     }, 400);
                     bonToDelete = null;
                     btn.prop('disabled', false).html('<i class="bi bi-trash3 me-1"></i> Supprimer');
@@ -1052,32 +1319,42 @@ $(document).ready(function() {
         });
     });
 
+    // Chargement paginé de la liste des bons (remplace l'ancien filtrage
+    // purement client-side, qui obligeait à charger tous les bons d'un coup).
+    let currentPage = 1;
+    function chargerBons(page) {
+        currentPage = page || 1;
+        const data = {
+            action: 'liste_bons',
+            page: currentPage,
+            statut: $('#statutFilter').val() || '',
+            etat_facture: $('#etatFactureFilter').val() || '',
+            statut_facture: $('#statutFactureFilter').val() || '',
+        };
+        $.post(window.location.pathname, data, function(resp) {
+            if (resp && resp.success) {
+                $('#bonsGrid').html(resp.html);
+                $('#bonsPagination').html(resp.pagination);
+            }
+        }, 'json');
+    }
+
+    $('#bonsPagination').on('click', '.page-link', function(e) {
+        e.preventDefault();
+        const page = $(this).data('page');
+        if (page) chargerBons(page);
+    });
+
     // Filtres
     $('#filterBtn').on('click', function() {
-        const selStatut = $('#statutFilter').val();
-        const selEtatFacture = $('#etatFactureFilter').val();
-        const selStatutFacture = $('#statutFactureFilter').val();
-        let count = 0;
-        $('.bon-item').each(function() {
-            const matchStatut = (selStatut === '' || String($(this).data('statut')) === String(selStatut));
-            const matchEtatFacture = (selEtatFacture === '' || String($(this).data('etat-facture')) === String(selEtatFacture));
-            const matchStatutFacture = (selStatutFacture === '' || String($(this).data('statut-facture')) === String(selStatutFacture));
-            if (matchStatut && matchEtatFacture && matchStatutFacture) {
-                $(this).show();
-                count++;
-            } else {
-                $(this).hide();
-            }
-        });
-        showToast(count + ' bon(s) affiché(s)', 'info');
+        chargerBons(1);
     });
 
     $('#resetBtn').on('click', function() {
         $('#statutFilter').selectpicker('val', '');
         $('#etatFactureFilter').selectpicker('val', '');
         $('#statutFactureFilter').selectpicker('val', '');
-        $('.bon-item').show();
-        showToast('Filtres réinitialisés', 'info');
+        chargerBons(1);
     });
 
     // Modifier bon
