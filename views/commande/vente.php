@@ -851,7 +851,7 @@ $(document).ready(function() {
         const id = $('#factureDetails').data('facture-id');
         if (!id) return;
         const nomContact = $('#factureDetails').data('contact-name') || '';
-        const messageTexte = 'Bonjour' + (nomContact ? ' ' + nomContact : '') + ', voici votre facture N°' + id + '. Le fichier PDF est joint à ce message. Merci.';
+        const messageTexte = 'Bonjour' + (nomContact ? ' ' + nomContact : '') + ', voici votre facture de notre société Ets Dankan. Merci pour votre confiance !';
         const btn = $(this);
         const originalHtml = btn.html();
         fermerMenuPartage();

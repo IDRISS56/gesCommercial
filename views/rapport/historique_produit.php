@@ -20,6 +20,14 @@ if (!$user) {
 define('USER_BOUTIQUE', $user['boutique_id'] ?? null);
 require_once 'fonctions_rapport.php'; // e(), fmt(), + helpers PDF partagés (RapportPDF, creerPdfRapport...)
 
+// Boutique(s) auxquelles cet utilisateur a accès : toutes les boutiques
+// actives pour Administrateur/Superviseur, uniquement la sienne (+ accès
+// supplémentaire éventuel) pour les autres rôles — même mécanisme que le
+// reste de l'application (config/authentification.php). Cette page n'avait
+// jusqu'ici AUCUNE restriction par boutique (fuite de données inter-boutiques
+// + risque critique maintenant qu'un bouton peut remettre du stock à zéro).
+$boutiquesAutoriseesHistProduit = getBoutiquesAutorisees($pdo, $user['role'] ?? null, $user['boutique_id'] ?? null);
+
 if (!function_exists('e')) { function e($str) { return htmlspecialchars($str ?? '', ENT_QUOTES, 'UTF-8'); } }
 if (!function_exists('fmt')) { function fmt($n) { return number_format(floatval($n), 0, ',', ' '); } }
 
@@ -39,6 +47,10 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
     $statut_filter = trim($_POST['statut_filter'] ?? '');
     $etat_filter = trim($_POST['etat_filter'] ?? '');
     $boutique_filter = trim($_POST['boutique_filter'] ?? '');
+    $estAdminSuperviseur = in_array($user['role'] ?? '', ['Administrateur', 'Superviseur'], true);
+    if ($boutique_filter !== '' && !in_array($boutique_filter, $boutiquesAutoriseesHistProduit, true)) {
+        $boutique_filter = '';
+    }
     // 'I' = affichage direct dans l'onglet, 'D' = téléchargement forcé (PDF uniquement).
     $modePdf = (isset($_POST['mode']) && $_POST['mode'] === 'D') ? 'D' : 'I';
     // 'pdf' (défaut) ou 'excel'.
@@ -46,7 +58,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
 
     // Toutes les lignes correspondant au filtre (pas de pagination à l'impression) :
     // on réutilise getStockDisponible() avec une "page" volontairement large.
-    $resultat = getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $etat_filter, $boutique_filter, 1, 100000);
+    $resultat = getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $etat_filter, $boutique_filter, 1, 100000, $boutiquesAutoriseesHistProduit, $estAdminSuperviseur);
     $lignes = $resultat['produits'] ?? [];
 
     $boutique = null;
@@ -128,7 +140,7 @@ if (isset($_POST['action']) && $_POST['action'] === 'pdf') {
 // FONCTION : STATISTIQUES PAR CATÉGORIE
 // (dispo / alerte / rupture calculés sur le stock, actifs / inactifs sur etat_produit)
 // ============================================================
-function getStatsCategories($pdo, $boutique_filter = '') {
+function getStatsCategories($pdo, $boutique_filter = '', $boutiquesAutorisees = [], $estAdminSuperviseur = false) {
     if (!empty($boutique_filter)) {
         // Stats basées sur le stock de LA boutique sélectionnée (table stock),
         // pas le total global. Un produit jamais approvisionné dans cette
@@ -152,6 +164,34 @@ function getStatsCategories($pdo, $boutique_filter = '') {
             ORDER BY stock_total DESC";
         $stmt = $pdo->prepare($sql);
         $stmt->execute([$boutique_filter]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    if (!$estAdminSuperviseur) {
+        // Aucun filtre boutique choisi, mais utilisateur restreint : on
+        // n'agrège que sur SES boutiques autorisées (pas le total système),
+        // pour ne pas exposer le stock d'autres boutiques.
+        if (empty($boutiquesAutorisees)) return [];
+        $placeholders = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+        $sql = "SELECT
+            COALESCE(c.titre_categorie, 'Sans catégorie') as categorie,
+            c.code_categorie,
+            COUNT(DISTINCT p.code_produit) as total_produits,
+            COALESCE(SUM(CASE WHEN COALESCE(sagg.qte,0) > p.stock_alerte THEN 1 ELSE 0 END), 0) as produits_disponibles,
+            COALESCE(SUM(CASE WHEN COALESCE(sagg.qte,0) > 0 AND COALESCE(sagg.qte,0) <= p.stock_alerte THEN 1 ELSE 0 END), 0) as produits_alerte,
+            COALESCE(SUM(CASE WHEN COALESCE(sagg.qte,0) <= 0 THEN 1 ELSE 0 END), 0) as produits_rupture,
+            COALESCE(SUM(CASE WHEN p.etat_produit = 'Inactif' THEN 1 ELSE 0 END), 0) as produits_inactifs,
+            COALESCE(SUM(p.prix_fournisseur * COALESCE(sagg.qte, 0)), 0) as valeur_achat,
+            COALESCE(SUM(p.prix_produit * COALESCE(sagg.qte, 0)), 0) as valeur_vente,
+            COALESCE(SUM((p.prix_produit - p.prix_fournisseur) * COALESCE(sagg.qte, 0)), 0) as marge_beneficiaire,
+            COALESCE(SUM(COALESCE(sagg.qte, 0)), 0) as stock_total
+            FROM produit p
+            LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
+            LEFT JOIN (SELECT produit_id, SUM(quantite) AS qte FROM stock WHERE boutique_id IN ($placeholders) GROUP BY produit_id) sagg ON sagg.produit_id = p.code_produit
+            GROUP BY c.code_categorie, c.titre_categorie
+            ORDER BY stock_total DESC";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($boutiquesAutorisees);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
@@ -179,8 +219,8 @@ function getStatsCategories($pdo, $boutique_filter = '') {
 // FONCTION : REGROUPE TOUS LES CALCULS DE STATS (bandeau + cartes),
 // pour un chargement initial ou un rafraîchissement AJAX filtré par boutique
 // ============================================================
-function computeStats($pdo, $boutique_filter = '') {
-    $stats_categories = getStatsCategories($pdo, $boutique_filter);
+function computeStats($pdo, $boutique_filter = '', $boutiquesAutorisees = [], $estAdminSuperviseur = false) {
+    $stats_categories = getStatsCategories($pdo, $boutique_filter, $boutiquesAutorisees, $estAdminSuperviseur);
 
     $total_general = [
         'total_produits' => 0, 'valeur_achat' => 0, 'valeur_vente' => 0,
@@ -203,7 +243,10 @@ function computeStats($pdo, $boutique_filter = '') {
         ? round(($total_general['marge_beneficiaire'] / $total_general['valeur_vente']) * 100, 2)
         : 0;
 
-    if (!empty($boutique_filter)) {
+    if (!empty($boutique_filter) || !$estAdminSuperviseur) {
+        // Boutique précise choisie, OU utilisateur restreint sans filtre :
+        // dans les deux cas $stats_categories ci-dessus est déjà borné aux
+        // bonnes boutiques, donc le total qui en découle l'est aussi.
         $nbDisponibles = (int)$total_general['produits_disponibles'];
         $nbAlerte      = (int)$total_general['produits_alerte'];
         $nbRupture     = (int)$total_general['produits_rupture'];
@@ -323,7 +366,7 @@ function renderStatsSection($stats, $categorie_filter, $boutique_filter) {
 // ============================================================
 // FONCTION : LISTE DES PRODUITS (filtrée par catégorie, statut stock et état)
 // ============================================================
-function getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $etat_filter, $boutique_filter, $page, $perPage = 20) {
+function getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $etat_filter, $boutique_filter, $page, $perPage = 20, $boutiquesAutorisees = [], $estAdminSuperviseur = false) {
     $where = "WHERE 1=1";
     $params = [];
 
@@ -348,6 +391,9 @@ function getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $e
     // celui de CETTE boutique (table stock), et non plus le total global de
     // produit.stock_produit. Un produit jamais approvisionné dans cette
     // boutique apparaît avec un stock de 0 (LEFT JOIN + COALESCE).
+    // Si aucune boutique n'est choisie et que l'utilisateur est restreint
+    // (pas Administrateur/Superviseur), on agrège sur SES boutiques
+    // autorisées uniquement — jamais le total global du système.
     $boutiqueJoin = '';
     $stockExpr = 'p.stock_produit';
     $alerteExpr = 'p.stock_alerte';
@@ -358,6 +404,13 @@ function getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $e
         // Le paramètre du JOIN doit être ajouté avant les paramètres du WHERE,
         // puisqu'il apparaît plus tôt dans la requête SQL finale.
         array_unshift($params, $boutique_filter);
+    } elseif (!$estAdminSuperviseur) {
+        if (empty($boutiquesAutorisees)) $boutiquesAutorisees = ['__aucune__'];
+        $placeholders = implode(',', array_fill(0, count($boutiquesAutorisees), '?'));
+        $boutiqueJoin = " LEFT JOIN (SELECT produit_id, SUM(quantite) AS qte FROM stock WHERE boutique_id IN ($placeholders) GROUP BY produit_id) sagg ON sagg.produit_id = p.code_produit";
+        $stockExpr = 'COALESCE(sagg.qte, 0)';
+        $alerteExpr = 'p.stock_alerte';
+        array_unshift($params, ...$boutiquesAutorisees);
     }
 
     // ✅ Statut de stock CALCULÉ (indépendant de etat_produit) — basé sur le
@@ -526,6 +579,87 @@ function getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $e
 }
 
 // ============================================================
+// REMISE À ZÉRO DU STOCK (catégorie + boutique précises)
+// Réservé à Administrateur/Superviseur. Trace d'audit identique à un
+// ajustement manuel (views/produit/ajustement.php) : une ligne `commande`
+// (statut '007' "Stock de sortie") par produit réellement touché, avec la
+// quantité perdue et l'utilisateur — la même donnée que lit le rapport
+// mouvement_stock. etat_produit n'est plus recalculé automatiquement (c'est
+// désormais un choix manuel, indépendant du niveau de stock).
+// ============================================================
+if (isset($_POST['action']) && $_POST['action'] === 'remettre_stock_zero') {
+    header('Content-Type: application/json');
+    $estAdminSuperviseurZero = in_array($user['role'] ?? '', ['Administrateur', 'Superviseur'], true);
+    if (!$estAdminSuperviseurZero) {
+        echo json_encode(['success' => false, 'message' => "Action réservée à l'administrateur ou au superviseur."]);
+        exit;
+    }
+    $csrfZero = $_POST['csrf_token'] ?? '';
+    if (empty($csrfZero) || $csrfZero !== $_SESSION['csrf_token']) {
+        echo json_encode(['success' => false, 'message' => 'Token de sécurité invalide.']);
+        exit;
+    }
+    $categorieZero = trim($_POST['categorie_filter'] ?? '');
+    $boutiqueZero = trim($_POST['boutique_filter'] ?? '');
+    if (empty($categorieZero) || empty($boutiqueZero)) {
+        echo json_encode(['success' => false, 'message' => 'Veuillez choisir une catégorie précise ET une boutique précise avant de remettre le stock à zéro.']);
+        exit;
+    }
+    if (!in_array($boutiqueZero, $boutiquesAutoriseesHistProduit, true)) {
+        echo json_encode(['success' => false, 'message' => "Vous n'avez pas accès à cette boutique."]);
+        exit;
+    }
+    try {
+        $pdo->beginTransaction();
+        if ($categorieZero === 'Sans catégorie') {
+            $stmtProd = $pdo->prepare("SELECT code_produit FROM produit WHERE (categorie_id IS NULL OR categorie_id = '')");
+            $stmtProd->execute();
+        } else {
+            $stmtProd = $pdo->prepare("SELECT p.code_produit FROM produit p JOIN categorie c ON p.categorie_id = c.code_categorie WHERE c.titre_categorie = ?");
+            $stmtProd->execute([$categorieZero]);
+        }
+        $produitsCible = $stmtProd->fetchAll(PDO::FETCH_COLUMN);
+
+        $nbTouches = 0;
+        $i = 0;
+        foreach ($produitsCible as $produitId) {
+            $stmtStock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+            $stmtStock->execute([$produitId, $boutiqueZero]);
+            $stockActuel = $stmtStock->fetchColumn();
+            $stockAvant = $stockActuel !== false ? (int) $stockActuel : 0;
+            if ($stockAvant <= 0) continue; // rien à remettre à zéro pour ce produit ici
+
+            $stmtPrix = $pdo->prepare("SELECT prix_fournisseur FROM produit WHERE code_produit = ?");
+            $stmtPrix->execute([$produitId]);
+            $prixUnitaire = (float) ($stmtPrix->fetchColumn() ?: 0);
+
+            $i++;
+            $numCommande = 'AJU-' . date('YmdHis') . rand(100, 999) . $i;
+            $pdo->prepare("INSERT INTO commande
+                (numero_commande, produit_id, lot_id, produits_par_lot, statut_id,
+                 date_commande, heure_commande, prix_achat, prix_commande,
+                 quantite_commande, montant_commande, utilisateur_id, boutique_id, etat_commande)
+                VALUES (?, ?, NULL, 1, '007', CURDATE(), CURTIME(), ?, 0, ?, ?, ?, ?, 'VALIDEE')")
+                ->execute([$numCommande, $produitId, $prixUnitaire, $stockAvant, $prixUnitaire * $stockAvant, ($_SESSION['user_id'] ?? null), $boutiqueZero]);
+
+            $pdo->prepare("UPDATE stock SET quantite = 0 WHERE produit_id = ? AND boutique_id = ?")
+                ->execute([$produitId, $boutiqueZero]);
+
+            $pdo->prepare("UPDATE produit SET stock_produit = GREATEST(0, stock_produit - ?) WHERE code_produit = ?")
+                ->execute([$stockAvant, $produitId]);
+
+            $nbTouches++;
+        }
+        $pdo->commit();
+        echo json_encode(['success' => true, 'message' => $nbTouches . ' produit(s) remis à zéro dans cette boutique pour la catégorie « ' . $categorieZero . ' ».', 'count' => $nbTouches]);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        echo json_encode(['success' => false, 'message' => 'Erreur : ' . $e->getMessage()]);
+    }
+    exit;
+}
+
+// ============================================================
 // REQUÊTE AJAX (tout en POST)
 // ============================================================
 if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
@@ -534,13 +668,17 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
     $statut = trim($_POST['statut_filter'] ?? '');
     $etat = trim($_POST['etat_filter'] ?? '');
     $boutique = trim($_POST['boutique_filter'] ?? '');
+    $estAdminSuperviseurAjax = in_array($user['role'] ?? '', ['Administrateur', 'Superviseur'], true);
+    if ($boutique !== '' && !in_array($boutique, $boutiquesAutoriseesHistProduit, true)) {
+        $boutique = '';
+    }
     $page = max(1, (int)($_POST['page'] ?? 1));
-    $result = getStockDisponible($pdo, $search, $categorie, $statut, $etat, $boutique, $page);
+    $result = getStockDisponible($pdo, $search, $categorie, $statut, $etat, $boutique, $page, 20, $boutiquesAutoriseesHistProduit, $estAdminSuperviseurAjax);
     unset($result['produits']); // lignes brutes réservées à l'impression PDF : jamais renvoyées telles quelles en JSON (contiennent la photo en blob binaire)
     // Les cartes (bandeau + par catégorie) suivent la boutique sélectionnée :
     // recalculées à chaque requête, elles ne changent en pratique que quand
     // ce filtre change (les autres filtres n'affectent que le tableau).
-    $result['statsHtml'] = renderStatsSection(computeStats($pdo, $boutique), $categorie, $boutique);
+    $result['statsHtml'] = renderStatsSection(computeStats($pdo, $boutique, $boutiquesAutoriseesHistProduit, $estAdminSuperviseurAjax), $categorie, $boutique);
     while (ob_get_level()) ob_end_clean();
     header('Content-Type: application/json');
     echo json_encode($result);
@@ -557,8 +695,16 @@ $categories = $pdo->query("SELECT DISTINCT COALESCE(c.titre_categorie, 'Sans cat
     LEFT JOIN categorie c ON p.categorie_id = c.code_categorie
     ORDER BY titre")->fetchAll(PDO::FETCH_COLUMN);
 
-// Boutiques pour le filtre
-$boutiquesListe = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' ORDER BY nom_boutique")->fetchAll(PDO::FETCH_ASSOC);
+// Boutiques pour le filtre : uniquement celles auxquelles l'utilisateur a accès.
+$estAdminSuperviseurInit = in_array($user['role'] ?? '', ['Administrateur', 'Superviseur'], true);
+if (empty($boutiquesAutoriseesHistProduit)) {
+    $boutiquesListe = [];
+} else {
+    $placeholdersBqInit = implode(',', array_fill(0, count($boutiquesAutoriseesHistProduit), '?'));
+    $stmtBqInit = $pdo->prepare("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' AND code_boutique IN ($placeholdersBqInit) ORDER BY nom_boutique");
+    $stmtBqInit->execute($boutiquesAutoriseesHistProduit);
+    $boutiquesListe = $stmtBqInit->fetchAll(PDO::FETCH_ASSOC);
+}
 
 // Données initiales (sans filtre)
 $search = '';
@@ -566,8 +712,8 @@ $categorie_filter = '';
 $statut_filter = '';
 $etat_filter = '';
 $boutique_filter = '';
-$initialData = getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $etat_filter, $boutique_filter, 1);
-$statsData = computeStats($pdo, $boutique_filter);
+$initialData = getStockDisponible($pdo, $search, $categorie_filter, $statut_filter, $etat_filter, $boutique_filter, 1, 20, $boutiquesAutoriseesHistProduit, $estAdminSuperviseurInit);
+$statsData = computeStats($pdo, $boutique_filter, $boutiquesAutoriseesHistProduit, $estAdminSuperviseurInit);
 extract($statsData); // $nbDisponibles, $nbAlerte, $nbRupture, $nbActifs, $nbInactifs (utilisés dans les options des filtres Stock/État)
 ?>
 <!DOCTYPE html>
@@ -959,6 +1105,9 @@ table tbody tr:last-child td { border-bottom: none; }
             <button type="button" class="btn-go-outline" id="printBtn" data-mode="I"><i class="bi bi-printer"></i> Imprimer</button>
             <button type="button" class="btn-go-outline" id="downloadBtn" data-mode="D"><i class="bi bi-download"></i> Télécharger</button>
             <button type="button" class="btn-go btn-success" id="excelBtn"><i class="bi bi-file-earmark-excel"></i> Excel</button>
+            <?php if ($estAdminSuperviseurInit): ?>
+            <button type="button" class="btn-go-outline text-danger" style="border-color:#dc3545;" id="btnRemettreStockZero"><i class="bi bi-x-octagon"></i> Remettre le stock à zéro</button>
+            <?php endif; ?>
         </div>
     </form>
 
@@ -1028,6 +1177,26 @@ table tbody tr:last-child td { border-bottom: none; }
     </div>
 </div>
 
+<!-- Modal de confirmation : remise à zéro du stock -->
+<div class="modal fade" id="confirmZeroModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-x-octagon-fill text-danger me-2"></i>Remettre le stock à zéro</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p id="confirmZeroMsg">Chargement...</p>
+                <p class="text-danger fw-semibold small mb-0"><i class="bi bi-exclamation-triangle"></i> Cette action est irréversible.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Annuler</button>
+                <button type="button" class="btn btn-danger" id="btnConfirmerZero" disabled>Oui, remettre à zéro</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
@@ -1039,6 +1208,7 @@ $(document).ready(function() {
     // ============================================================
     // RECHERCHE AJAX
     // ============================================================
+    var dernierTotalAffiche = <?= (int)($initialData['total'] ?? 0) ?>;
     function rechercher(page, updateStats) {
         page = page || 1;
         var formData = $('#searchForm').serialize() + '&page=' + page;
@@ -1051,6 +1221,7 @@ $(document).ready(function() {
                 $('#tableBody').html(data.table);
                 $('#paginationContainer').html(data.pagination);
                 $('#totalCount').text(data.total + ' produit(s) - Page ' + data.page + ' / ' + Math.max(1, data.totalPages));
+                dernierTotalAffiche = data.total || 0;
                 if (updateStats && data.statsHtml) {
                     $('#statsSection').html(data.statsHtml);
                 }
@@ -1140,6 +1311,50 @@ $(document).ready(function() {
     $('#printBtn').on('click', function() { imprimerHistoriqueProduits('I', 'pdf'); });
     $('#downloadBtn').on('click', function() { imprimerHistoriqueProduits('D', 'pdf'); });
     $('#excelBtn').on('click', function() { imprimerHistoriqueProduits('D', 'excel'); });
+
+    // ---- Remettre le stock à zéro (catégorie + boutique précises, obligatoires) ----
+    $('#btnRemettreStockZero').on('click', function() {
+        var categorie = $('#categorieFilterHidden').val() || '';
+        var boutique = $('#boutiqueFilterHidden').val() || '';
+        if (!categorie || !boutique) {
+            $('#alertModalMsg').text('Choisissez d\'abord une catégorie précise ET une boutique précise dans les filtres ci-dessus (pas "Toutes").');
+            new bootstrap.Modal(document.getElementById('alertModal')).show();
+            return;
+        }
+        var nomBoutique = $('#boutiqueFilterSelect option:selected').text();
+        $('#confirmZeroMsg').html('Vous allez remettre à <strong>0</strong> le stock de <strong>' + dernierTotalAffiche + ' produit(s)</strong> de la catégorie « <strong>' + categorie + '</strong> » dans la boutique « <strong>' + nomBoutique + '</strong> ».');
+        $('#btnConfirmerZero').prop('disabled', false).html('Oui, remettre à zéro').data('categorie', categorie).data('boutique', boutique);
+        new bootstrap.Modal(document.getElementById('confirmZeroModal')).show();
+    });
+
+    $('#btnConfirmerZero').on('click', function() {
+        var btn = $(this);
+        var categorie = btn.data('categorie');
+        var boutique = btn.data('boutique');
+        btn.prop('disabled', true).html('<i class="bi bi-hourglass-split"></i> En cours...');
+        $.ajax({
+            url: window.location.pathname,
+            method: 'POST',
+            dataType: 'json',
+            data: {
+                action: 'remettre_stock_zero',
+                categorie_filter: categorie,
+                boutique_filter: boutique,
+                csrf_token: <?= json_encode($csrf_token) ?>
+            },
+            success: function(resp) {
+                bootstrap.Modal.getInstance(document.getElementById('confirmZeroModal')).hide();
+                $('#alertModalMsg').text(resp.message || (resp.success ? 'Stock remis à zéro.' : 'Erreur inconnue.'));
+                new bootstrap.Modal(document.getElementById('alertModal')).show();
+                if (resp.success) rechercher(1, true);
+            },
+            error: function() {
+                bootstrap.Modal.getInstance(document.getElementById('confirmZeroModal')).hide();
+                $('#alertModalMsg').text('Erreur de communication avec le serveur.');
+                new bootstrap.Modal(document.getElementById('alertModal')).show();
+            }
+        });
+    });
 
     // Pagination
     $(document).on('click', '.page-link', function(e) {

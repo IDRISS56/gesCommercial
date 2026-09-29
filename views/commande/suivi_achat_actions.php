@@ -32,14 +32,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     if ($action === 'produits_par_categorie') {
         header('Content-Type: application/json');
         $categorieId = trim($_POST['categorie_id'] ?? '');
-        $boutiqueIdVerif = trim($_POST['boutique_id'] ?? '');
         if (empty($categorieId)) {
             echo json_encode(['success' => false, 'error' => 'Catégorie manquante', 'produits' => []]);
-            exit;
-        }
-        $catsAutoriseesVerif = getCategoriesAutoriseesBoutique($pdo, $_SESSION['role'] ?? null, $boutiqueIdVerif);
-        if ($catsAutoriseesVerif !== null && !in_array($categorieId, $catsAutoriseesVerif, true)) {
-            echo json_encode(['success' => false, 'error' => "Cette boutique n'est pas autorisée à gérer cette catégorie.", 'produits' => []]);
             exit;
         }
         $stmtProd = $pdo->prepare(
@@ -175,6 +169,111 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         } catch (Exception $e) {
             if ($pdo->inTransaction()) $pdo->rollBack();
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    // ---- TRANSFORMATION BON FOURNISSEUR -> BON DE COMMANDE CLIENT ----
+    // Contrairement à un devis (supprimé après transformation), l'achat
+    // fournisseur est CONSERVÉ tel quel : la dette envers le fournisseur reste
+    // due, qu'on revende la marchandise à un client ou pas. On crée un
+    // nouveau bon de commande client séparé, lié via reference_id.
+    //
+    // Deux cas :
+    //  - Achat déjà "Validee" (marchandise reçue, stock déjà crédité) : le
+    //    stock est vérifié et déduit immédiatement, comme une vente normale.
+    //  - Achat encore "En attente" (pas reçu, stock pas encore crédité) : le
+    //    nouveau bon client est créé avec ses lignes "EN ATTENTE" elles aussi,
+    //    sans toucher au stock. Le rattrapage se fait automatiquement dans
+    //    validate_facture (juste au-dessus) au moment où l'achat fournisseur
+    //    est enfin reçu : le stock crédité pour l'achat est aussitôt déduit
+    //    pour les lignes du bon client en attente qui lui sont liées.
+    if ($action === 'transformer_achat') {
+        header('Content-Type: application/json');
+        try {
+            $numAchat = trim($_POST['numero'] ?? '');
+            $client_id = trim($_POST['client_id'] ?? '');
+            if (empty($numAchat)) throw new Exception('Achat introuvable.');
+            if (empty($client_id)) throw new Exception('Veuillez choisir un client.');
+
+            $pdo->beginTransaction();
+
+            $stmt = $pdo->prepare("SELECT * FROM facture WHERE numero_facture = ? AND type_facture = 'Fournisseur' FOR UPDATE");
+            $stmt->execute([$numAchat]);
+            $achat = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$achat) throw new Exception('Achat introuvable.');
+
+            // La marchandise doit être physiquement reçue (achat "Validee")
+            // avant de pouvoir être proposée à un client : tant que l'achat
+            // est "En attente", le stock n'existe pas encore, donc rien à
+            // transformer.
+            if (strtolower($achat['statut_facture']) !== 'validee') {
+                throw new Exception("Cet achat n'a pas encore été validé (marchandise pas encore reçue) : vous devez d'abord le valider dans le suivi des achats avant de pouvoir le transformer en bon de commande client.");
+            }
+
+            $stmtDejaTransforme = $pdo->prepare("SELECT numero_facture FROM facture WHERE reference_id = ? AND type_facture = 'Client' LIMIT 1");
+            $stmtDejaTransforme->execute([$numAchat]);
+            if ($stmtDejaTransforme->fetchColumn()) throw new Exception('Cet achat a déjà été transformé en bon client.');
+
+            $stmtClient = $pdo->prepare("SELECT code_contact FROM contact WHERE code_contact = ? AND type_contact = 'Client' AND etat_contact = 'Actif'");
+            $stmtClient->execute([$client_id]);
+            if (!$stmtClient->fetchColumn()) throw new Exception('Client introuvable ou inactif.');
+
+            $stmt = $pdo->prepare("SELECT c.*, p.titre_produit FROM commande c LEFT JOIN produit p ON c.produit_id = p.code_produit WHERE c.facture_id = ?");
+            $stmt->execute([$numAchat]);
+            $lignes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            if (empty($lignes)) throw new Exception('Cet achat ne contient aucune ligne.');
+
+            // ---- VÉRIFICATION DU STOCK (marchandise déjà reçue) ----
+            // Le prix de vente initial reprend le prix d'achat (le fournisseur) —
+            // l'utilisateur pourra le modifier lui-même après coup, comme pour
+            // n'importe quelle ligne de bon de commande.
+            foreach ($lignes as $l) {
+                $stmtStock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                $stmtStock->execute([$l['produit_id'], $l['boutique_id']]);
+                $dispo = $stmtStock->fetchColumn();
+                $dispo = ($dispo === false) ? 0 : (int) $dispo;
+                if ($dispo < (int) $l['quantite_commande']) {
+                    throw new Exception('Stock insuffisant pour « ' . $l['titre_produit'] . ' » : disponible ' . $dispo . ', demandé ' . $l['quantite_commande'] . '.');
+                }
+            }
+
+            $montantHT = 0;
+            foreach ($lignes as $l) { $montantHT += floatval($l['montant_commande']); }
+            $montantTTC = round($montantHT, 2);
+
+            $numBon = 'BON-' . date('Ymd') . '-' . str_pad((string) rand(1, 99999), 5, '0', STR_PAD_LEFT);
+            $pdo->prepare("INSERT INTO facture(numero_facture, titre_facture, type_facture, categorie_facture, date_facture, montant_ht, taxe, remise, montant_ttc, avance, reste, contact_id, utilisateur_id, etat_facture, statut_facture, reference_id)
+                           VALUES (?, ?, 'Client', 'Bon', CURDATE(), ?, 0, 0, ?, 0, ?, ?, ?, 'Impayee', 'En attente', ?)")
+                ->execute([$numBon, 'Bon de commande ' . $numBon, $montantHT, $montantTTC, $montantTTC, $client_id, ($_SESSION['user_id'] ?? null), $numAchat]);
+
+            $numBase = date('dmYHis');
+            foreach ($lignes as $i => $l) {
+                $numCmd = $numBase . str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+
+                $pdo->prepare("INSERT INTO commande(numero_commande, produit_id, lot_id, contact_id, facture_id, statut_id, date_commande, heure_commande, prix_achat, prix_commande, prix_lot_ligne, quantite_commande, produits_par_lot, montant_commande, utilisateur_id, boutique_id, etat_commande)
+                               VALUES (?, ?, ?, ?, ?, '012', CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, ?, ?, 'VALIDEE')")
+                    ->execute([$numCmd . '-CL', $l['produit_id'], $l['lot_id'], $client_id, $numBon, $l['prix_achat'], $l['prix_achat'], $l['prix_lot_ligne'], $l['quantite_commande'], $l['produits_par_lot'], $l['montant_commande'], ($_SESSION['user_id'] ?? null), $l['boutique_id']]);
+
+                $pdo->prepare("UPDATE stock SET quantite = GREATEST(0, quantite - ?) WHERE produit_id = ? AND boutique_id = ?")
+                    ->execute([$l['quantite_commande'], $l['produit_id'], $l['boutique_id']]);
+                if (!empty($l['lot_id'])) {
+                    $pdo->prepare("UPDATE lot SET quantite = quantite - ? WHERE code_lot = ? AND quantite >= ?")
+                        ->execute([$l['quantite_commande'], $l['lot_id'], $l['quantite_commande']]);
+                }
+                $pdo->prepare("UPDATE produit SET stock_produit = CAST(CAST(COALESCE(stock_produit,0) AS SIGNED) - ? AS CHAR) WHERE code_produit = ?")
+                    ->execute([$l['quantite_commande'], $l['produit_id']]);
+            }
+
+            $pdo->commit();
+            echo json_encode([
+                'success' => true,
+                'numero' => $numBon,
+                'message' => 'Bon de commande client ' . $numBon . ' créé (stock déduit immédiatement).'
+            ]);
+        } catch (Exception $ex) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            echo json_encode(['success' => false, 'message' => $ex->getMessage(), 'error' => $ex->getMessage()]);
         }
         exit;
     }
@@ -358,21 +457,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     $prix = floatval($nl['prix'] ?? 0);
                     if ($produitId === '' || $quantite <= 0) {
                         continue;
-                    }
-
-                    // Catégories autorisées par boutique (restriction optionnelle) :
-                    // vérification autoritaire, indépendante du filtrage déjà fait
-                    // côté client sur le sélecteur de catégorie.
-                    if (!empty($boutiqueId)) {
-                        $catsAutoriseesNewLigneAchat = getCategoriesAutoriseesBoutique($pdo, $_SESSION['role'] ?? null, $boutiqueId);
-                        if ($catsAutoriseesNewLigneAchat !== null) {
-                            $stmtCatProdNewAchat = $pdo->prepare("SELECT categorie_id FROM produit WHERE code_produit = ?");
-                            $stmtCatProdNewAchat->execute([$produitId]);
-                            $categorieProdNewAchat = $stmtCatProdNewAchat->fetchColumn();
-                            if (!in_array($categorieProdNewAchat, $catsAutoriseesNewLigneAchat, true)) {
-                                throw new Exception("Cette boutique n'est pas autorisée à gérer la catégorie de ce produit.");
-                            }
-                        }
                     }
 
                     // Configuration de lot (optionnelle, comme dans achat.php) : si

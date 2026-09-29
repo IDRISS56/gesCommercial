@@ -27,7 +27,7 @@ function getStatutBadge($statut) {
 function renderAchatCard(array $row): string {
     $etatBadge = getEtatBadge($row['etat_facture']);
     $isValidee = (strtolower($row['statut_facture']) === 'validee');
-    $peutGerer = ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Proprietaire' || $_SESSION['role'] === 'Caisse');
+    $peutGerer = ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Caisse');
 
     ob_start();
     ?>
@@ -60,6 +60,13 @@ function renderAchatCard(array $row): string {
             </div>
             <div class="fc-bottom">
                 <button class="icon-btn view voir-facture" data-id="<?= $row['numero_facture'] ?>" data-tooltip="Voir détails" title="Voir détails"><i class="bi bi-eye"></i></button>
+                <?php if (!empty($row['bon_client_issu'])): ?>
+                    <button class="icon-btn transform" disabled data-tooltip="Déjà transformé en <?= htmlspecialchars($row['bon_client_issu']) ?>" title="Déjà transformé en <?= htmlspecialchars($row['bon_client_issu']) ?>"><i class="bi bi-arrow-repeat"></i></button>
+                <?php elseif ($peutGerer && strtolower($row['statut_facture']) === 'validee'): ?>
+                    <button class="icon-btn transform transformer-achat" data-id="<?= $row['numero_facture'] ?>" data-tooltip="Transformer en bon client" title="Transformer en bon client"><i class="bi bi-arrow-repeat"></i></button>
+                <?php elseif ($peutGerer): ?>
+                    <button class="icon-btn transform" disabled data-tooltip="Il faut d'abord valider (recevoir) cet achat" title="Il faut d'abord valider (recevoir) cet achat"><i class="bi bi-arrow-repeat"></i></button>
+                <?php endif; ?>
                 <?php if ($peutGerer): ?>
                 <?php if (!$isValidee): ?>
                     <button class="icon-btn validate valider-facture" data-id="<?= $row['numero_facture'] ?>" data-tooltip="Valider" title="Valider"><i class="bi bi-check2-circle"></i></button>
@@ -112,7 +119,8 @@ function getAchatsListe(PDO $pdo, array $boutiquesAutorisees, array $filtres, in
     if ($page > $totalPages) $page = $totalPages;
     if ($page < 1) $page = 1;
 
-    $sql = "SELECT f.*, c.nom_prenom_contact
+    $sql = "SELECT f.*, c.nom_prenom_contact,
+                   (SELECT numero_facture FROM facture f2 WHERE f2.reference_id = f.numero_facture AND f2.type_facture = 'Client' LIMIT 1) AS bon_client_issu
             $baseSql
             ORDER BY f.date_facture DESC
             LIMIT " . (($page - 1) * $perPage) . ", $perPage";
@@ -174,6 +182,10 @@ function getAchatsListe(PDO $pdo, array $boutiquesAutorisees, array $filtres, in
 
 $stmtFournisseurs = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact WHERE etat_contact = 'Actif' AND type_contact = 'Fournisseur' ORDER BY nom_prenom_contact ASC");
 $fournisseurs = $stmtFournisseurs->fetchAll(PDO::FETCH_ASSOC);
+
+// Pour le sélecteur "Transformer en bon client" (voir modal transformerAchatModal).
+$stmtClientsActifs = $pdo->query("SELECT code_contact, nom_prenom_contact FROM contact WHERE etat_contact = 'Actif' AND type_contact = 'Client' ORDER BY nom_prenom_contact ASC");
+$clientsActifsTransform = $stmtClientsActifs->fetchAll(PDO::FETCH_ASSOC);
 // KPI résumé : restreints aux boutiques autorisées (toutes pour
 // Administrateur/Superviseur, la ou les boutiques de l'utilisateur sinon).
 if (empty($boutiquesAutorisees)) {
@@ -217,12 +229,3 @@ if (empty($boutiquesAutorisees)) {
 // l'action AJAX 'produits_par_categorie', au moment où l'utilisateur choisit
 // une catégorie.
 $categoriesAchat = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='ACTIF' ORDER BY titre_categorie")->fetchAll(PDO::FETCH_ASSOC);
-
-// Catégories autorisées par boutique (restriction optionnelle, voir
-// config/authentification.php::getCategoriesAutoriseesBoutique). Un achat est
-// déjà rattaché à une boutique précise : on filtre le sélecteur de catégorie
-// du panneau d'ajout de ligne en fonction de cette boutique.
-$categoriesAutoriseesParBoutiqueAchat = [];
-foreach ($boutiquesAutorisees as $bId) {
-    $categoriesAutoriseesParBoutiqueAchat[$bId] = getCategoriesAutoriseesBoutique($pdo, $_SESSION['role'] ?? null, $bId);
-}

@@ -327,7 +327,7 @@ require 'views/commande/suivi_achat_actions.php';
                 </div>
             </div>
             <div class="modal-footer">
-                <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Proprietaire' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Caisse'): ?>
+                <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Caisse'): ?>
                 <button class="btn-chic btn-chic-modifier" id="btnModifier"><i class="bi bi-pencil-square"></i><span>Modifier</span></button>
                 <?php endif; ?>
                 <button class="btn-chic btn-chic-imprimer" id="btnImprimer"><i class="bi bi-printer-fill"></i><span>Imprimer</span></button>
@@ -371,6 +371,33 @@ require 'views/commande/suivi_achat_actions.php';
         </div>
     </div>
 </div>
+
+<!-- Modal : transformer un achat fournisseur en bon de commande client -->
+<div class="modal fade" id="transformerAchatModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:16px;border:none;">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-arrow-repeat"></i> Transformer en bon de commande client</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small">L'achat fournisseur <strong id="transformerAchatNumero"></strong> reste inchangé (la dette envers le fournisseur ne change pas). Un nouveau bon de commande client sera créé avec les mêmes produits et quantités, au prix d'achat fournisseur — vous pourrez ajuster le prix de vente ensuite.</p>
+                <label class="form-label small fw-semibold">Client</label>
+                <select id="transformerAchatClient" class="selectpicker form-select" data-live-search="true" data-live-search-placeholder="Rechercher un client...">
+                    <option value="">-- Choisir un client --</option>
+                    <?php foreach ($clientsActifsTransform as $cl): ?>
+                        <option value="<?= htmlspecialchars($cl['code_contact']) ?>"><?= htmlspecialchars($cl['nom_prenom_contact']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">Annuler</button>
+                <button type="button" class="btn btn-primary rounded-3" id="btnConfirmerTransformerAchat"><i class="bi bi-arrow-repeat"></i> Transformer</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 
 <!-- Section édition chic -->
 <div id="editSection" class="edit-section-chic">
@@ -430,6 +457,7 @@ $(document).ready(function() {
     // Remplace window.confirm() par la modal Bootstrap générique
     const genericConfirmModalEl = document.getElementById('genericConfirmModal');
     const genericConfirmModal = new bootstrap.Modal(genericConfirmModalEl);
+    const transformerAchatModal = new bootstrap.Modal(document.getElementById('transformerAchatModal'));
     function genericConfirm(message, onOk) {
         $('#genericConfirmMsg').text(message);
         const okBtn = document.getElementById('genericConfirmOkBtn');
@@ -467,6 +495,10 @@ $(document).ready(function() {
                     card.find('.fc-badges .badge-pill').last().removeClass('bg-secondary-subtle text-secondary').addClass('bg-primary-subtle text-primary').html('<i class="bi bi-check2" style="font-size:8px;"></i> VALIDEE');
                     card.find('.fc-number').css('color', '#059669');
                     btn.replaceWith('<button class="icon-btn validate validated" disabled data-tooltip="Validée" title="Validée"><i class="bi bi-check-circle-fill"></i></button>');
+                    // Le bouton "Transformer" était désactivé (achat pas encore
+                    // validé) : on le réactive immédiatement, sans attendre un
+                    // rechargement de la page.
+                    card.find('.icon-btn.transform').replaceWith('<button class="icon-btn transform transformer-achat" data-id="' + id + '" data-tooltip="Transformer en bon client" title="Transformer en bon client"><i class="bi bi-arrow-repeat"></i></button>');
                 } else {
                     showToast('Erreur : ' + (resp.error|| 'Inconnue'), 'error');
                     btn.prop('disabled', false).html('<i class="bi bi-check2-circle"></i>');
@@ -477,6 +509,45 @@ $(document).ready(function() {
                 btn.prop('disabled', false).html('<i class="bi bi-check2-circle"></i>');
             }
         });
+        });
+    });
+
+    // Transformer un achat fournisseur en bon de commande client
+    // (uniquement proposé une fois l'achat validé/reçu — voir suivi_achat_data.php)
+    $(document).on('click', '.transformer-achat', function(e) {
+        e.stopPropagation();
+        const id = $(this).data('id');
+        $('#transformerAchatNumero').text(id);
+        $('#transformerAchatClient').selectpicker('val', '');
+        $('#transformerAchatModal').data('numero-achat', id);
+        transformerAchatModal.show();
+    });
+
+    $('#btnConfirmerTransformerAchat').click(function() {
+        const numero = $('#transformerAchatModal').data('numero-achat');
+        const clientId = $('#transformerAchatClient').val();
+        if (!clientId) { showToast('Veuillez choisir un client.', 'error'); return; }
+        const btn = $(this);
+        const originalHtml = btn.html();
+        btn.prop('disabled', true).html('<i class="bi bi-hourglass-split"></i> Transformation...');
+        $.ajax({
+            url: baseUrl, type: 'POST',
+            data: { action: 'transformer_achat', numero: numero, client_id: clientId },
+            dataType: 'json',
+            success: function(resp) {
+                btn.prop('disabled', false).html(originalHtml);
+                if (resp.success) {
+                    transformerAchatModal.hide();
+                    showToast(resp.message || ('Transformé en ' + resp.numero));
+                    chargerAchats(currentPageAchats);
+                } else {
+                    showToast('Erreur : ' + (resp.message || resp.error || 'Inconnue'), 'error');
+                }
+            },
+            error: function() {
+                btn.prop('disabled', false).html(originalHtml);
+                showToast('Erreur de communication', 'error');
+            }
         });
     });
 
@@ -724,7 +795,7 @@ $(document).ready(function() {
         const id = $('#factureDetails').data('facture-id');
         if (!id) return;
         const nomContact = $('#factureDetails').data('contact-name') || '';
-        const messageTexte = 'Bonjour' + (nomContact ? ' ' + nomContact : '') + ', voici le bon de commande N°' + id + '. Le fichier PDF est joint à ce message. Merci.';
+        const messageTexte = 'Bonjour' + (nomContact ? ' ' + nomContact : '') + ', voici le bon de commande de la société ETS DANKAN Merci de votre confiance!';
         const btn = $(this);
         const originalHtml = btn.html();
         fermerMenuPartage();

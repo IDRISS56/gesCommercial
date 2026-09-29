@@ -121,16 +121,7 @@ function renderValeurInput($periode, $valeur) {
             echo '<input type="week" name="valeur" class="form-select" value="' . e($valeur) . '">';
             break;
         case 'mensuel':
-            echo '<select name="valeur" class="form-select">';
-            $ac = (int)date('Y');
-            for ($a = $ac - 2; $a <= $ac + 1; $a++) {
-                foreach ($moisNoms as $num => $nom) {
-                    $v = "$a-$num";
-                    $sel = ($v === $valeur) ? ' selected' : '';
-                    echo "<option value=\"$v\"$sel>$nom $a</option>";
-                }
-            }
-            echo '</select>';
+            echo '<input type="month" name="valeur" class="form-select" value="' . e($valeur) . '">';
             break;
         case 'trimestriel':
             echo '<select name="valeur" class="form-select">';
@@ -166,6 +157,39 @@ function renderValeurInput($periode, $valeur) {
             }
             echo '</select>';
             break;
+    }
+}
+
+function libellePeriodeRapport($periode, $valeur) {
+    global $moisNoms;
+    switch ($periode) {
+        case 'journalier':
+            $t = strtotime($valeur);
+            return $t ? date('d/m/Y', $t) : $valeur;
+        case 'hebdomadaire':
+            if (preg_match('/^(\d{4})-W(\d{2})$/', $valeur, $m)) {
+                $d = new DateTime();
+                $d->setISODate((int)$m[1], (int)$m[2]);
+                $debut = $d->format('d/m');
+                $fin = $d->modify('+6 days')->format('d/m/Y');
+                return "$debut – $fin";
+            }
+            return $valeur;
+        case 'mensuel':
+            if (preg_match('/^(\d{4})-(\d{2})$/', $valeur, $m)) {
+                return ($moisNoms[$m[2]] ?? $m[2]) . ' ' . $m[1];
+            }
+            return $valeur;
+        case 'trimestriel':
+            if (preg_match('/^(\d{4})-T([1-4])$/', $valeur, $m)) return "T{$m[2]} {$m[1]}";
+            return $valeur;
+        case 'semestriel':
+            if (preg_match('/^(\d{4})-S([1-2])$/', $valeur, $m)) return "S{$m[2]} {$m[1]}";
+            return $valeur;
+        case 'annuel':
+            return "Année $valeur";
+        default:
+            return $valeur;
     }
 }
 
@@ -514,6 +538,70 @@ h1, h2, h3, h4, h5, h6 {
 .stat-label { font-size: 10px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
 .stat-value { font-size: 18px; font-weight: 800; color: var(--text-primary); font-family: 'Outfit', sans-serif; line-height: 1; }
 
+/* ===== FILTRE PÉRIODE (façon dashboard) ===== */
+.pbar-tabs {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+.ptab {
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    background: var(--color-gray-100);
+    border: 1.5px solid var(--border-color);
+    transition: all .2s;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+}
+.ptab:hover {
+    color: #2563eb;
+    border-color: #bfdbfe;
+    background: #eff6ff;
+}
+.ptab.on {
+    background: #2563eb;
+    color: #fff;
+    border-color: #2563eb;
+    box-shadow: 0 2px 8px rgba(37,99,235,.25);
+}
+.ptab i { font-size: 13px; }
+.plbl {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    font-weight: 600;
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #2563eb;
+    padding: 8px 14px;
+    border-radius: 10px;
+}
+.btn-go {
+    background: #2563eb;
+    color: #fff;
+    padding: 8px 18px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 2px 4px rgba(37,99,235,.2);
+    transition: background .15s;
+    border: none;
+    cursor: pointer;
+}
+.btn-go:hover { background: #1d4ed8; }
+
 /* ===== FILTRES ===== */
 .filters-section {
     background: var(--bg-surface);
@@ -856,25 +944,25 @@ tbody tr:last-child td { border-bottom: none; }
     <div class="filters-section">
         <form method="POST" id="filterFormMain">
             <input type="hidden" name="onglet" id="ongletInput" value="<?= e($onglet) ?>">
+            <input type="hidden" name="periode" value="<?= e($periode) ?>">
+
+            <div class="pbar-tabs">
+                <button type="submit" name="periode" value="journalier" class="ptab <?= $periode==='journalier'?'on':'' ?>"><i class="bi bi-calendar-date"></i> Jour</button>
+                <button type="submit" name="periode" value="hebdomadaire" class="ptab <?= $periode==='hebdomadaire'?'on':'' ?>"><i class="bi bi-calendar-week"></i> Semaine</button>
+                <button type="submit" name="periode" value="mensuel" class="ptab <?= $periode==='mensuel'?'on':'' ?>"><i class="bi bi-calendar-month"></i> Mois</button>
+                <button type="submit" name="periode" value="trimestriel" class="ptab <?= $periode==='trimestriel'?'on':'' ?>"><i class="bi bi-calendar3"></i> Trimestre</button>
+                <button type="submit" name="periode" value="semestriel" class="ptab <?= $periode==='semestriel'?'on':'' ?>"><i class="bi bi-calendar2"></i> Semestre</button>
+                <button type="submit" name="periode" value="annuel" class="ptab <?= $periode==='annuel'?'on':'' ?>"><i class="bi bi-calendar-fill"></i> Année</button>
+            </div>
+
             <div class="d-flex flex-wrap align-items-end gap-3">
-                <div class="flex-grow-1" style="min-width: 180px;">
-                    <label for="periodeSelect"><i class="bi bi-calendar3"></i> Période</label>
-                    <select name="periode" id="periodeSelect" class="form-select selectpicker" data-live-search="true">
-                        <option value="journalier" <?= $periode=='journalier'?'selected':'' ?>>Journalier</option>
-                        <option value="hebdomadaire" <?= $periode=='hebdomadaire'?'selected':'' ?>>Hebdomadaire</option>
-                        <option value="mensuel" <?= $periode=='mensuel'?'selected':'' ?>>Mensuel</option>
-                        <option value="trimestriel" <?= $periode=='trimestriel'?'selected':'' ?>>Trimestriel</option>
-                        <option value="semestriel" <?= $periode=='semestriel'?'selected':'' ?>>Semestriel</option>
-                        <option value="annuel" <?= $periode=='annuel'?'selected':'' ?>>Annuel</option>
-                    </select>
-                </div>
-                <div class="flex-grow-1" style="min-width: 180px;">
-                    <label><i class="bi bi-calendar-range"></i> Valeur</label>
+                <div style="min-width: 180px;">
+                    <label><i class="bi bi-calendar-range"></i> <?= e(['journalier'=>'Date','hebdomadaire'=>'Semaine','mensuel'=>'Mois','trimestriel'=>'Trimestre','semestriel'=>'Semestre','annuel'=>'Année'][$periode] ?? 'Valeur') ?></label>
                     <div id="valeurContainer">
                         <?php renderValeurInput($periode, $valeur); ?>
                     </div>
                 </div>
-                <div class="flex-grow-1" style="min-width: 180px;">
+                <div style="min-width: 180px;">
                     <label for="boutiqueSelect"><i class="bi bi-shop"></i> Boutique</label>
                     <select name="boutique_id" id="boutiqueSelect" class="form-select selectpicker" data-live-search="true">
                         <option value="">Toutes les boutiques</option>
@@ -883,10 +971,9 @@ tbody tr:last-child td { border-bottom: none; }
                         <?php endforeach; ?>
                     </select>
                 </div>
-                <div class="d-flex gap-2">
-                    <button type="submit" class="btn-filter"><i class="bi bi-funnel"></i> Filtrer</button>
-                    <a href="?onglet=<?= e($onglet) ?>" class="btn-reset"><i class="bi bi-arrow-counterclockwise"></i> Réinitialiser</a>
-                </div>
+                <button type="submit" class="btn-go"><i class="bi bi-arrow-right-circle-fill"></i> Appliquer</button>
+                <a href="?onglet=<?= e($onglet) ?>" class="btn-reset"><i class="bi bi-arrow-counterclockwise"></i> Réinitialiser</a>
+                <div class="plbl"><i class="bi bi-calendar-check"></i> <?= e(libellePeriodeRapport($periode, $valeur)) ?></div>
             </div>
         </form>
     </div>
@@ -1015,92 +1102,10 @@ $(document).ready(function () {
     $('.selectpicker').selectpicker('destroy');
     $('.selectpicker').selectpicker();
 
-    // Mise à jour dynamique du champ "Valeur" sans rechargement
-    function genererChampValeur(periode) {
-        var html = '';
-        var maintenant = new Date();
-        var annee = maintenant.getFullYear();
-        var mois = maintenant.getMonth() + 1;
-        var jour = maintenant.getDate();
-
-        switch (periode) {
-            case 'journalier':
-                var dateStr = maintenant.toISOString().split('T')[0];
-                html = '<input type="date" name="valeur" class="form-select" value="' + dateStr + '">';
-                break;
-            case 'hebdomadaire':
-                // Calcul de la semaine ISO
-                var tempDate = new Date(Date.UTC(annee, mois - 1, jour));
-                var dayNum = tempDate.getUTCDay() || 7;
-                tempDate.setUTCDate(tempDate.getUTCDate() + 4 - dayNum);
-                var yearStart = new Date(Date.UTC(tempDate.getUTCFullYear(), 0, 1));
-                var weekNum = Math.ceil((((tempDate - yearStart) / 86400000) + 1) / 7);
-                var weekStr = tempDate.getUTCFullYear() + '-W' + (weekNum < 10 ? '0' : '') + weekNum;
-                html = '<input type="week" name="valeur" class="form-select" value="' + weekStr + '">';
-                break;
-            case 'mensuel':
-                var moisNoms = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
-                html = '<select name="valeur" class="form-select">';
-                for (var a = annee - 2; a <= annee + 1; a++) {
-                    for (var m = 1; m <= 12; m++) {
-                        var val = a + '-' + (m < 10 ? '0' : '') + m;
-                        var selected = (a === annee && m === mois) ? ' selected' : '';
-                        html += '<option value="' + val + '"' + selected + '>' + moisNoms[m-1] + ' ' + a + '</option>';
-                    }
-                }
-                html += '</select>';
-                break;
-            case 'trimestriel':
-                var trimestre = Math.ceil(mois / 3);
-                html = '<select name="valeur" class="form-select">';
-                for (var a = annee - 2; a <= annee + 1; a++) {
-                    for (var t = 1; t <= 4; t++) {
-                        var val = a + '-T' + t;
-                        var selected = (a === annee && t === trimestre) ? ' selected' : '';
-                        html += '<option value="' + val + '"' + selected + '>T' + t + ' ' + a + '</option>';
-                    }
-                }
-                html += '</select>';
-                break;
-            case 'semestriel':
-                var semestre = (mois <= 6) ? 1 : 2;
-                html = '<select name="valeur" class="form-select">';
-                for (var a = annee - 2; a <= annee + 1; a++) {
-                    for (var s = 1; s <= 2; s++) {
-                        var lib = (s === 1) ? 'Jan-Juin' : 'Juil-Déc';
-                        var val = a + '-S' + s;
-                        var selected = (a === annee && s === semestre) ? ' selected' : '';
-                        html += '<option value="' + val + '"' + selected + '>S' + s + ' ' + a + ' (' + lib + ')</option>';
-                    }
-                }
-                html += '</select>';
-                break;
-            case 'annuel':
-                html = '<select name="valeur" class="form-select">';
-                for (var a = annee - 3; a <= annee + 1; a++) {
-                    var selected = (a === annee) ? ' selected' : '';
-                    html += '<option value="' + a + '"' + selected + '>' + a + '</option>';
-                }
-                html += '</select>';
-                break;
-            default:
-                html = '<input type="date" name="valeur" class="form-select" value="' + maintenant.toISOString().split('T')[0] + '">';
-        }
-        return html;
-    }
-
-    // Lorsque la période change, mettre à jour le champ sans recharger
-    // On utilise l'événement 'change' natif pour plus de fiabilité
-    $('#periodeSelect').on('change', function () {
-        var periode = $(this).val();
-        var nouveauHtml = genererChampValeur(periode);
-        $('#valeurContainer').html(nouveauHtml);
-        // On force le rafraîchissement des selectpicker si besoin (mais on n'en a pas pour les champs valeur)
-        // On peut aussi propager le changement à l'onglet actif si on veut soumettre automatiquement ?
-        // On garde le comportement : l'utilisateur clique sur Filtrer pour appliquer.
-        // Mais on pourrait aussi soumettre automatiquement si souhaité.
-        // Pour rester cohérent avec la demande "instantané", on ne soumet pas, on met juste à jour le champ.
-    });
+    // Le choix de la période se fait désormais via les onglets pilules
+    // (boutons submit), qui rechargent directement la page avec le bon champ
+    // "Valeur" déjà rendu côté serveur (renderValeurInput) — plus besoin de
+    // générer ce champ en JS ici.
 
     // Pagination AJAX : utiliser les données du formulaire principal
     function chargerPage(tab, page) {

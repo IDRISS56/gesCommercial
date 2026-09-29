@@ -28,3 +28,23 @@
 #1 C:\wamp64\www\Gestion_commercial\controllers\FactureController.php(21): include('C:\\wamp64\\www\\G...')
 #2 C:\wamp64\www\Gestion_commercial\router.php(31): facture->bonLivraison()
 #3 {main}
+[15-Sep-2026 21:05:17 UTC] [EXCEPTION NON INTERCEPTÉE] Undefined constant "USER_ID" dans C:\wamp64\www\Gestion_commercial\views\commande\suivi_achat_actions.php:285
+#0 C:\wamp64\www\Gestion_commercial\views\commande\suivi_achat.php(17): require()
+#1 C:\wamp64\www\Gestion_commercial\controllers\CommandeController.php(7): include('C:\\wamp64\\www\\G...')
+#2 C:\wamp64\www\Gestion_commercial\router.php(31): commande->suiviAchat()
+#3 {main}
+[15-Sep-2026 21:05:24 UTC] [EXCEPTION NON INTERCEPTÉE] Undefined constant "USER_ID" dans C:\wamp64\www\Gestion_commercial\views\commande\suivi_achat_actions.php:285
+#0 C:\wamp64\www\Gestion_commercial\views\commande\suivi_achat.php(17): require()
+#1 C:\wamp64\www\Gestion_commercial\controllers\CommandeController.php(7): include('C:\\wamp64\\www\\G...')
+#2 C:\wamp64\www\Gestion_commercial\router.php(31): commande->suiviAchat()
+#3 {main}
+[15-Sep-2026 21:07:01 UTC] [EXCEPTION NON INTERCEPTÉE] Undefined constant "USER_ID" dans C:\wamp64\www\Gestion_commercial\views\commande\suivi_achat_actions.php:285
+#0 C:\wamp64\www\Gestion_commercial\views\commande\suivi_achat.php(17): require()
+#1 C:\wamp64\www\Gestion_commercial\controllers\CommandeController.php(7): include('C:\\wamp64\\www\\G...')
+#2 C:\wamp64\www\Gestion_commercial\router.php(31): commande->suiviAchat()
+#3 {main}
+[15-Sep-2026 21:07:06 UTC] [EXCEPTION NON INTERCEPTÉE] Undefined constant "USER_ID" dans C:\wamp64\www\Gestion_commercial\views\commande\suivi_achat_actions.php:285
+#0 C:\wamp64\www\Gestion_commercial\views\commande\suivi_achat.php(17): require()
+#1 C:\wamp64\www\Gestion_commercial\controllers\CommandeController.php(7): include('C:\\wamp64\\www\\G...')
+#2 C:\wamp64\www\Gestion_commercial\router.php(31): commande->suiviAchat()
+#3 {main}

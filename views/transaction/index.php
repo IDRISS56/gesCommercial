@@ -91,6 +91,10 @@ function getTableContent($pdo, $search, $filtres, $page, $boutiquesAutorisees, $
         $sql .= " AND t.caisse_id = ?";
         $params[] = $filtres['caisse'];
     }
+    if (!empty($filtres['boutique'])) {
+        $sql .= " AND c.boutique_id = ?";
+        $params[] = $filtres['boutique'];
+    }
     if (!empty($filtres['utilisateur'])) {
         $sql .= " AND t.utilisateur_id = ?";
         $params[] = $filtres['utilisateur'];
@@ -464,12 +468,16 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
         'mode_reglement' => trim($_POST['mode_reglement'] ?? ''),
         'etat' => trim($_POST['etat'] ?? ''),
         'caisse' => trim($_POST['caisse'] ?? ''),
+        'boutique' => trim($_POST['boutique'] ?? ''),
         'utilisateur' => trim($_POST['utilisateur'] ?? ''),
         'facture' => trim($_POST['facture'] ?? ''),
         'objet' => trim($_POST['objet'] ?? ''),
         'date_debut' => trim($_POST['date_debut'] ?? ''),
         'date_fin' => trim($_POST['date_fin'] ?? '')
     ];
+    if (!empty($filtres['boutique']) && !in_array($filtres['boutique'], $boutiquesAutoriseesTransaction, true)) {
+        $filtres['boutique'] = '';
+    }
     $page = max(1, (int)($_POST['page'] ?? 1));
     $result = getTableContent($pdo, $search, $filtres, $page, $boutiquesAutoriseesTransaction);
     while (ob_get_level()) ob_end_clean();
@@ -497,13 +505,17 @@ $stmtFact = $pdo->prepare("SELECT numero_facture, titre_facture FROM facture f
 $stmtFact->execute($boutiquesAutoriseesTransaction);
 $factures = $stmtFact->fetchAll(PDO::FETCH_ASSOC);
 
+$stmtBoutiquesFiltre = $pdo->prepare("SELECT code_boutique, nom_boutique FROM boutique WHERE etat_boutique = 'Actif' AND code_boutique IN ($placeholdersBqTr2) ORDER BY nom_boutique");
+$stmtBoutiquesFiltre->execute($boutiquesAutoriseesTransaction);
+$boutiquesFiltre = $stmtBoutiquesFiltre->fetchAll(PDO::FETCH_ASSOC);
+
 $modes_reglement = ['Espèce', 'Virement', 'Carte', 'Mobile money', 'Chèque', 'Autres'];
 $types_transaction = ['Entree', 'Sortie'];
 $etats_transaction = ['Succes', 'Echec', 'En attente', 'Annulee'];
 
 // Données initiales
 $search = '';
-$filtres = ['type' => '', 'mode_reglement' => '', 'etat' => '', 'caisse' => '', 'utilisateur' => '', 'facture' => '', 'objet' => '', 'date_debut' => '', 'date_fin' => ''];
+$filtres = ['type' => '', 'mode_reglement' => '', 'etat' => '', 'caisse' => '', 'boutique' => '', 'utilisateur' => '', 'facture' => '', 'objet' => '', 'date_debut' => '', 'date_fin' => ''];
 $initialData = getTableContent($pdo, $search, $filtres, 1, $boutiquesAutoriseesTransaction);
 ?>
 <!DOCTYPE html>
@@ -672,6 +684,14 @@ $initialData = getTableContent($pdo, $search, $filtres, 1, $boutiquesAutoriseesT
                 <?php endforeach; ?>
             </select>
 
+            <label>Boutique</label>
+            <select name="boutique" id="boutiqueFilter" class="selectpicker" data-live-search="true">
+                <option value="">Toutes</option>
+                <?php foreach ($boutiquesFiltre as $b): ?>
+                    <option value="<?= e($b['code_boutique']) ?>"><?= e($b['nom_boutique']) ?></option>
+                <?php endforeach; ?>
+            </select>
+
             <label>Utilisateur</label>
             <select name="utilisateur" id="utilisateurFilter" class="selectpicker" data-live-search="true">
                 <option value="">Tous</option>
@@ -832,7 +852,7 @@ $(document).ready(function() {
         searchTimeout = setTimeout(function() { rechercher(1); }, 400);
     });
 
-    $('#typeFilter, #modeFilter, #etatFilter, #caisseFilter, #utilisateurFilter').on('changed.bs.select', function() {
+    $('#typeFilter, #modeFilter, #etatFilter, #caisseFilter, #boutiqueFilter, #utilisateurFilter').on('changed.bs.select', function() {
         rechercher(1);
     });
 

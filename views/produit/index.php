@@ -94,6 +94,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
             if (empty($titre)) $errors[] = 'Le titre est requis.';
 
             if (empty($errors)) {
+                $produitSauvegarde = false;
                 try {
                     if ($action === 'add') {
                         $check = $pdo->prepare("SELECT COUNT(*) FROM produit WHERE code_produit = ?");
@@ -124,6 +125,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
                             }
                             $message = "Produit « $titre » ajouté avec succès.";
                             $messageType = 'success';
+                            $produitSauvegarde = true;
                         }
                     } else {
                         // EDIT
@@ -150,6 +152,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !((isset($_POST['ajax']) && $_POST[
                         }
                         $message = "Produit « $titre » mis à jour.";
                         $messageType = 'success';
+                        $produitSauvegarde = true;
+                    }
+
+                    // ==========================================
+                    // LOTS / CONDITIONNEMENTS SOUMIS DEPUIS LE FORMULAIRE PRODUIT
+                    // Même règle métier que views/produit/lots.php : un seul lot
+                    // ACTIF par (produit, type de lot) — on met à jour au lieu de
+                    // dupliquer. La quantité n'est jamais saisie ici : elle est
+                    // toujours resynchronisée sur le stock actuel du produit. Cette
+                    // section ne fait qu'ajouter/mettre à jour des lots — la
+                    // suppression d'un lot reste réservée à la page dédiée
+                    // (protection contre la suppression d'un lot déjà utilisé).
+                    // ==========================================
+                    if ($produitSauvegarde && !empty($_POST['lots']) && is_array($_POST['lots'])) {
+                        $libellesLotAutorises = ['Unité', 'Boîte', 'Carton', 'Bidon', 'Palette'];
+                        foreach ($_POST['lots'] as $ligneLot) {
+                            $libelleLot = trim($ligneLot['libelle'] ?? '');
+                            if (!in_array($libelleLot, $libellesLotAutorises, true)) continue;
+                            $unitesParLot = intval($ligneLot['unites_par_lot'] ?? 0);
+                            if ($unitesParLot < 1) continue;
+                            $prixLotRaw = trim($ligneLot['prix_lot'] ?? '');
+                            $prixLotVal = ($prixLotRaw === '') ? null : round((float) str_replace(',', '.', $prixLotRaw), 2);
+                            $coutLotRaw = trim($ligneLot['cout_lot'] ?? '');
+                            $coutLotVal = ($coutLotRaw === '') ? null : round((float) str_replace(',', '.', $coutLotRaw), 2);
+                            if (($prixLotVal !== null && $prixLotVal < 0) || ($coutLotVal !== null && $coutLotVal < 0)) continue;
+
+                            $stmtLotExist = $pdo->prepare("SELECT code_lot FROM lot WHERE produit_id = ? AND libelle = ? AND etat_lot = 'Actif'");
+                            $stmtLotExist->execute([$code, $libelleLot]);
+                            $codeLotExist = $stmtLotExist->fetchColumn();
+
+                            if ($codeLotExist) {
+                                $pdo->prepare("UPDATE lot SET unites_par_lot = ?, prix_lot = ?, cout_lot = ?, quantite = ? WHERE code_lot = ?")
+                                    ->execute([$unitesParLot, $prixLotVal, $coutLotVal, max(0, (int) $stock_produit), $codeLotExist]);
+                            } else {
+                                do {
+                                    $codeLotNouveau = 'LOT-' . date('Ymd') . '-' . str_pad((string) rand(1, 99999), 5, '0', STR_PAD_LEFT);
+                                    $stmtCheckLot = $pdo->prepare("SELECT 1 FROM lot WHERE code_lot = ?");
+                                    $stmtCheckLot->execute([$codeLotNouveau]);
+                                } while ($stmtCheckLot->fetchColumn());
+                                $pdo->prepare("INSERT INTO lot (code_lot, libelle, unites_par_lot, prix_lot, cout_lot, produit_id, quantite, etat_lot) VALUES (?, ?, ?, ?, ?, ?, ?, 'Actif')")
+                                    ->execute([$codeLotNouveau, $libelleLot, $unitesParLot, $prixLotVal, $coutLotVal, $code, max(0, (int) $stock_produit)]);
+                            }
+                        }
                     }
                 } catch (PDOException $e) {
                     $message = "Erreur : " . $e->getMessage();
@@ -342,10 +387,15 @@ $initialData = getTableContent($pdo, $search, $categorie_filter, $etat_filter, $
 
 // Chargement pour édition
 $editProduit = null;
+$editLots = [];
 if ($action === 'load_edit' && isset($_POST['edit_code'])) {
     $stmt = $pdo->prepare("SELECT * FROM produit WHERE code_produit = ?");
     $stmt->execute([$_POST['edit_code']]);
     $editProduit = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    $stmtLots = $pdo->prepare("SELECT code_lot, libelle, unites_par_lot, prix_lot, cout_lot FROM lot WHERE produit_id = ? AND etat_lot = 'Actif' ORDER BY libelle");
+    $stmtLots->execute([$_POST['edit_code']]);
+    $editLots = $stmtLots->fetchAll(PDO::FETCH_ASSOC);
 }
 ?>
 <!DOCTYPE html>
@@ -821,7 +871,28 @@ body {
                                 <input type="checkbox" id="saisie_par_carton" name="saisie_par_carton" style="width:16px;height:16px;">
                                 <span>Vente/achat par lot : la quantité saisie est le <strong>nombre de cartons</strong> (au lieu du nombre de pièces)</span>
                             </label>
-                            <small class="text-muted d-block mt-1">À activer uniquement si un prix de vente et/ou un prix d'achat spécifique au lot est configuré pour ce produit (menu « Configuration des lots »).</small>
+                            <small class="text-muted d-block mt-1">À activer uniquement si un prix de vente et/ou un prix d'achat spécifique au lot est configuré pour ce produit (ci-dessous).</small>
+                        </div>
+                    </div>
+
+                    <!-- Lots / conditionnements -->
+                    <div class="section-title stock"><i class="bi bi-box2-heart"></i> LOTS / CONDITIONNEMENTS (optionnel)</div>
+                    <div class="row g-3 mb-4">
+                        <div class="col-12">
+                            <small class="text-muted d-block mb-2">Configurez ici les conditionnements de vente/achat (Carton, Boîte...). La quantité disponible par lot est calculée automatiquement à partir du stock du produit — inutile de la saisir. La suppression d'un lot reste réservée au menu « Configuration des lots ».</small>
+                            <table class="table table-sm align-middle mb-2" id="lotsTable">
+                                <thead>
+                                    <tr>
+                                        <th style="width:22%;">Type</th>
+                                        <th style="width:20%;">Unités/lot</th>
+                                        <th style="width:25%;">Prix de vente du lot</th>
+                                        <th style="width:25%;">Coût d'achat du lot</th>
+                                        <th style="width:8%;"></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="lotsTableBody"></tbody>
+                            </table>
+                            <button type="button" class="btn btn-sm btn-outline-primary" id="btnAjouterLigneLot"><i class="bi bi-plus-circle"></i> Ajouter un lot</button>
                         </div>
                     </div>
 
@@ -1052,6 +1123,31 @@ $('#produitForm').on('submit', function() {
     $('#formSearch').val(f.search);
 });
 
+// Lots / conditionnements (lignes dynamiques dans le formulaire produit)
+let lotLigneIndex = 0;
+const LOT_LIBELLES = ['Unité', 'Boîte', 'Carton', 'Bidon', 'Palette'];
+function ajouterLigneLot(donnees) {
+    donnees = donnees || {};
+    const idx = lotLigneIndex++;
+    const optionsHtml = LOT_LIBELLES.map(l => `<option value="${l}" ${donnees.libelle === l ? 'selected' : ''}>${l}</option>`).join('');
+    const $tr = $(`
+        <tr class="ligne-lot">
+            <td><select class="form-select form-select-sm" name="lots[${idx}][libelle]">${optionsHtml}</select></td>
+            <td><input type="number" min="1" class="form-control form-control-sm" name="lots[${idx}][unites_par_lot]" value="${donnees.unites_par_lot || 1}"></td>
+            <td><input type="number" step="0.01" min="0" class="form-control form-control-sm" name="lots[${idx}][prix_lot]" value="${donnees.prix_lot ?? ''}" placeholder="auto"></td>
+            <td><input type="number" step="0.01" min="0" class="form-control form-control-sm" name="lots[${idx}][cout_lot]" value="${donnees.cout_lot ?? ''}" placeholder="auto"></td>
+            <td><button type="button" class="btn btn-sm btn-outline-danger retirer-ligne-lot"><i class="bi bi-x"></i></button></td>
+        </tr>
+    `);
+    $('#lotsTableBody').append($tr);
+}
+function viderLignesLots() {
+    $('#lotsTableBody').empty();
+    lotLigneIndex = 0;
+}
+$(document).on('click', '#btnAjouterLigneLot', function() { ajouterLigneLot(); });
+$(document).on('click', '.retirer-ligne-lot', function() { $(this).closest('tr').remove(); });
+
 // Ajout
 $('#addBtn').on('click', function() {
     $('#formAction').val('add');
@@ -1067,6 +1163,7 @@ $('#addBtn').on('click', function() {
     $('#boutique_initiale').closest('.col-md-4').show();
     $('#blocStockInitial').show();
     $('#etat_produit').val('Actif');
+    viderLignesLots();
     produitModal.show();
 });
 
@@ -1111,6 +1208,9 @@ $(function() {
     } else {
         $('#photoPreviewContainer').html('<div class="img-placeholder"><i class="bi bi-image fs-1"></i></div>');
     }
+    viderLignesLots();
+    const lotsExistants = <?= json_encode($editLots) ?>;
+    lotsExistants.forEach(l => ajouterLigneLot(l));
     produitModal.show();
 });
 <?php endif; ?>

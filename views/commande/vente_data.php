@@ -30,7 +30,7 @@ function renderFactureCard(array $row, int $delaiSuppressionJours, bool $estSupe
     $isPaidValidee = in_array(strtolower($row['etat_facture'] ?? ''), ['payee', 'payee cash']) && $isValidee;
     $ageJours = (strtotime(date('Y-m-d')) - strtotime($row['date_facture'])) / 86400;
     $joursRestants = (int) ceil($delaiSuppressionJours - $ageJours);
-    $peutSupprimer = ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur');
+    $peutSupprimer = ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Proprietaire' || $_SESSION['role'] === 'Caisse');
 
     ob_start();
     ?>

@@ -248,6 +248,7 @@ $actifs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE etat = 'Actif' AND
 $inactifs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE etat = 'Inactif' AND role != 'Administrateur'")->fetchColumn();
 $vendeurs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role = 'Vendeur'")->fetchColumn();
 $caisses = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role = 'Caisse'")->fetchColumn();
+$proprietaires = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role = 'Propriétaire'")->fetchColumn();
 $superviseurs = $pdo->query("SELECT COUNT(*) FROM utilisateur WHERE role = 'Superviseur'")->fetchColumn();
 ?>
 <!DOCTYPE html>
@@ -397,6 +398,7 @@ h1, h2, h3, h4, h5, h6 { font-family: 'Outfit', sans-serif; font-weight: 700; le
             ['danger', 'x-circle-fill', 'Inactifs', $inactifs, ''],
             ['info', 'person-badge', 'Vendeurs', $vendeurs, ''],
             ['warning', 'cash-coin', 'Caisses', $caisses, ''],
+            ['info', 'person-check-fill', 'Propriétaires', $proprietaires, ''],
             ['purple', 'shield-check', 'Superviseurs', $superviseurs, ''],
         ];
         $colorMap = [
