@@ -24,7 +24,12 @@ $menuConfigJs = <<<'JS'
                          icon: 'bi-person-badge',
                          label: 'Mon profil',
                          url: '/utilisateur/profil'
-                     }
+                     },
+                     {
+                        icon: 'bi-book',
+                        label: 'Guide d\'utilisation',
+                        url: '/assets/guide/guide.html?role=caisse'
+                    }
                  ]
              },
 
@@ -35,21 +40,21 @@ $menuConfigJs = <<<'JS'
                  emoji: '📚',
                  items: [
 
-                    {
-                         icon: 'bi-bar-chart',
-                         label: 'Produits',
-                         url: '/produit/gestion'
-                     },
+                    // {
+                    //      icon: 'bi-bar-chart',
+                    //      label: 'Produits',
+                    //      url: '/produit/gestion'
+                    //  },
                     {
                          icon: 'bi-list-ul',
                          label: 'Entree de stock',
                          url: '/produit/stockEntree'
                      },
-                     {
-                         icon: 'bi-list-ul',
-                         label: 'Transfert du stock',
-                         url: '/commande/transfert'
-                     },
+                    //  {
+                    //      icon: 'bi-list-ul',
+                    //      label: 'Transfert du stock',
+                    //      url: '/commande/transfert'
+                    //  },
                      {
                          icon: 'bi-list-ul',
                          label: 'Ajustement du stock',
@@ -80,11 +85,11 @@ $menuConfigJs = <<<'JS'
                          url: '/facture/reglementClient'
                      },
 
-                    //  {
-                    //      icon: 'bi-list-ul',
-                    //      label: 'Bon de livraison',
-                    //      url: '/facture/bonLivraison'
-                    //  },
+                     {
+                         icon: 'bi-list-ul',
+                         label: 'Bon de livraison',
+                         url: '/facture/bonLivraison'
+                     }
                  ]
              },
 
@@ -129,6 +134,11 @@ $menuConfigJs = <<<'JS'
                          icon: 'bi-door-open',
                          label: 'Ouverture / Fermeture caisse',
                          url: '/caisse/journee'
+                     },
+                     {
+                         icon: 'bi-cash-stack',
+                         label: 'Dépenses',
+                         url: '/depense/gestion'
                      },
                      
                      {

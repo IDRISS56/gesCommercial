@@ -24,7 +24,12 @@ $menuConfigJs = <<<'JS'
                          icon: 'bi-person-badge',
                          label: 'Mon profil',
                          url: '/utilisateur/profil'
-                     }
+                     },
+                    {
+                        icon: 'bi-book',
+                        label: 'Guide d\'utilisation',
+                        url: '/assets/guide/guide.html?role=vendeur'  
+                    }
                  ]
              },
              {

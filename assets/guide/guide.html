@@ -1,0 +1,1355 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Guide d'utilisation — Gestion commerciale</title>
+  <link rel="stylesheet" href="guide.css">
+</head>
+<body>
+
+<!--
+  ============================================================
+  GUIDE D'UTILISATION — FICHIER PRINCIPAL (à modifier à la main)
+  ============================================================
+  Fichiers du guide (à garder dans le même dossier) :
+     guide.html  : le contenu (ce fichier)
+     guide.css   : l'apparence (couleurs, tailles…)
+     guide.js    : le comportement (filtre par rôle, recherche, zoom)
+     img/        : les captures d'écran
+
+  COMMENT MODIFIER ?
+   1. Changer un TEXTE         : repérez la section (commentaire « PAGE … »)
+                                 et modifiez le texte entre les balises.
+   2. Changer une CAPTURE      : remplacez le fichier dans img/ en gardant
+                                 le MÊME nom (ou changez src="img/xxx.jpg").
+   3. Ajouter une PAGE         : copiez le « MODÈLE DE PAGE » en bas de ce
+                                 fichier, collez-le avant </main>, puis
+                                 ajoutez une ligne dans le menu (« MODÈLE
+                                 DE LIEN DE MENU » plus bas).
+   4. Changer qui voit quoi    : attribut data-roles="..." d'une section et
+                                 de son lien dans le menu (rôles possibles :
+                                 administrateur superviseur proprietaire
+                                 vendeur caisse).
+   5. Changer les COULEURS     : tout en haut de guide.css (bloc :root).
+  ============================================================
+-->
+  <header class="top">
+    <button id="burger" aria-label="Menu">☰</button>
+    <h1>📘 Guide d'utilisation — Gestion commerciale</h1>
+    <button id="theme" title="Thème clair / sombre">🌓</button>
+  </header>
+  <div class="layout">
+    <!-- ===================== MENU DE GAUCHE ===================== -->
+    <aside>
+      <label for="role">Je suis…</label>
+      <select id="role">
+        <option value="">Tous les rôles</option>
+        <option value="administrateur">Administrateur</option>
+        <option value="superviseur">Superviseur</option>
+        <option value="proprietaire">Propriétaire</option>
+        <option value="vendeur">Vendeur</option>
+        <option value="caisse">Caisse</option>
+      </select>
+      <label for="search">Rechercher</label>
+      <input id="search" type="search" placeholder="Ex. : caisse, remise, stock…">
+
+      <div class="navgrp">
+        <div class="navtitle">Pour commencer</div>
+        <a href="#debut" data-roles="" data-t="avant de commencer connexion écran principal"><span class="n">★</span>Avant de commencer</a>
+        <a href="#roles" data-roles="" data-t="rôles qui peut faire quoi"><span class="n">★</span>Les rôles</a>
+      </div>
+
+      <div class="navgrp">  <!-- Module : Accueil -->
+        <div class="navtitle">Accueil</div>
+        <a href="#dashboard" data-roles="administrateur superviseur" data-t="tableau de bord (administrateur / superviseur)"><span class="n">1</span>Tableau de bord (Administrateur / Superviseur)</a>
+        <a href="#dash_prop" data-roles="proprietaire" data-t="tableau de bord du propriétaire"><span class="n">2</span>Tableau de bord du Propriétaire</a>
+        <a href="#dash_caisse" data-roles="caisse" data-t="tableau de bord du caissier"><span class="n">3</span>Tableau de bord du Caissier</a>
+        <a href="#dash_vendeur" data-roles="vendeur" data-t="tableau de bord du vendeur"><span class="n">4</span>Tableau de bord du Vendeur</a>
+        <a href="#profil" data-roles="administrateur superviseur proprietaire vendeur caisse" data-t="mon profil"><span class="n">5</span>Mon profil</a>
+      </div>
+
+      <div class="navgrp">  <!-- Module : Acteurs -->
+        <div class="navtitle">Acteurs</div>
+        <a href="#utilisateurs" data-roles="administrateur superviseur" data-t="utilisateurs"><span class="n">6</span>Utilisateurs</a>
+        <a href="#clients" data-roles="administrateur superviseur proprietaire" data-t="clients"><span class="n">7</span>Clients</a>
+        <a href="#fournisseurs" data-roles="administrateur superviseur proprietaire" data-t="fournisseurs"><span class="n">8</span>Fournisseurs</a>
+      </div>
+
+      <div class="navgrp">  <!-- Module : Articles &amp; Boutiques -->
+        <div class="navtitle">Articles &amp; Boutiques</div>
+        <a href="#categories" data-roles="administrateur superviseur proprietaire" data-t="catégories"><span class="n">9</span>Catégories</a>
+        <a href="#produits" data-roles="administrateur superviseur proprietaire" data-t="produits"><span class="n">10</span>Produits</a>
+        <a href="#lots" data-roles="administrateur superviseur proprietaire" data-t="configuration des lots"><span class="n">11</span>Configuration des lots</a>
+        <a href="#tranches" data-roles="administrateur superviseur proprietaire" data-t="tranches de prix"><span class="n">12</span>Tranches de prix</a>
+        <a href="#boutiques" data-roles="administrateur superviseur" data-t="boutiques"><span class="n">13</span>Boutiques</a>
+        <a href="#taxes" data-roles="administrateur superviseur proprietaire" data-t="taxes"><span class="n">14</span>Taxes</a>
+      </div>
+
+      <div class="navgrp">  <!-- Module : Stock -->
+        <div class="navtitle">Stock</div>
+        <a href="#entree" data-roles="administrateur superviseur proprietaire caisse" data-t="entrée de stock"><span class="n">15</span>Entrée de stock</a>
+        <a href="#sortie" data-roles="administrateur superviseur proprietaire" data-t="sortie de stock"><span class="n">16</span>Sortie de stock</a>
+        <a href="#transfert" data-roles="administrateur superviseur" data-t="transfert de stock"><span class="n">17</span>Transfert de stock</a>
+        <a href="#ajustement" data-roles="administrateur superviseur proprietaire caisse" data-t="ajustement du stock"><span class="n">18</span>Ajustement du stock</a>
+      </div>
+
+      <div class="navgrp">  <!-- Module : Ventes -->
+        <div class="navtitle">Ventes</div>
+        <a href="#vente_detail" data-roles="administrateur superviseur proprietaire vendeur caisse" data-t="vente en détail (vente au comptoir)"><span class="n">19</span>Vente en détail (vente au comptoir)</a>
+        <a href="#bon_commande" data-roles="administrateur superviseur proprietaire vendeur caisse" data-t="bon de commande (factures clients)"><span class="n">20</span>Bon de commande (factures clients)</a>
+        <a href="#reglement_client" data-roles="administrateur superviseur proprietaire caisse" data-t="règlement des factures clients"><span class="n">21</span>Règlement des factures clients</a>
+        <a href="#bon_livraison" data-roles="administrateur superviseur proprietaire vendeur caisse" data-t="bon de livraison"><span class="n">22</span>Bon de livraison</a>
+      </div>
+
+      <div class="navgrp">  <!-- Module : Achats -->
+        <div class="navtitle">Achats</div>
+        <a href="#achat" data-roles="administrateur superviseur proprietaire caisse" data-t="enregistrer une facture fournisseur"><span class="n">23</span>Enregistrer une facture fournisseur</a>
+        <a href="#suivi_achat" data-roles="administrateur superviseur proprietaire vendeur caisse" data-t="bon de commande fournisseur"><span class="n">24</span>Bon de commande fournisseur</a>
+        <a href="#reglement_fournisseur" data-roles="administrateur superviseur proprietaire caisse" data-t="règlement des factures fournisseurs"><span class="n">25</span>Règlement des factures fournisseurs</a>
+      </div>
+
+      <div class="navgrp">  <!-- Module : Trésorerie -->
+        <div class="navtitle">Trésorerie</div>
+        <a href="#caisse" data-roles="administrateur superviseur" data-t="caisse (gestion des caisses)"><span class="n">26</span>Caisse (gestion des caisses)</a>
+        <a href="#journee" data-roles="administrateur superviseur proprietaire caisse" data-t="ouverture / fermeture de caisse"><span class="n">27</span>Ouverture / Fermeture de caisse</a>
+        <a href="#depenses" data-roles="administrateur superviseur proprietaire caisse" data-t="dépenses"><span class="n">28</span>Dépenses</a>
+        <a href="#transactions" data-roles="administrateur superviseur proprietaire caisse" data-t="transactions"><span class="n">29</span>Transactions</a>
+      </div>
+
+      <div class="navgrp">  <!-- Module : Rapports -->
+        <div class="navtitle">Rapports</div>
+        <a href="#hist_produit" data-roles="administrateur superviseur proprietaire" data-t="historique des produits"><span class="n">30</span>Historique des produits</a>
+        <a href="#mvt_stock" data-roles="administrateur superviseur proprietaire" data-t="mouvement de stock"><span class="n">31</span>Mouvement de stock</a>
+        <a href="#rapport_commercial" data-roles="administrateur superviseur proprietaire" data-t="rapport commercial"><span class="n">32</span>Rapport commercial</a>
+        <a href="#rapport_financier" data-roles="administrateur superviseur proprietaire caisse" data-t="rapport financier"><span class="n">33</span>Rapport financier</a>
+      </div>
+
+      <div class="navgrp">
+        <div class="navtitle">Pour aller plus loin</div>
+        <a href="#parcours" data-roles="" data-t="tâches de tous les jours"><span class="n">★</span>Les tâches de tous les jours</a>
+        <a href="#glossaire" data-roles="" data-t="lexique glossaire"><span class="n">★</span>Petit lexique</a>
+      </div>
+
+      <!-- MODÈLE DE LIEN DE MENU (à copier dans le bon module, plus haut) :
+      <a href="#mapage" data-roles="administrateur superviseur" data-t="mots utiles à la recherche"><span class="n">99</span>Titre de ma page</a>
+      -->
+    </aside>
+
+    <main>
+      <div class="hero">
+        <h1>Guide d'utilisation</h1>
+        <p>Application de gestion commerciale — ventes, achats, stock, caisse, rapports.</p>
+        <p>Choisissez votre rôle dans le menu de gauche pour ne voir que les pages qui vous concernent. Cliquez sur une capture pour l'agrandir.</p>
+      </div>
+      <div id="empty" class="empty">Aucune page ne correspond à votre recherche.</div>
+
+      <!-- ===================== AVANT DE COMMENCER ===================== -->
+      <section class="doc" id="debut" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Pour commencer</div>
+        <h2>Avant de commencer</h2>
+        <h3>Se connecter</h3>
+        <p>Ouvrez l'adresse de l'application dans votre navigateur. Vous arrivez sur la page de connexion.</p>
+        <figure>
+          <img src="img/login.jpg" alt="Page de connexion" data-zoom>
+          <figcaption>Page de connexion <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <ol class="zones">
+          <li value="1">Saisissez votre <b>identifiant</b> (login).</li>
+          <li value="2">Saisissez votre <b>mot de passe</b>.</li>
+          <li value="3">Cliquez sur <b>Se connecter</b>.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Si vous avez oublié votre mot de passe ou si le compte est refusé, contactez votre Administrateur ou votre Superviseur. Un compte « Inactif » ne peut pas se connecter.</div></div>
+        <h3>Découvrir l'écran principal</h3>
+        <figure>
+          <img src="img/shell.jpg" alt="L&#x27;écran principal après connexion" data-zoom>
+          <figcaption>L&#x27;écran principal après connexion <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <ol class="zones">
+          <li value="1">La <b>barre du haut</b> : elle contient les grands <b>modules</b> (Accueil, Acteurs, Articles &amp; Boutiques, Stock, Ventes, Achats, Trésorerie, Rapports), votre nom et votre rôle. Cliquez sur un module pour voir ses pages.</li>
+          <li value="2">Le <b>menu de gauche</b> : il liste les pages du module choisi.</li>
+          <li value="3">La <b>zone centrale</b> : c'est là que s'affiche la page ouverte.</li>
+          <li value="4">La <b>barre du bas</b> : elle indique que vous êtes connecté, la date et le temps de session.</li>
+        </ol>
+        <p>Le menu ne montre que les pages auxquelles <b>votre rôle</b> a droit.</p>
+      </section>
+
+      <!-- ===================== LES RÔLES ===================== -->
+      <section class="doc" id="roles" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Pour commencer</div>
+        <h2>Les rôles : qui peut faire quoi ?</h2>
+        <p>Chaque personne a un <b>rôle</b>. Le tableau montre les pages accessibles pour chaque rôle (✔ = accès).</p>
+        <div class="tablewrap">
+          <table class="matrix">
+            <thead><tr><th>Pages</th><th>Administrateur</th><th>Superviseur</th><th>Propriétaire</th><th>Vendeur</th><th>Caisse</th></tr></thead>
+            <tbody>
+              <tr><td>Tableau de bord, Mon profil</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td></tr>
+              <tr><td>Utilisateurs</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c"></td><td class="c"></td></tr>
+              <tr><td>Clients, Fournisseurs</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c"></td></tr>
+              <tr><td>Catégories, Lots, Tranches de prix, Taxes</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c"></td></tr>
+              <tr><td>Produits</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c"></td></tr>
+              <tr><td>Boutiques, Gestion des caisses</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c"></td><td class="c"></td></tr>
+              <tr><td>Entrée de stock, Ajustement</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c">✔</td></tr>
+              <tr><td>Sortie de stock</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c"></td></tr>
+              <tr><td>Transfert de stock</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c"></td><td class="c"></td></tr>
+              <tr><td>Vente en détail, Bon de commande, Bon de commande fournisseur</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td></tr>
+              <tr><td>Bon de livraison</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td></tr>
+              <tr><td>Règlements clients / fournisseurs, Facture fournisseur</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c">✔</td></tr>
+              <tr><td>Ouverture / Fermeture caisse, Dépenses, Transactions</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c">✔</td></tr>
+              <tr><td>Historique produits, Mouvement de stock, Rapport commercial</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c"></td></tr>
+              <tr><td>Rapport financier</td><td class="c">✔</td><td class="c">✔</td><td class="c">✔</td><td class="c"></td><td class="c">✔</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="box"><b>À retenir :</b>
+          <ul>
+            <li>L'<b>Administrateur</b> et le <b>Superviseur</b> voient toutes les boutiques.</li>
+            <li>Le <b>Propriétaire</b>, le <b>Vendeur</b> et le <b>Caissier</b> ne voient que <b>leur boutique</b>.</li>
+            <li>Seuls l'Administrateur et le Superviseur gèrent les utilisateurs et peuvent annuler une transaction.</li>
+          </ul>
+        </div>
+        <h3>Conseils valables sur toutes les pages</h3>
+        <ul>
+          <li><b>Filtrer</b> : tapez un mot ou choisissez un critère, puis cliquez sur « Filtrer ». « Réinitialiser » efface les filtres.</li>
+          <li><b>Crayon</b> = modifier. <b>Corbeille</b> = supprimer. <b>Œil</b> = voir le détail.</li>
+          <li>Les champs avec une <b>étoile rouge (*)</b> sont obligatoires.</li>
+          <li>Les montants sont en <b>francs CFA (F)</b>.</li>
+          <li>Les <b>pastilles rouges numérotées</b> des captures d'écran renvoient aux explications qui les suivent.</li>
+        </ul>
+      </section>
+
+      <!-- ===================== PAGE 1 : Tableau de bord (Administrateur / Superviseur) ===================== -->
+      <section class="doc" id="dashboard" data-roles="administrateur superviseur">
+        <div class="crumb">Accueil</div>
+        <h2><span class="num">1</span>Tableau de bord (Administrateur / Superviseur)</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Accueil › Tableau de bord</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> C'est la page d'accueil du patron. Elle résume l'activité : combien de ventes, combien d'argent rentré, l'état des stocks.</p>
+        <figure>
+          <img src="img/dashboard.jpg" alt="Le tableau de bord (exemple sur le mois de septembre 2026)" data-zoom>
+          <figcaption>Le tableau de bord (exemple sur le mois de septembre 2026) <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le <b>mois</b> affiché. Changez-le pour voir un autre mois.</li>
+          <li value="2">Le bouton <b>Appliquer</b> : il met à jour les chiffres avec la période choisie.</li>
+          <li value="3">Les <b>indicateurs de la période</b> : nombre de commandes, chiffre d'affaires, panier moyen, clients actifs, commandes en attente.</li>
+        </ol>
+        <p>Au-dessus, les boutons <b>Jour / Semaine / Mois / Trimestre / Semestre / Année</b> changent la durée observée. Plus bas, vous voyez l'<b>état des stocks</b> (produits en rupture, en alerte, en quantité suffisante) et des graphiques sur l'évolution des ventes et les modes de règlement. Le montant « Caisse » en haut à droite est le solde total des caisses.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur la période voulue (par exemple <b>Mois</b>).</li>
+          <li>Choisissez le mois dans la case.</li>
+          <li>Cliquez sur <b>Appliquer</b>.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Une grosse part de produits « en rupture » signifie qu'il faut penser à réapprovisionner.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 2 : Tableau de bord du Propriétaire ===================== -->
+      <section class="doc" id="dash_prop" data-roles="proprietaire">
+        <div class="crumb">Accueil</div>
+        <h2><span class="num">2</span>Tableau de bord du Propriétaire</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Accueil › Tableau de bord</div>
+          <div><b>Qui y a accès :</b> <span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Même idée que le tableau de bord principal, mais limité à <b>votre boutique</b>.</p>
+        <figure>
+          <img src="img/dashboard_proprietaire.jpg" alt="Tableau de bord du Propriétaire" data-zoom>
+          <figcaption>Tableau de bord du Propriétaire <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Vous y trouvez : les <b>ventes du jour</b> et <b>du mois</b>, le <b>panier moyen</b>, le <b>solde de la caisse ouverte</b>, l'<b>état du stock</b> de votre boutique (rupture, alerte, correct), la liste des <b>ventes récentes</b> et les <b>produits à surveiller</b> (stock bas).</p>
+        <div class="tip"><span>💡</span><div>Cette page se lit seulement : aucun bouton à remplir.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 3 : Tableau de bord du Caissier ===================== -->
+      <section class="doc" id="dash_caisse" data-roles="caisse">
+        <div class="crumb">Accueil</div>
+        <h2><span class="num">3</span>Tableau de bord du Caissier</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Accueil › Tableau de bord</div>
+          <div><b>Qui y a accès :</b> <span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Page d'accueil du caissier : l'état de sa caisse et les opérations du jour.</p>
+        <figure>
+          <img src="img/dashboard_caisse.jpg" alt="Tableau de bord du Caissier" data-zoom>
+          <figcaption>Tableau de bord du Caissier <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>En haut, deux raccourcis : <b>Nouvelle vente</b> (ouvre la vente en détail) et <b>Gérer ma caisse</b> (ouverture/fermeture). Dessous : <b>solde de la caisse</b>, <b>encaissé aujourd'hui</b>, <b>décaissé aujourd'hui</b>, nombre de transactions du jour, puis la liste de <b>vos transactions d'aujourd'hui</b>. Le petit badge vert en haut à droite indique la caisse actuellement ouverte.</p>
+        <div class="tip"><span>💡</span><div>Si aucun badge « Caisse ouverte » n'apparaît, demandez l'ouverture de la journée de caisse avant d'encaisser.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 4 : Tableau de bord du Vendeur ===================== -->
+      <section class="doc" id="dash_vendeur" data-roles="vendeur">
+        <div class="crumb">Accueil</div>
+        <h2><span class="num">4</span>Tableau de bord du Vendeur</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Accueil › Tableau de bord</div>
+          <div><b>Qui y a accès :</b> <span class="role r-vendeur">Vendeur</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Page d'accueil du vendeur : ses ventes en un coup d'œil.</p>
+        <figure>
+          <img src="img/dashboard_vendeur.jpg" alt="Tableau de bord du Vendeur" data-zoom>
+          <figcaption>Tableau de bord du Vendeur <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Le bouton <b>Nouvelle vente</b> vous mène directement à la vente en détail. Les quatre cartes montrent votre chiffre d'affaires du jour, de la semaine, du mois et votre panier moyen. Plus bas : un graphique de vos ventes sur 7 jours, vos meilleurs produits sur 30 jours et la liste de vos dernières ventes.</p>
+      </section>
+
+      <!-- ===================== PAGE 5 : Mon profil ===================== -->
+      <section class="doc" id="profil" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Accueil</div>
+        <h2><span class="num">5</span>Mon profil</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Accueil › Mon profil</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-vendeur">Vendeur</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Voir et modifier vos informations personnelles.</p>
+        <figure>
+          <img src="img/profil.jpg" alt="La page « Mon profil »" data-zoom>
+          <figcaption>La page « Mon profil » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton <b>Modifier</b> : il permet de changer vos informations (téléphone, adresse, mot de passe…).</li>
+        </ol>
+        <p>La page affiche votre matricule, téléphone, e-mail, sexe, ville, adresse, boutique d'affectation, date d'inscription et l'état de votre compte.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur <b>Modifier</b>.</li>
+          <li>Changez l'information voulue.</li>
+          <li>Enregistrez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Changez votre mot de passe régulièrement et ne le donnez à personne.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 6 : Utilisateurs ===================== -->
+      <section class="doc" id="utilisateurs" data-roles="administrateur superviseur">
+        <div class="crumb">Acteurs</div>
+        <h2><span class="num">6</span>Utilisateurs</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Acteurs › Utilisateurs</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Créer les comptes des personnes qui utiliseront l'application et leur donner un <b>rôle</b> (ce qu'elles ont le droit de faire).</p>
+        <figure>
+          <img src="img/utilisateurs.jpg" alt="Liste des utilisateurs" data-zoom>
+          <figcaption>Liste des utilisateurs <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton principal en haut à droite : il sert à <b>ajouter</b> un nouvel élément.</li>
+          <li value="2">Les <b>chiffres clés</b> : un résumé rapide (total, actifs, inactifs…).</li>
+          <li value="3">Les <b>filtres</b> : tapez un mot dans « Recherche » ou choisissez un critère, puis cliquez sur <b>Filtrer</b>. <b>Réinitialiser</b> remet tout à zéro.</li>
+          <li value="4">La <b>liste</b> des éléments déjà enregistrés.</li>
+          <li value="5">Les <b>actions</b> de chaque ligne : le <b>crayon</b> pour modifier, la <b>corbeille</b> pour supprimer.</li>
+        </ol>
+        <figure>
+          <img src="img/utilisateurs_modal.jpg" alt="Fenêtre « Nouvel utilisateur »" data-zoom>
+          <figcaption>Fenêtre « Nouvel utilisateur » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Les rôles possibles sont : <b>Administrateur</b>, <b>Superviseur</b>, <b>Propriétaire</b>, <b>Vendeur</b> et <b>Caisse</b>. Chaque utilisateur (sauf Administrateur et Superviseur) est rattaché à une <b>boutique</b> et ne voit que celle-ci.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur « Nouvel utilisateur ».</li>
+          <li>Saisissez nom, identifiant de connexion et mot de passe.</li>
+          <li>Choisissez le <b>rôle</b> et la <b>boutique</b>.</li>
+          <li>Enregistrez. La personne peut se connecter immédiatement.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Pour empêcher quelqu'un de se connecter sans effacer son historique, passez son compte à <b>Inactif</b> plutôt que de le supprimer.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 7 : Clients ===================== -->
+      <section class="doc" id="clients" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Acteurs</div>
+        <h2><span class="num">7</span>Clients</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Acteurs › Clients</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Tenir la liste des personnes ou entreprises à qui vous vendez.</p>
+        <figure>
+          <img src="img/clients.jpg" alt="Liste des clients" data-zoom>
+          <figcaption>Liste des clients <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton principal en haut à droite : il sert à <b>ajouter</b> un nouvel élément.</li>
+          <li value="2">Les <b>chiffres clés</b> : un résumé rapide (total, actifs, inactifs…).</li>
+          <li value="3">Les <b>filtres</b> : tapez un mot dans « Recherche » ou choisissez un critère, puis cliquez sur <b>Filtrer</b>. <b>Réinitialiser</b> remet tout à zéro.</li>
+          <li value="4">La <b>liste</b> des éléments déjà enregistrés.</li>
+          <li value="5">Les <b>actions</b> de chaque ligne : le <b>crayon</b> pour modifier, la <b>corbeille</b> pour supprimer.</li>
+        </ol>
+        <figure>
+          <img src="img/clients_modal.jpg" alt="Fenêtre « Nouveau client »" data-zoom>
+          <figcaption>Fenêtre « Nouveau client » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Le « Client comptoir » est un client par défaut utilisé pour les ventes rapides au comptoir. Vous pouvez aussi créer un client directement depuis la vente en détail avec le bouton « Nouveau ».</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur le bouton « Nouveau client » (zone 1).</li>
+          <li>Une fenêtre s'ouvre : remplissez les champs. Ceux marqués d'une étoile rouge (*) sont obligatoires.</li>
+          <li>Cliquez sur <b>Enregistrer</b>. L'élément apparaît tout de suite dans la liste.</li>
+          <li>Pour corriger une erreur, cliquez sur le crayon de la ligne concernée (zone 5), changez ce qu'il faut, puis enregistrez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Renseignez le téléphone : c'est pratique pour retrouver un client et lui envoyer un document.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 8 : Fournisseurs ===================== -->
+      <section class="doc" id="fournisseurs" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Acteurs</div>
+        <h2><span class="num">8</span>Fournisseurs</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Acteurs › Fournisseurs</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Tenir la liste de ceux qui vous vendent de la marchandise.</p>
+        <figure>
+          <img src="img/fournisseurs.jpg" alt="Liste des fournisseurs" data-zoom>
+          <figcaption>Liste des fournisseurs <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton principal en haut à droite : il sert à <b>ajouter</b> un nouvel élément.</li>
+          <li value="2">Les <b>chiffres clés</b> : un résumé rapide (total, actifs, inactifs…).</li>
+          <li value="3">Les <b>filtres</b> : tapez un mot dans « Recherche » ou choisissez un critère, puis cliquez sur <b>Filtrer</b>. <b>Réinitialiser</b> remet tout à zéro.</li>
+          <li value="4">La <b>liste</b> des éléments déjà enregistrés.</li>
+          <li value="5">Les <b>actions</b> de chaque ligne : le <b>crayon</b> pour modifier, la <b>corbeille</b> pour supprimer.</li>
+        </ol>
+        <figure>
+          <img src="img/fournisseurs_modal.jpg" alt="Fenêtre « Nouveau fournisseur »" data-zoom>
+          <figcaption>Fenêtre « Nouveau fournisseur » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Le fonctionnement est identique à celui des clients.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur le bouton « Nouveau fournisseur » (zone 1).</li>
+          <li>Une fenêtre s'ouvre : remplissez les champs. Ceux marqués d'une étoile rouge (*) sont obligatoires.</li>
+          <li>Cliquez sur <b>Enregistrer</b>. L'élément apparaît tout de suite dans la liste.</li>
+          <li>Pour corriger une erreur, cliquez sur le crayon de la ligne concernée (zone 5), changez ce qu'il faut, puis enregistrez.</li>
+        </ol>
+      </section>
+
+      <!-- ===================== PAGE 9 : Catégories ===================== -->
+      <section class="doc" id="categories" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Articles &amp; Boutiques</div>
+        <h2><span class="num">9</span>Catégories</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Articles &amp; Boutiques › Catégories</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Ranger vos produits par familles (par exemple « APSONIC », « KAPANOU »…). Cela facilite la recherche.</p>
+        <figure>
+          <img src="img/categories.jpg" alt="Liste des catégories" data-zoom>
+          <figcaption>Liste des catégories <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton principal en haut à droite : il sert à <b>ajouter</b> un nouvel élément.</li>
+          <li value="2">Les <b>chiffres clés</b> : un résumé rapide (total, actifs, inactifs…).</li>
+          <li value="3">Les <b>filtres</b> : tapez un mot dans « Recherche » ou choisissez un critère, puis cliquez sur <b>Filtrer</b>. <b>Réinitialiser</b> remet tout à zéro.</li>
+          <li value="4">La <b>liste</b> des éléments déjà enregistrés.</li>
+          <li value="5">Les <b>actions</b> de chaque ligne : le <b>crayon</b> pour modifier, la <b>corbeille</b> pour supprimer.</li>
+        </ol>
+        <figure>
+          <img src="img/categories_modal.jpg" alt="Fenêtre « Nouvelle catégorie »" data-zoom>
+          <figcaption>Fenêtre « Nouvelle catégorie » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Une photo peut être ajoutée à chaque catégorie.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur le bouton « Nouvelle catégorie » (zone 1).</li>
+          <li>Une fenêtre s'ouvre : remplissez les champs. Ceux marqués d'une étoile rouge (*) sont obligatoires.</li>
+          <li>Cliquez sur <b>Enregistrer</b>. L'élément apparaît tout de suite dans la liste.</li>
+          <li>Pour corriger une erreur, cliquez sur le crayon de la ligne concernée (zone 5), changez ce qu'il faut, puis enregistrez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Créez d'abord vos catégories, puis vos produits : un produit doit être placé dans une catégorie.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 10 : Produits ===================== -->
+      <section class="doc" id="produits" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Articles &amp; Boutiques</div>
+        <h2><span class="num">10</span>Produits</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Articles &amp; Boutiques › Produits</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> C'est le <b>catalogue</b> : la liste de tout ce que vous vendez, avec les prix et le stock.</p>
+        <figure>
+          <img src="img/produits.jpg" alt="Liste des produits" data-zoom>
+          <figcaption>Liste des produits <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton principal en haut à droite : il sert à <b>ajouter</b> un nouvel élément.</li>
+          <li value="2">Les <b>chiffres clés</b> : un résumé rapide (total, actifs, inactifs…).</li>
+          <li value="3">Les <b>filtres</b> : tapez un mot dans « Recherche » ou choisissez un critère, puis cliquez sur <b>Filtrer</b>. <b>Réinitialiser</b> remet tout à zéro.</li>
+          <li value="4">La <b>liste</b> des éléments déjà enregistrés.</li>
+          <li value="5">Les <b>actions</b> de chaque ligne : le <b>crayon</b> pour modifier, la <b>corbeille</b> pour supprimer.</li>
+        </ol>
+        <figure>
+          <img src="img/produits_modal.jpg" alt="Fenêtre « Nouveau produit »" data-zoom>
+          <figcaption>Fenêtre « Nouveau produit » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Chaque produit a un <b>prix fournisseur</b> (ce que vous payez), un <b>prix de vente</b>, un <b>bénéfice</b> (la différence), un <b>stock</b> et une <b>catégorie</b>. Dans la fenêtre du produit, une zone « Lots/conditionnements » permet de définir les ventes par carton, boîte, etc.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur le bouton « Nouveau produit » (zone 1).</li>
+          <li>Une fenêtre s'ouvre : remplissez les champs. Ceux marqués d'une étoile rouge (*) sont obligatoires.</li>
+          <li>Cliquez sur <b>Enregistrer</b>. L'élément apparaît tout de suite dans la liste.</li>
+          <li>Pour corriger une erreur, cliquez sur le crayon de la ligne concernée (zone 5), changez ce qu'il faut, puis enregistrez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Le stock ne se modifie pas ici : utilisez <b>Entrée</b>, <b>Sortie</b> ou <b>Ajustement</b> de stock pour garder une trace.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 11 : Configuration des lots ===================== -->
+      <section class="doc" id="lots" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Articles &amp; Boutiques</div>
+        <h2><span class="num">11</span>Configuration des lots</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Articles &amp; Boutiques › Configuration des lots</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Définir comment un produit se vend en <b>lot</b> (carton, boîte, palette…) : combien de pièces dans un lot et à quel prix.</p>
+        <figure>
+          <img src="img/lots.jpg" alt="Liste des lots configurés" data-zoom>
+          <figcaption>Liste des lots configurés <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton principal en haut à droite : il sert à <b>ajouter</b> un nouvel élément.</li>
+          <li value="2">Les <b>chiffres clés</b> : un résumé rapide (total, actifs, inactifs…).</li>
+          <li value="3">Les <b>filtres</b> : tapez un mot dans « Recherche » ou choisissez un critère, puis cliquez sur <b>Filtrer</b>. <b>Réinitialiser</b> remet tout à zéro.</li>
+          <li value="4">La <b>liste</b> des éléments déjà enregistrés.</li>
+          <li value="5">Les <b>actions</b> de chaque ligne : le <b>crayon</b> pour modifier, la <b>corbeille</b> pour supprimer.</li>
+        </ol>
+        <figure>
+          <img src="img/lots_modal.jpg" alt="Fenêtre « Nouveau lot »" data-zoom>
+          <figcaption>Fenêtre « Nouveau lot » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Exemple : un carton contient 24 pièces, il se vend 10 000 F et s'achète 9 500 F. Pendant la vente, il suffit de choisir « Carton » au lieu de « Unité ».</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur « Nouveau lot ».</li>
+          <li>Choisissez le produit et le type de lot (carton, boîte…).</li>
+          <li>Indiquez le nombre de pièces par lot, le prix de vente et le coût d'achat du lot.</li>
+          <li>Enregistrez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>La quantité disponible d'un lot suit automatiquement le stock du produit : vous n'avez pas à la saisir.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 12 : Tranches de prix ===================== -->
+      <section class="doc" id="tranches" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Articles &amp; Boutiques</div>
+        <h2><span class="num">12</span>Tranches de prix</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Articles &amp; Boutiques › Tranches de prix</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Proposer des <b>prix dégressifs</b> : plus le client achète, moins le prix unitaire est élevé.</p>
+        <figure>
+          <img src="img/tranches.jpg" alt="Liste des produits et de leurs tranches" data-zoom>
+          <figcaption>Liste des produits et de leurs tranches <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Les <b>chiffres clés</b> : produits avec tranches actives, etc.</li>
+          <li value="2">La <b>liste des produits</b> avec prix d'achat, prix de vente et nombre de tranches.</li>
+          <li value="3">Le bouton de <b>modification</b> d'un produit : il ouvre la fenêtre pour régler les tranches.</li>
+        </ol>
+        <figure>
+          <img src="img/tranches_modal.jpg" alt="Fenêtre de gestion des tranches d&#x27;un produit" data-zoom>
+          <figcaption>Fenêtre de gestion des tranches d&#x27;un produit <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Au-dessus de la liste, les filtres (recherche, catégorie, « Afficher ») vous aident à retrouver un produit. Exemple : 1 à 9 pièces = 1 000 F l'unité ; à partir de 10 pièces = 900 F l'unité. Un prix « Détail » peut aussi être défini.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Trouvez le produit dans la liste.</li>
+          <li>Cliquez sur le bouton de modification (zone 3).</li>
+          <li>Ajoutez vos tranches : quantité minimale et prix unitaire.</li>
+          <li>Activez l'interrupteur « tranches » du produit puis enregistrez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Le logiciel refuse d'enregistrer une tranche dont le prix est inférieur au prix fournisseur, pour éviter de vendre à perte.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 13 : Boutiques ===================== -->
+      <section class="doc" id="boutiques" data-roles="administrateur superviseur">
+        <div class="crumb">Articles &amp; Boutiques</div>
+        <h2><span class="num">13</span>Boutiques</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Articles &amp; Boutiques › Boutiques</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Enregistrer vos points de vente (nom, logo, téléphone, adresse).</p>
+        <figure>
+          <img src="img/boutiques.jpg" alt="Liste des boutiques" data-zoom>
+          <figcaption>Liste des boutiques <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton principal en haut à droite : il sert à <b>ajouter</b> un nouvel élément.</li>
+          <li value="2">Les <b>chiffres clés</b> : un résumé rapide (total, actifs, inactifs…).</li>
+          <li value="3">Les <b>filtres</b> : tapez un mot dans « Recherche » ou choisissez un critère, puis cliquez sur <b>Filtrer</b>. <b>Réinitialiser</b> remet tout à zéro.</li>
+          <li value="4">La <b>liste</b> des éléments déjà enregistrés.</li>
+          <li value="5">Les <b>actions</b> de chaque ligne : le <b>crayon</b> pour modifier, la <b>corbeille</b> pour supprimer.</li>
+        </ol>
+        <figure>
+          <img src="img/boutiques_modal.jpg" alt="Fenêtre « Nouvelle boutique »" data-zoom>
+          <figcaption>Fenêtre « Nouvelle boutique » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Le <b>logo</b> et les coordonnées de la boutique s'impriment sur les tickets, bons de commande et reçus.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur le bouton « Nouvelle boutique » (zone 1).</li>
+          <li>Une fenêtre s'ouvre : remplissez les champs. Ceux marqués d'une étoile rouge (*) sont obligatoires.</li>
+          <li>Cliquez sur <b>Enregistrer</b>. L'élément apparaît tout de suite dans la liste.</li>
+          <li>Pour corriger une erreur, cliquez sur le crayon de la ligne concernée (zone 5), changez ce qu'il faut, puis enregistrez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Chaque boutique a son propre stock et ses propres caisses.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 14 : Taxes ===================== -->
+      <section class="doc" id="taxes" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Articles &amp; Boutiques</div>
+        <h2><span class="num">14</span>Taxes</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Articles &amp; Boutiques › Taxes</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Définir les taxes (par exemple TVA 20 %) et les remises que l'on peut appliquer sur une vente.</p>
+        <figure>
+          <img src="img/taxes.jpg" alt="Liste des taxes" data-zoom>
+          <figcaption>Liste des taxes <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton principal en haut à droite : il sert à <b>ajouter</b> un nouvel élément.</li>
+          <li value="2">Les <b>chiffres clés</b> : un résumé rapide (total, actifs, inactifs…).</li>
+          <li value="3">Les <b>filtres</b> : tapez un mot dans « Recherche » ou choisissez un critère, puis cliquez sur <b>Filtrer</b>. <b>Réinitialiser</b> remet tout à zéro.</li>
+          <li value="4">La <b>liste</b> des éléments déjà enregistrés.</li>
+          <li value="5">Les <b>actions</b> de chaque ligne : le <b>crayon</b> pour modifier, la <b>corbeille</b> pour supprimer.</li>
+        </ol>
+        <figure>
+          <img src="img/taxes_modal.jpg" alt="Fenêtre « Nouvelle taxe »" data-zoom>
+          <figcaption>Fenêtre « Nouvelle taxe » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Chaque ligne a un <b>taux en %</b> et un <b>type</b> (taxe ou remise). Ils apparaissent ensuite dans les listes « TVA » et « Remise » de la vente.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur le bouton « Nouvelle taxe » (zone 1).</li>
+          <li>Une fenêtre s'ouvre : remplissez les champs. Ceux marqués d'une étoile rouge (*) sont obligatoires.</li>
+          <li>Cliquez sur <b>Enregistrer</b>. L'élément apparaît tout de suite dans la liste.</li>
+          <li>Pour corriger une erreur, cliquez sur le crayon de la ligne concernée (zone 5), changez ce qu'il faut, puis enregistrez.</li>
+        </ol>
+      </section>
+
+      <!-- ===================== PAGE 15 : Entrée de stock ===================== -->
+      <section class="doc" id="entree" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Stock</div>
+        <h2><span class="num">15</span>Entrée de stock</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Stock › Entrée de stock</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Ajouter de la marchandise au stock (réapprovisionnement, retour fournisseur…).</p>
+        <figure>
+          <img src="img/entree.jpg" alt="La page Entrée de stock" data-zoom>
+          <figcaption>La page Entrée de stock <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1"><b>Boutique</b> : l'endroit où la marchandise entre.</li>
+          <li value="2"><b>Catégorie</b> : sert à filtrer la liste de produits.</li>
+          <li value="3"><b>Commentaire</b> (obligatoire) : expliquez la raison, par exemple « Réception de marchandises ».</li>
+          <li value="4"><b>Ajouter</b> : place le produit choisi dans la liste de l'entrée.</li>
+          <li value="5"><b>Valider l'entrée</b> : enregistre définitivement.</li>
+        </ol>
+        <figure>
+          <img src="img/entree_ligne.jpg" alt="Après avoir ajouté un produit à l&#x27;entrée" data-zoom>
+          <figcaption>Après avoir ajouté un produit à l&#x27;entrée <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Vous pouvez ajouter <b>autant de produits que vous voulez</b> avant de valider. Chaque ligne montre le stock actuel, la quantité reçue, le prix d'achat, le prix de vente et le <b>nouveau stock</b> calculé. L'historique des 30 dernières entrées est en bas de page.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez la <b>boutique</b>, puis la <b>catégorie</b>.</li>
+          <li>Écrivez le <b>commentaire</b>.</li>
+          <li>Choisissez un produit, saisissez la quantité (et les prix si besoin), cliquez sur <b>Ajouter</b>. Répétez pour chaque produit.</li>
+          <li>Vérifiez le récapitulatif en bas du tableau (nombre de produits, unités, valeur).</li>
+          <li>Cliquez sur <b>Valider l'entrée</b>.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Rien n'est enregistré tant que vous n'avez pas cliqué sur « Valider l'entrée ».</div></div>
+        <div class="tip"><span>💡</span><div>La corbeille rouge d'une ligne la retire avant validation.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 16 : Sortie de stock ===================== -->
+      <section class="doc" id="sortie" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Stock</div>
+        <h2><span class="num">16</span>Sortie de stock</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Stock › Sortie de stock</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Retirer de la marchandise du stock sans vente : casse, perte, don, usage interne…</p>
+        <figure>
+          <img src="img/sortie.jpg" alt="La page Sortie de stock" data-zoom>
+          <figcaption>La page Sortie de stock <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1"><b>Boutique</b> concernée.</li>
+          <li value="2"><b>Catégorie</b> des produits.</li>
+          <li value="3"><b>Motif de sortie</b> (obligatoire) : choisissez la raison dans la liste.</li>
+          <li value="4"><b>Ajouter</b> : place le produit dans la liste.</li>
+          <li value="5"><b>Valider la sortie</b> : enregistre définitivement.</li>
+        </ol>
+        <p>Le fonctionnement est le même que l'entrée de stock : vous remplissez plusieurs lignes puis vous validez une seule fois. Un prix de sortie est facultatif (le prix du produit est utilisé par défaut).</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez la boutique, la catégorie et le motif.</li>
+          <li>Ajoutez chaque produit avec sa quantité.</li>
+          <li>Cliquez sur <b>Valider la sortie</b>.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Choisissez toujours le bon motif : il permet de comprendre plus tard pourquoi le stock a baissé.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 17 : Transfert de stock ===================== -->
+      <section class="doc" id="transfert" data-roles="administrateur superviseur">
+        <div class="crumb">Stock</div>
+        <h2><span class="num">17</span>Transfert de stock</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Stock › Transfert du stock</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Envoyer de la marchandise d'une boutique vers une autre.</p>
+        <figure>
+          <img src="img/transfert.jpg" alt="Historique des transferts" data-zoom>
+          <figcaption>Historique des transferts <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1"><b>Nouveau transfert</b> : ouvre la fenêtre pour créer un transfert.</li>
+          <li value="2">Les <b>chiffres clés</b> des transferts.</li>
+          <li value="3">Les <b>filtres</b> : référence, produit, boutique.</li>
+          <li value="4">L'<b>historique</b> de tous les transferts.</li>
+        </ol>
+        <figure>
+          <img src="img/transfert_modal.jpg" alt="Fenêtre « Nouveau transfert »" data-zoom>
+          <figcaption>Fenêtre « Nouveau transfert » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Dans la fenêtre, choisissez le <b>produit</b>, le type (unité ou lot), la boutique <b>source</b> (qui donne), la boutique <b>destination</b> (qui reçoit) et la quantité.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur « Nouveau transfert ».</li>
+          <li>Choisissez produit, boutique source et boutique destination.</li>
+          <li>Saisissez la quantité et enregistrez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Le stock de la boutique source baisse, celui de la destination augmente.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 18 : Ajustement du stock ===================== -->
+      <section class="doc" id="ajustement" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Stock</div>
+        <h2><span class="num">18</span>Ajustement du stock</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Stock › Ajustement du stock</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Corriger le stock après un <b>inventaire</b> quand ce que vous comptez n'est pas ce que le logiciel affiche.</p>
+        <figure>
+          <img src="img/ajustement.jpg" alt="La page Ajustement de stock" data-zoom>
+          <figcaption>La page Ajustement de stock <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1"><b>Boutique</b>.</li>
+          <li value="2"><b>Catégorie</b>.</li>
+          <li value="3"><b>Motif</b> : « stock d'entrée » pour ajouter, « stock de sortie » pour retirer.</li>
+          <li value="4"><b>Ajouter</b> : place la ligne dans la liste.</li>
+          <li value="5"><b>Valider l'ajustement</b>.</li>
+        </ol>
+        <p>Comme pour les entrées et sorties, vous pouvez ajouter plusieurs lignes avant de valider. Chaque ajustement est gardé dans l'historique (30 derniers) en bas de page.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez boutique et catégorie, écrivez un commentaire.</li>
+          <li>Pour chaque produit : choisissez le motif et la quantité à ajouter ou retirer, puis <b>Ajouter</b>.</li>
+          <li>Cliquez sur <b>Valider l'ajustement</b>.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>La quantité saisie est la <b>différence</b> à ajouter ou retirer, pas le nouveau total.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 19 : Vente en détail (vente au comptoir) ===================== -->
+      <section class="doc" id="vente_detail" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Ventes</div>
+        <h2><span class="num">19</span>Vente en détail (vente au comptoir)</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Ventes › Vente en Détail</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-vendeur">Vendeur</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> C'est l'écran de <b>caisse</b> : vous choisissez les produits, le client, et vous encaissez.</p>
+        <figure>
+          <img src="img/vente_detail.jpg" alt="L&#x27;écran de vente au comptoir" data-zoom>
+          <figcaption>L&#x27;écran de vente au comptoir <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">À gauche : la <b>barre de recherche</b> et les boutons de <b>catégories</b> (Tous, APSONIC…).</li>
+          <li value="2">Les <b>produits</b> sous forme de tuiles. Cliquez sur une tuile pour l'ajouter au ticket. Le prix et le stock sont affichés sur chaque tuile.</li>
+          <li value="3">À droite : le <b>ticket</b> de la vente en cours, avec le client, le total et les boutons d'action.</li>
+        </ol>
+        <figure>
+          <img src="img/vente_detail_panier.jpg" alt="Avec des produits dans le ticket" data-zoom>
+          <figcaption>Avec des produits dans le ticket <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Sur la seconde image : (1) la liste des produits ajoutés, où vous pouvez changer la <b>quantité</b> avec + et −, (2) le bouton <b>Encaisser</b>, qui enregistre la vente payée tout de suite en espèces, (3) le bouton <b>Bon de commande (en attente)</b>, qui enregistre la vente sans l'encaisser. Le bouton <b>Vider</b> efface le ticket. Le client par défaut est « Client comptoir » ; le bouton <b>Nouveau</b> à côté permet d'en créer un. Vous pouvez aussi appliquer une <b>TVA</b> ou une <b>remise</b>.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Vérifiez la <b>boutique</b> affichée en haut.</li>
+          <li>Cherchez ou cliquez sur les produits à vendre. Ajustez les quantités.</li>
+          <li>Choisissez le client (ou laissez « Client comptoir »).</li>
+          <li>Cliquez sur <b>Encaisser</b> pour une vente payée, ou sur <b>Bon de commande (en attente)</b> si le client paiera plus tard.</li>
+          <li>Imprimez ou partagez le ticket proposé.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Pour <b>encaisser</b>, une caisse doit être <b>ouverte</b> (voir « Ouverture / Fermeture de caisse »). Un bon de commande en attente n'en a pas besoin.</div></div>
+        <div class="tip"><span>💡</span><div>Les produits en « Rupture » (stock à zéro) ne peuvent pas être vendus.</div></div>
+        <div class="tip"><span>💡</span><div>La quantité saisie est toujours un nombre de pièces, sauf pour les produits vendus par carton si cela a été configuré.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 20 : Bon de commande (factures clients) ===================== -->
+      <section class="doc" id="bon_commande" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Ventes</div>
+        <h2><span class="num">20</span>Bon de commande (factures clients)</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Ventes › Bon de Commande</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-vendeur">Vendeur</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Suivre toutes les ventes faites aux clients : ce qui est payé, ce qui reste à payer, ce qui est validé.</p>
+        <figure>
+          <img src="img/bon_commande.jpg" alt="La liste des bons de commande" data-zoom>
+          <figcaption>La liste des bons de commande <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Les <b>chiffres clés</b> : total de factures, payées, partielles, impayées, montant total et reste à payer.</li>
+          <li value="2">Les <b>filtres</b> par client, état de paiement et statut.</li>
+          <li value="3">Une <b>carte</b> = un bon. On y lit le numéro, la date, le montant, le client, l'état (Payée / Partielle / Impayée) et le statut (En attente / Validée).</li>
+          <li value="4">L'<b>œil</b> : voir le détail du bon.</li>
+          <li value="5">La <b>coche</b> : valider le bon.</li>
+          <li value="6">La <b>corbeille</b> : supprimer un bon.</li>
+        </ol>
+        <figure>
+          <img src="img/bon_commande_detail.jpg" alt="La fenêtre de détail d&#x27;un bon" data-zoom>
+          <figcaption>La fenêtre de détail d&#x27;un bon <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Dans la fenêtre de détail : <b>Modifier</b> (changer les lignes, en ajouter), <b>Imprimer</b>, <b>Télécharger PDF</b>, <b>Partager</b> (envoyer le document, par exemple par WhatsApp) et <b>Fermer</b>.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Repérez le bon avec les filtres ou à la couleur de sa carte (vert = payé).</li>
+          <li>Cliquez sur l'œil pour l'ouvrir.</li>
+          <li>Imprimez-le ou partagez-le au client.</li>
+          <li>Quand la marchandise est prête, cliquez sur la coche pour <b>valider</b> : cela crée le bon de livraison.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Pour faire payer le client, passez par « Règlement des factures clients ».</div></div>
+        <div class="tip"><span>💡</span><div>Soyez prudent avec la corbeille : un bon supprimé ne se récupère pas.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 21 : Règlement des factures clients ===================== -->
+      <section class="doc" id="reglement_client" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Ventes</div>
+        <h2><span class="num">21</span>Règlement des factures clients</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Ventes › Règlement Factures Clients</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Enregistrer l'argent qu'un client vous verse, pour une facture précise ou en avance.</p>
+        <figure>
+          <img src="img/reglement_client.jpg" alt="Formulaire de règlement client" data-zoom>
+          <figcaption>Formulaire de règlement client <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">La <b>date</b> du règlement.</li>
+          <li value="2">Le <b>client</b> qui paie.</li>
+          <li value="3">La <b>facture</b> (facultatif) : choisissez-en une pour la régler précisément.</li>
+          <li value="4">Le <b>montant versé</b>.</li>
+          <li value="5">Le <b>mode de règlement</b> (espèce, chèque, mobile money…).</li>
+          <li value="6"><b>Valider le règlement</b>.</li>
+        </ol>
+        <p>Deux champs se remplissent tout seuls : le <b>solde client</b> (en rouge, le client vous doit de l'argent ; en vert, il est en avance) et le <b>reste à payer</b> de la facture choisie. Si aucune facture n'est choisie, l'argent est compté comme une <b>avance</b> et vient en déduction des factures impayées les plus anciennes. Après validation, un <b>reçu</b> peut être imprimé ou partagé depuis la page Transactions.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez le client.</li>
+          <li>Choisissez la facture (ou laissez vide pour une avance).</li>
+          <li>Saisissez le montant versé, le mode de règlement, éventuellement un numéro ou une référence.</li>
+          <li>Cliquez sur <b>Valider le règlement</b>.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Une caisse doit être ouverte pour enregistrer un règlement en espèces.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 22 : Bon de livraison ===================== -->
+      <section class="doc" id="bon_livraison" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Ventes</div>
+        <h2><span class="num">22</span>Bon de livraison</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Ventes › Bon de livraison</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-vendeur">Vendeur</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Suivre les livraisons de marchandise faites aux clients et imprimer le bon.</p>
+        <figure>
+          <img src="img/bon_livraison.jpg" alt="Liste des bons de livraison" data-zoom>
+          <figcaption>Liste des bons de livraison <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Les <b>chiffres clés</b> : total, en préparation, expédiés, livrés.</li>
+          <li value="2">Les <b>filtres</b> par statut de livraison et par état de la facture.</li>
+        </ol>
+        <p>Un bon de livraison est créé automatiquement quand vous <b>validez</b> un bon de commande. Chaque carte permet de consulter le bon, de l'imprimer en PDF ou de le partager au client.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Filtrez par statut si besoin.</li>
+          <li>Ouvrez la carte du bon concerné.</li>
+          <li>Imprimez ou partagez-le.</li>
+        </ol>
+      </section>
+
+      <!-- ===================== PAGE 23 : Enregistrer une facture fournisseur ===================== -->
+      <section class="doc" id="achat" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Achats</div>
+        <h2><span class="num">23</span>Enregistrer une facture fournisseur</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Achats › Enregistrer Facture fournisseur</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Enregistrer ce que vous achetez à un fournisseur. L'écran ressemble à la vente, mais pour les achats.</p>
+        <figure>
+          <img src="img/achat.jpg" alt="L&#x27;écran d&#x27;achat fournisseur" data-zoom>
+          <figcaption>L&#x27;écran d&#x27;achat fournisseur <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">À gauche : la <b>recherche</b> et les catégories.</li>
+          <li value="2">Les <b>produits</b> à cliquer pour les ajouter à l'achat.</li>
+          <li value="3">À droite : le <b>panier d'achat</b> avec le fournisseur et le total.</li>
+        </ol>
+        <figure>
+          <img src="img/achat_panier.jpg" alt="Avec des produits dans le panier d&#x27;achat" data-zoom>
+          <figcaption>Avec des produits dans le panier d&#x27;achat <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>En haut, choisissez la <b>boutique de réception</b>. Dans le panier, choisissez le <b>fournisseur</b> (le bouton « Nouveau » en crée un). Pour chaque produit, vous réglez la quantité et le prix d'achat. La case « Mettre à jour le prix d'achat de référence » enregistre ces prix dans la fiche produit. Deux boutons : <b>En attente</b> (enregistre sans réception) et <b>Valider l'achat</b> (marchandise reçue, le stock augmente).</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez la boutique de réception et le fournisseur.</li>
+          <li>Cliquez sur les produits achetés et réglez quantités et prix.</li>
+          <li>Cliquez sur <b>En attente</b> si la marchandise n'est pas encore arrivée, ou sur <b>Valider l'achat</b> si elle est reçue.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Le paiement du fournisseur se fait ensuite dans « Règlement des factures fournisseurs ».</div></div>
+      </section>
+
+      <!-- ===================== PAGE 24 : Bon de commande fournisseur ===================== -->
+      <section class="doc" id="suivi_achat" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Achats</div>
+        <h2><span class="num">24</span>Bon de commande fournisseur</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Achats › Bon de Commande fournisseur</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-vendeur">Vendeur</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Suivre tous vos achats : payés ou non, reçus ou en attente.</p>
+        <figure>
+          <img src="img/suivi_achat.jpg" alt="Suivi des achats fournisseur" data-zoom>
+          <figcaption>Suivi des achats fournisseur <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Les <b>chiffres clés</b> : achats, réglés, partiels, impayés, total et reste à devoir.</li>
+          <li value="2">Les <b>filtres</b> : fournisseur, état, statut.</li>
+          <li value="3">Une <b>carte</b> = un achat, avec ses boutons (voir, valider, transformer, supprimer).</li>
+        </ol>
+        <p>Une fois l'achat <b>validé</b> (marchandise reçue), un bouton permet de le <b>transformer en bon de commande client</b> : le prix d'achat devient le prix de départ de la vente, que vous pouvez modifier.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Ouvrez la carte pour voir le détail, imprimer ou partager.</li>
+          <li>Quand la marchandise arrive, cliquez sur <b>Valider</b>.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>La transformation en bon client n'est possible qu'après validation de l'achat.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 25 : Règlement des factures fournisseurs ===================== -->
+      <section class="doc" id="reglement_fournisseur" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Achats</div>
+        <h2><span class="num">25</span>Règlement des factures fournisseurs</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Achats › Reglement Factures Fournisseurs</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Enregistrer l'argent que vous versez à un fournisseur.</p>
+        <figure>
+          <img src="img/reglement_fournisseur.jpg" alt="Formulaire de règlement fournisseur" data-zoom>
+          <figcaption>Formulaire de règlement fournisseur <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">La <b>date</b>.</li>
+          <li value="2">Le <b>fournisseur</b> payé.</li>
+          <li value="3">La <b>facture</b> (facultatif).</li>
+          <li value="4">Le <b>montant versé</b>.</li>
+          <li value="5">Le <b>mode de règlement</b>.</li>
+        </ol>
+        <p>Il fonctionne comme le règlement client : le <b>solde fournisseur</b> et le <b>reste à payer</b> s'affichent automatiquement. Le bouton de validation est en bas du formulaire.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez le fournisseur et, si possible, la facture.</li>
+          <li>Saisissez le montant versé et le mode de règlement.</li>
+          <li>Validez.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Le paiement sort de l'argent de la caisse : elle doit être ouverte et suffisamment approvisionnée.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 26 : Caisse (gestion des caisses) ===================== -->
+      <section class="doc" id="caisse" data-roles="administrateur superviseur">
+        <div class="crumb">Trésorerie</div>
+        <h2><span class="num">26</span>Caisse (gestion des caisses)</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Trésorerie › Caisse</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Créer et gérer les caisses de chaque boutique.</p>
+        <figure>
+          <img src="img/caisse.jpg" alt="Liste des caisses" data-zoom>
+          <figcaption>Liste des caisses <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1"><b>Nouvelle caisse</b> : en créer une pour une boutique.</li>
+          <li value="2">Les <b>chiffres clés</b> : nombre de caisses, actives, journées ouvertes…</li>
+          <li value="3">Les <b>filtres</b> : recherche par nom et par boutique.</li>
+        </ol>
+        <figure>
+          <img src="img/caisse_modal.jpg" alt="Fenêtre « Nouvelle caisse »" data-zoom>
+          <figcaption>Fenêtre « Nouvelle caisse » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Chaque carte montre le nom de la caisse, la boutique et son solde actuel.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur « Nouvelle caisse ».</li>
+          <li>Donnez-lui un nom et choisissez la boutique.</li>
+          <li>Enregistrez. Elle pourra ensuite être ouverte dans « Ouverture / Fermeture caisse ».</li>
+        </ol>
+      </section>
+
+      <!-- ===================== PAGE 27 : Ouverture / Fermeture de caisse ===================== -->
+      <section class="doc" id="journee" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Trésorerie</div>
+        <h2><span class="num">27</span>Ouverture / Fermeture de caisse</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Trésorerie › Ouverture / Fermeture caisse</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Ouvrir la caisse le matin et la fermer le soir, en vérifiant que l'argent compté correspond aux ventes.</p>
+        <figure>
+          <img src="img/journee.jpg" alt="Journées de caisse" data-zoom>
+          <figcaption>Journées de caisse <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1"><b>Ouvrir une journée</b> : démarre la journée sur une caisse.</li>
+          <li value="2">Les <b>chiffres clés</b> : caisses ouvertes, solde de départ, total encaissé et décaissé, écarts.</li>
+          <li value="3">L'<b>historique</b> : pour chaque journée, l'ouverture, la fermeture, le montant théorique, le montant physique (compté) et l'écart.</li>
+        </ol>
+        <figure>
+          <img src="img/journee_modal.jpg" alt="Fenêtre « Ouvrir une journée »" data-zoom>
+          <figcaption>Fenêtre « Ouvrir une journée » <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Dans « Journées en cours », chaque carte permet de <b>fermer</b> la journée en saisissant l'argent réellement compté. Le logiciel le compare au montant attendu : la différence est l'<b>écart</b>. Il est indiqué pour vous aider à repérer une erreur. Un avertissement « Ouverte depuis N jour(s) » apparaît si une journée n'a pas été fermée.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Le matin : <b>Ouvrir une journée</b>, choisissez la caisse, indiquez l'argent présent au départ.</li>
+          <li>Pendant la journée : encaissez normalement.</li>
+          <li>Le soir : sur la carte de la journée, cliquez sur fermer, comptez l'argent et saisissez le montant physique.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Fermez la journée <b>chaque soir</b> : le logiciel refuse d'ouvrir une nouvelle journée tant qu'une journée est déjà ouverte sur la même caisse.</div></div>
+        <div class="tip"><span>💡</span><div>Un utilisateur ne voit que les caisses de sa boutique.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 28 : Dépenses ===================== -->
+      <section class="doc" id="depenses" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Trésorerie</div>
+        <h2><span class="num">28</span>Dépenses</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Trésorerie › Dépenses</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Noter les dépenses de la boutique (transport, loyer, électricité…) pour savoir où part l'argent.</p>
+        <figure>
+          <img src="img/depenses.jpg" alt="La page Dépenses" data-zoom>
+          <figcaption>La page Dépenses <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le <b>formulaire</b> : date, catégorie, montant, motif, mode de règlement, référence et pièce justificative (facture, photo…).</li>
+          <li value="2">Le bouton <b>Enregistrer la dépense</b>.</li>
+          <li value="3">La <b>liste des dépenses</b>, avec ses filtres (période et catégorie) et le total.</li>
+        </ol>
+        <p>Les champs marqués d'une étoile sont obligatoires. Le total en haut à droite de la liste ne compte pas les dépenses annulées.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez la date et la catégorie.</li>
+          <li>Saisissez le montant et le motif.</li>
+          <li>Ajoutez si possible la pièce justificative.</li>
+          <li>Cliquez sur <b>Enregistrer la dépense</b>.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>Soyez précis dans le motif : ce sera votre seule explication plus tard.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 29 : Transactions ===================== -->
+      <section class="doc" id="transactions" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Trésorerie</div>
+        <h2><span class="num">29</span>Transactions</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Trésorerie › Transactions</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Retrouver tous les mouvements d'argent : encaissements, décaissements, dépenses.</p>
+        <figure>
+          <img src="img/transactions.jpg" alt="Historique des transactions" data-zoom>
+          <figcaption>Historique des transactions <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Les <b>chiffres clés</b> : total, entrées, sorties, mouvement net.</li>
+          <li value="2">Les <b>filtres</b> : recherche, type, mode, état, caisse, boutique, utilisateur, période.</li>
+          <li value="3">La <b>liste</b> : numéro, date, heure, type, montant, mode, client/fournisseur, caisse, utilisateur, état.</li>
+        </ol>
+        <figure>
+          <img src="img/transactions_detail.jpg" alt="Détail d&#x27;une transaction" data-zoom>
+          <figcaption>Détail d&#x27;une transaction <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <p>Le bouton « œil » de la colonne Actions ouvre le <b>détail</b> de la transaction, avec les boutons <b>Imprimer</b> et <b>Partager</b> pour le <b>reçu</b> ou le ticket. L'<b>annulation</b> d'une transaction est réservée à l'Administrateur et au Superviseur.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Réglez les filtres (par exemple la période).</li>
+          <li>Cliquez sur Filtrer.</li>
+          <li>Ouvrez une ligne pour voir le détail ou imprimer le reçu.</li>
+        </ol>
+      </section>
+
+      <!-- ===================== PAGE 30 : Historique des produits ===================== -->
+      <section class="doc" id="hist_produit" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Rapports</div>
+        <h2><span class="num">30</span>Historique des produits</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Rapports › Historique des Produits</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Faire l'état de votre catalogue et de vos stocks, par catégorie et par boutique.</p>
+        <figure>
+          <img src="img/hist_produit.jpg" alt="Historique des produits" data-zoom>
+          <figcaption>Historique des produits <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le bouton <b>Filtrer</b> (avec recherche, catégorie, boutique, stock, état).</li>
+          <li value="2">Les boutons <b>Imprimer</b>, <b>Télécharger</b> (PDF) et <b>Excel</b>.</li>
+          <li value="3">Le <b>tableau</b> des produits.</li>
+        </ol>
+        <p>En haut, des cartes donnent le nombre de produits, ceux disponibles, en alerte, en rupture, la valeur du stock et le bénéfice potentiel. Dessous, une carte par catégorie. Le bouton <b>Remettre le stock à zéro</b> (Administrateur et Superviseur) permet de vider le stock d'une catégorie dans une boutique, après confirmation.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez la boutique (ou « stock global »).</li>
+          <li>Cliquez sur Filtrer.</li>
+          <li>Exportez avec Imprimer, PDF ou Excel.</li>
+        </ol>
+        <div class="tip"><span>💡</span><div>« Remettre le stock à zéro » est une action lourde : lisez bien la fenêtre de confirmation.</div></div>
+      </section>
+
+      <!-- ===================== PAGE 31 : Mouvement de stock ===================== -->
+      <section class="doc" id="mvt_stock" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Rapports</div>
+        <h2><span class="num">31</span>Mouvement de stock</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Rapports › Mouvement de Stock</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Voir tout ce qui est entré et sorti du stock, et la valeur du stock.</p>
+        <figure>
+          <img src="img/mvt_stock.jpg" alt="Rapport de stock" data-zoom>
+          <figcaption>Rapport de stock <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Le sélecteur de <b>boutique</b> et le bouton Filtrer.</li>
+          <li value="2">L'onglet <b>Mouvements de stock</b> : chaque entrée et sortie.</li>
+          <li value="3">L'onglet <b>Valorisation</b> : combien vaut votre stock.</li>
+          <li value="4">Le graphique <b>entrées / sorties</b> des 12 derniers mois.</li>
+        </ol>
+        <p>Les boutons Imprimer, Télécharger et Excel permettent d'exporter le rapport. Le camembert montre la valeur du stock par catégorie.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Choisissez la boutique.</li>
+          <li>Cliquez sur l'onglet voulu.</li>
+          <li>Exportez si besoin.</li>
+        </ol>
+      </section>
+
+      <!-- ===================== PAGE 32 : Rapport commercial ===================== -->
+      <section class="doc" id="rapport_commercial" data-roles="administrateur superviseur proprietaire">
+        <div class="crumb">Rapports</div>
+        <h2><span class="num">32</span>Rapport commercial</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Rapports › Rapport Commercial</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Analyser vos ventes : chiffre d'affaires, marge, rentabilité, performance des vendeurs.</p>
+        <figure>
+          <img src="img/rapport_commercial.jpg" alt="Rapport commercial" data-zoom>
+          <figcaption>Rapport commercial <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">Les boutons de <b>période</b> (Jour, Semaine, Mois, Trimestre, Semestre, Année).</li>
+          <li value="2">Le bouton <b>Appliquer</b>.</li>
+          <li value="3">Les <b>onglets</b> : chiffre d'affaires, résumé des ventes, marge bénéficiaire, rentabilité, performance vendeurs.</li>
+        </ol>
+        <p>Choisissez aussi la date et la boutique juste au-dessus du bouton Appliquer.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur la période.</li>
+          <li>Choisissez la date et la boutique.</li>
+          <li>Cliquez sur Appliquer, puis sur l'onglet voulu.</li>
+        </ol>
+      </section>
+
+      <!-- ===================== PAGE 33 : Rapport financier ===================== -->
+      <section class="doc" id="rapport_financier" data-roles="administrateur superviseur proprietaire caisse">
+        <div class="crumb">Rapports</div>
+        <h2><span class="num">33</span>Rapport financier</h2>
+        <div class="meta">
+          <div><b>Où le trouver :</b> Rapports › Rapport Financier</div>
+          <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span><span class="role r-superviseur">Superviseur</span><span class="role r-proprietaire">Propriétaire</span><span class="role r-caisse">Caisse</span></div>
+        </div>
+        <p class="goal"><b>À quoi ça sert ?</b> Suivre l'argent : trésorerie, transactions, factures clients et fournisseurs, soldes.</p>
+        <figure>
+          <img src="img/rapport_financier.jpg" alt="Rapport financier" data-zoom>
+          <figcaption>Rapport financier <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+        </figure>
+        <h3>Que voit-on sur cet écran ?</h3>
+        <ol class="zones">
+          <li value="1">L'onglet <b>Trésorerie</b>.</li>
+          <li value="2">L'onglet <b>Soldes</b> : ce que les clients vous doivent et ce que vous devez aux fournisseurs.</li>
+          <li value="3">Le <b>tableau</b> de l'onglet actif.</li>
+        </ol>
+        <p>Les autres onglets sont : Transactions clients, Factures clients, Factures fournisseurs, Résumé des achats. Sur les onglets de factures, vous pouvez filtrer par état, client ou fournisseur et trier.</p>
+        <h3>Comment faire, pas à pas</h3>
+        <ol class="steps">
+          <li>Cliquez sur l'onglet voulu.</li>
+          <li>Utilisez les filtres au-dessus du tableau.</li>
+          <li>Parcourez les pages avec la pagination.</li>
+        </ol>
+      </section>
+
+      <!-- ===================== LES TÂCHES DE TOUS LES JOURS ===================== -->
+      <section class="doc" id="parcours" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Pour aller plus loin</div>
+        <h2>Les tâches de tous les jours</h2>
+        <p>Les cinq manipulations les plus fréquentes, étape par étape.</p>
+        <h3>Faire une vente au comptoir</h3>
+        <ol class="steps">
+          <li>Le caissier <b>ouvre la journée de caisse</b> (Trésorerie › Ouverture / Fermeture caisse).</li>
+          <li>Allez dans <b>Ventes › Vente en Détail</b>.</li>
+          <li>Cliquez sur les produits, ajustez les quantités.</li>
+          <li>Cliquez sur <b>Encaisser</b>.</li>
+          <li>Imprimez ou partagez le ticket.</li>
+        </ol>
+        <h3>Vendre à crédit à un client</h3>
+        <ol class="steps">
+          <li>Dans la vente en détail, choisissez le client.</li>
+          <li>Cliquez sur <b>Bon de commande (en attente)</b>.</li>
+          <li>Dans <b>Ventes › Bon de Commande</b>, ouvrez le bon, puis <b>validez-le</b> quand la marchandise part.</li>
+          <li>Quand le client paie : <b>Ventes › Règlement Factures Clients</b>.</li>
+        </ol>
+        <h3>Recevoir une marchandise</h3>
+        <ol class="steps">
+          <li><b>Achats › Enregistrer Facture fournisseur</b> : choisissez fournisseur et produits.</li>
+          <li>Cliquez sur <b>Valider l'achat</b> à la réception : le stock augmente.</li>
+          <li>Réglez le fournisseur dans <b>Achats › Reglement Factures Fournisseurs</b>.</li>
+        </ol>
+        <h3>Faire un inventaire</h3>
+        <ol class="steps">
+          <li>Comptez vos produits.</li>
+          <li>Allez dans <b>Stock › Ajustement du stock</b>.</li>
+          <li>Ajoutez les écarts (en plus ou en moins) puis <b>Valider l'ajustement</b>.</li>
+        </ol>
+        <h3>Fermer la journée</h3>
+        <ol class="steps">
+          <li><b>Trésorerie › Ouverture / Fermeture caisse</b>.</li>
+          <li>Comptez l'argent de la caisse.</li>
+          <li>Fermez la journée en saisissant le montant physique.</li>
+          <li>Consultez l'écart affiché.</li>
+        </ol>
+      </section>
+
+      <!-- ===================== PETIT LEXIQUE ===================== -->
+      <section class="doc" id="glossaire" data-roles="administrateur superviseur proprietaire vendeur caisse">
+        <div class="crumb">Pour aller plus loin</div>
+        <h2>Petit lexique</h2>
+        <dl class="gloss">
+          <dt>Bon de commande</dt>
+          <dd>Document qui récapitule une vente (ou un achat) avec les produits, les quantités et les prix.</dd>
+          <dt>Bon de livraison</dt>
+          <dd>Document remis au client pour la marchandise livrée.</dd>
+          <dt>Caisse</dt>
+          <dd>L'endroit (physique ou virtuel) où l'argent des ventes est gardé.</dd>
+          <dt>Journée de caisse</dt>
+          <dd>Période entre l'ouverture et la fermeture d'une caisse.</dd>
+          <dt>Écart</dt>
+          <dd>Différence entre l'argent attendu et l'argent réellement compté.</dd>
+          <dt>Solde client</dt>
+          <dd>Rouge : le client vous doit de l'argent. Vert : il est en avance.</dd>
+          <dt>Rupture / Alerte</dt>
+          <dd>Rupture : plus de stock. Alerte : le stock est bas.</dd>
+          <dt>Lot</dt>
+          <dd>Un conditionnement (carton, boîte…) qui contient plusieurs pièces.</dd>
+          <dt>Tranche de prix</dt>
+          <dd>Un prix plus bas à partir d'une certaine quantité.</dd>
+          <dt>Statut En attente / Validée</dt>
+          <dd>En attente : enregistré mais pas confirmé. Validée : confirmé.</dd>
+          <dt>Payée / Partielle / Impayée</dt>
+          <dd>Payée : tout est réglé. Partielle : une partie est réglée. Impayée : rien n'est réglé.</dd>
+        </dl>
+      </section>
+
+      <!-- ===================== MODÈLE DE PAGE (copier / coller avant </main>) =====================
+<section class="doc" id="mapage" data-roles="administrateur superviseur">
+    <div class="crumb">Nom du module</div>
+    <h2><span class="num">99</span>Titre de ma page</h2>
+    <div class="meta">
+        <div><b>Où le trouver :</b> Module › Page</div>
+        <div><b>Qui y a accès :</b> <span class="role r-administrateur">Administrateur</span> <span class="role r-superviseur">Superviseur</span></div>
+    </div>
+    <p class="goal"><b>À quoi ça sert ?</b> Explication simple.</p>
+    <figure>
+        <img src="img/ma-capture.jpg" alt="Description de la capture" data-zoom>
+        <figcaption>Légende <span class="zoomhint">(cliquez pour agrandir)</span></figcaption>
+    </figure>
+    <h3>Que voit-on sur cet écran ?</h3>
+    <ol class="zones">
+        <li value="1">Première zone entourée en rouge.</li>
+        <li value="2">Deuxième zone.</li>
+    </ol>
+    <h3>Comment faire, pas à pas</h3>
+    <ol class="steps">
+        <li>Première étape.</li>
+        <li>Deuxième étape.</li>
+    </ol>
+    <div class="tip"><span>💡</span><div>Un conseil utile.</div></div>
+</section>
+===================================================================================== -->
+    </main>
+  </div>
+
+  <!-- Fenêtre d'agrandissement des captures et bouton « haut de page » -->
+  <div id="lb"><img alt=""></div>
+  <button id="top" aria-label="Haut de page">↑</button>
+  <script src="guide.js"></script>
+</body>
+</html>

@@ -327,7 +327,7 @@ require 'views/commande/suivi_achat_actions.php';
                 </div>
             </div>
             <div class="modal-footer">
-                <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Caisse'): ?>
+                <?php if ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Proprietaire' || $_SESSION['role'] === 'Caisse'): ?>
                 <button class="btn-chic btn-chic-modifier" id="btnModifier"><i class="bi bi-pencil-square"></i><span>Modifier</span></button>
                 <?php endif; ?>
                 <button class="btn-chic btn-chic-imprimer" id="btnImprimer"><i class="bi bi-printer-fill"></i><span>Imprimer</span></button>

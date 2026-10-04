@@ -6,6 +6,7 @@
 ob_start();
 require 'databases/database.php';
 require_once 'databases/id_generator.php';
+require_once 'includes/stock_lignes.php';
 
 // ==========================================
 // SÉCURITÉ : utilisateur connecté & actif
@@ -77,21 +78,25 @@ $messageType = '';
 $action = $_POST['action'] ?? '';
 $csrf_token = $_POST['csrf_token'] ?? '';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'entree') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'entree' && !isset($_POST['ajax'])) {
     if (empty($csrf_token) || $csrf_token !== ($_SESSION['csrf_token'] ?? '')) {
         $message = 'Token de sécurité invalide.';
         $messageType = 'danger';
     } else {
         $categorieId = trim($_POST['categorie_id'] ?? '');
-        $produitId = trim($_POST['produit_id'] ?? '');
         $boutiqueId = trim($_POST['boutique_id'] ?? '');
-        $quantite = intval($_POST['quantite'] ?? 0);
-        $prixAchat = floatval(str_replace(',', '.', $_POST['prix_achat'] ?? 0));
-        $prixVente = floatval(str_replace(',', '.', $_POST['prix_vente'] ?? 0));
         $commentaire = trim($_POST['commentaire'] ?? '');
+        // Une seule validation pour TOUTES les lignes saisies (voir includes/stock_lignes.php)
+        $lignes = stockLireLignes($_POST['lignes'] ?? []);
 
-        if (empty($categorieId) || empty($produitId) || empty($boutiqueId) || $quantite <= 0) {
-            $message = 'Veuillez sélectionner une catégorie, un produit, une boutique et saisir une quantité valide (> 0).';
+        if ($categorieId === '' || $boutiqueId === '') {
+            $message = 'Veuillez sélectionner une boutique et une catégorie.';
+            $messageType = 'danger';
+        } elseif (empty($lignes)) {
+            $message = 'Ajoutez au moins un produit à la liste avant de valider.';
+            $messageType = 'danger';
+        } elseif (count($lignes) > STOCK_LIGNES_MAX) {
+            $message = 'Trop de lignes dans une même entrée (maximum ' . STOCK_LIGNES_MAX . ').';
             $messageType = 'danger';
         } elseif (!in_array($boutiqueId, $boutiquesAutorisees, true)) {
             $message = "Vous n'êtes pas autorisé à saisir une entrée de stock pour cette boutique.";
@@ -104,93 +109,110 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'entree') {
             $messageType = 'danger';
         } else {
             try {
+                // TOUT ou RIEN : si une seule ligne est refusée, aucune entrée n'est enregistrée.
                 $pdo->beginTransaction();
 
-                // 1️⃣ Récupérer les prix actuels du produit
-                $stmtPrix = $pdo->prepare("SELECT prix_fournisseur, prix_produit, categorie_id FROM produit WHERE code_produit = ?");
-                $stmtPrix->execute([$produitId]);
-                $prixActuels = $stmtPrix->fetch(PDO::FETCH_ASSOC);
-                if (!$prixActuels) {
-                    throw new Exception("Produit introuvable.");
-                }
-                if ((string)($prixActuels['categorie_id'] ?? '') !== $categorieId) {
-                    throw new Exception("Le produit sélectionné n'appartient pas à la catégorie choisie.");
-                }
-                $prixFournisseurActuel = (float) $prixActuels['prix_fournisseur'];
-                $prixVenteActuel = (float) $prixActuels['prix_produit'];
+                // Produits des lignes : existent, sans doublon, de la catégorie choisie
+                $infosProduits = stockChargerProduits($pdo, $lignes, $categorieId);
 
-                // 2️⃣ Déterminer les nouveaux prix
-                $nouveauPrixFournisseur = ($prixAchat > 0) ? $prixAchat : $prixFournisseurActuel;
-                $nouveauPrixVente = ($prixVente > 0) ? $prixVente : $prixVenteActuel;
-                $nouveauBenefice = $nouveauPrixVente - $nouveauPrixFournisseur;
-
-                // 3️⃣ Mettre à jour le produit si au moins un prix a changé
-                if ($prixAchat > 0 || $prixVente > 0) {
-                    $stmtUpdate = $pdo->prepare("
-                        UPDATE produit
-                        SET prix_fournisseur = ?,
-                            prix_produit = ?,
-                            benefice_produit = ?
-                        WHERE code_produit = ?
-                    ");
-                    $stmtUpdate->execute([
-                        $nouveauPrixFournisseur,
-                        $nouveauPrixVente,
-                        $nouveauBenefice,
-                        $produitId
-                    ]);
-                }
-
-                // 4️⃣ Récupérer le stock actuel
                 $stmtStock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ?");
-                $stmtStock->execute([$produitId, $boutiqueId]);
-                $stockAvant = (int) ($stmtStock->fetchColumn() ?: 0);
-                $stockApres = $stockAvant + $quantite;
-                $montantCommande = $nouveauPrixFournisseur * $quantite;
+                $detailsLignes = [];
+                $numeros = [];
+                $totalQuantite = 0;
 
-                // 5️⃣ Générer le numéro de commande et l'insérer, avec réessai
-                // automatique en cas de collision entre deux entrées de stock
-                // simultanées (voir databases/id_generator.php).
-                $numeroCommande = genererEtInsererIdSequence($pdo, 'ENT', function (string $numero) use (
-                    $pdo, $produitId, $statut_entree, $nouveauPrixFournisseur, $quantite, $montantCommande, $user, $boutiqueId
-                ) {
-                    $stmtCmd = $pdo->prepare("
-                        INSERT INTO commande
-                        (numero_commande, produit_id, lot_id, produits_par_lot, contact_id, facture_id, statut_id,
-                         date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, montant_commande,
-                         utilisateur_id, boutique_id, etat_commande)
-                        VALUES (?, ?, NULL, 1, NULL, NULL, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, 'VALIDEE')
+                foreach ($lignes as $ligne) {
+                    $produitId = $ligne['produit_id'];
+                    $titreProduit = $infosProduits[$produitId]['titre_produit'];
+                    $quantite = intval($ligne['quantite'] ?? 0);
+                    $prixAchat = floatval(str_replace(',', '.', (string) ($ligne['prix_achat'] ?? 0)));
+                    $prixVente = floatval(str_replace(',', '.', (string) ($ligne['prix_vente'] ?? 0)));
+                    if ($quantite <= 0) {
+                        throw new Exception("Quantité invalide pour « $titreProduit » (doit être supérieure à 0).");
+                    }
+
+                    // 1️⃣ Prix actuels du produit, 2️⃣ nouveaux prix
+                    $prixFournisseurActuel = (float) $infosProduits[$produitId]['prix_fournisseur'];
+                    $prixVenteActuel = (float) $infosProduits[$produitId]['prix_produit'];
+                    $nouveauPrixFournisseur = ($prixAchat > 0) ? $prixAchat : $prixFournisseurActuel;
+                    $nouveauPrixVente = ($prixVente > 0) ? $prixVente : $prixVenteActuel;
+                    $nouveauBenefice = $nouveauPrixVente - $nouveauPrixFournisseur;
+
+                    // 3️⃣ Mettre à jour le produit si au moins un prix a changé
+                    if ($prixAchat > 0 || $prixVente > 0) {
+                        $stmtUpdate = $pdo->prepare("
+                            UPDATE produit
+                            SET prix_fournisseur = ?,
+                                prix_produit = ?,
+                                benefice_produit = ?
+                            WHERE code_produit = ?
+                        ");
+                        $stmtUpdate->execute([
+                            $nouveauPrixFournisseur,
+                            $nouveauPrixVente,
+                            $nouveauBenefice,
+                            $produitId
+                        ]);
+                    }
+
+                    // 4️⃣ Stock actuel
+                    $stmtStock->execute([$produitId, $boutiqueId]);
+                    $stockAvant = (int) ($stmtStock->fetchColumn() ?: 0);
+                    $stockApres = $stockAvant + $quantite;
+                    $montantCommande = $nouveauPrixFournisseur * $quantite;
+
+                    // 5️⃣ Numéro de commande + insertion, avec réessai automatique en cas de collision
+                    // (voir databases/id_generator.php)
+                    $numeroCommande = genererEtInsererIdSequence($pdo, 'ENT', function (string $numero) use (
+                        $pdo, $produitId, $statut_entree, $nouveauPrixFournisseur, $quantite, $montantCommande, $user, $boutiqueId
+                    ) {
+                        $stmtCmd = $pdo->prepare("
+                            INSERT INTO commande
+                            (numero_commande, produit_id, lot_id, produits_par_lot, contact_id, facture_id, statut_id,
+                             date_commande, heure_commande, prix_achat, prix_commande, quantite_commande, montant_commande,
+                             utilisateur_id, boutique_id, etat_commande)
+                            VALUES (?, ?, NULL, 1, NULL, NULL, ?, CURDATE(), CURTIME(), ?, ?, ?, ?, ?, ?, 'VALIDEE')
+                        ");
+                        $stmtCmd->execute([
+                            $numero, $produitId, $statut_entree,
+                            $nouveauPrixFournisseur, $nouveauPrixFournisseur, $quantite, $montantCommande,
+                            $user['id'], $boutiqueId
+                        ]);
+                    }, 5);
+
+                    // 7️⃣ Table stock (INSERT ON DUPLICATE KEY UPDATE)
+                    $stmtStockUp = $pdo->prepare("
+                        INSERT INTO stock (produit_id, boutique_id, quantite, stock_alerte)
+                        VALUES (?, ?, ?, 10)
+                        ON DUPLICATE KEY UPDATE quantite = quantite + VALUES(quantite)
                     ");
-                    $stmtCmd->execute([
-                        $numero, $produitId, $statut_entree,
-                        $nouveauPrixFournisseur, $nouveauPrixFournisseur, $quantite, $montantCommande,
-                        $user['id'], $boutiqueId
-                    ]);
-                }, 5);
+                    $stmtStockUp->execute([$produitId, $boutiqueId, $quantite]);
 
-                // 7️⃣ Mettre à jour la table stock (INSERT ON DUPLICATE KEY UPDATE)
-                $stmtStockUp = $pdo->prepare("
-                    INSERT INTO stock (produit_id, boutique_id, quantite, stock_alerte)
-                    VALUES (?, ?, ?, 10)
-                    ON DUPLICATE KEY UPDATE quantite = quantite + VALUES(quantite)
-                ");
-                $stmtStockUp->execute([$produitId, $boutiqueId, $quantite]);
+                    // 8️⃣ Stock global du produit
+                    $pdo->prepare("UPDATE produit SET stock_produit = stock_produit + ? WHERE code_produit = ?")
+                        ->execute([$quantite, $produitId]);
 
-                // 8️⃣ Mettre à jour le stock_produit global dans la table produit
-                $pdo->prepare("UPDATE produit SET stock_produit = stock_produit + ? WHERE code_produit = ?")
-                    ->execute([$quantite, $produitId]);
+                    $numeros[] = $numeroCommande;
+                    $totalQuantite += $quantite;
+                    $detailsLignes[] = "$titreProduit : $stockAvant → $stockApres";
+                }
 
                 $pdo->commit();
-                $message = "Entrée de stock enregistrée (N° $numeroCommande) : $quantite unité(s) ajoutées. Stock : $stockAvant → $stockApres. Prix fournisseur mis à jour : " . fmt($nouveauPrixFournisseur) . " FCFA.";
+                $message = htmlspecialchars(
+                    'Entrée de stock enregistrée : ' . count($lignes) . ' produit(s), ' . $totalQuantite . ' unité(s). '
+                    . implode(' ; ', $detailsLignes) . '. Références : ' . $numeros[0]
+                    . (count($numeros) > 1 ? ' à ' . end($numeros) : '') . '.',
+                    ENT_QUOTES, 'UTF-8'
+                );
                 $messageType = 'success';
             } catch (Exception $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
-                $message = "Erreur : " . $e->getMessage();
+                $message = 'Erreur : ' . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8') . ' — aucune ligne n\'a été enregistrée.';
                 $messageType = 'danger';
             }
         }
     }
 }
+
 
 if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
@@ -542,7 +564,7 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                 </span>
                 <span class="text-muted small">Un commentaire est obligatoire pour la traçabilité.</span>
             </div>
-            <form method="post" id="entreeForm">
+            <form method="post" id="stockForm" autocomplete="off">
                 <input type="hidden" name="action" value="entree">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                 <div class="row g-3">
@@ -569,70 +591,75 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
                         </select>
                     </div>
                     <div class="col-md-4">
-                        <label for="produit_id" class="form-label">Produit <span class="text-danger">*</span></label>
-                        <select name="produit_id" id="produit_id" class="form-select selectpicker" data-live-search="true" required disabled title="-- Choisir d'abord une catégorie --">
-                            <option value="">-- Choisir un produit --</option>
-                            <?php foreach ($produits as $p): ?>
-                                <option value="<?= htmlspecialchars($p['code_produit']) ?>" data-categorie="<?= htmlspecialchars($p['categorie_id'] ?? '') ?>">
-                                    <?= htmlspecialchars($p['titre_produit']) ?><?= ($p['etat_produit'] === 'Inactif') ? ' (inactif)' : '' ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-md-4">
-                        <label for="quantite" class="form-label">Quantité <span class="text-danger">*</span></label>
-                        <input type="number" name="quantite" id="quantite" class="form-control" min="1" step="1" required placeholder="0">
-                    </div>
-                    <div class="col-md-4">
-                        <label for="prix_achat" class="form-label">Prix d'achat unitaire</label>
-                        <input type="number" step="0.01" name="prix_achat" id="prix_achat" class="form-control" placeholder="0.00">
-                        <div class="form-text" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">
-                            Laissez vide pour conserver le prix fournisseur actuel. <br>
-                            Si saisi, le prix fournisseur du produit est mis à jour.
-                        </div>
-                    </div>
-                    <div class="col-md-4">
-                        <label for="prix_vente" class="form-label">Prix de vente unitaire</label>
-                        <input type="number" step="0.01" name="prix_vente" id="prix_vente" class="form-control" placeholder="0.00">
-                        <div class="form-text" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">
-                            Laissez vide pour conserver le prix de vente actuel. <br>
-                            Si saisi, le prix de vente du produit est mis à jour.
-                        </div>
-                    </div>
-                    <div class="col-12">
                         <label for="commentaire" class="form-label">Commentaire <span class="text-danger">*</span></label>
                         <input type="text" name="commentaire" id="commentaire" class="form-control" placeholder="Motif précis de l'entrée (obligatoire)" required>
                     </div>
-                    <div class="col-12">
-                        <div id="stockInfo" class="stock-info">
-                            <div class="item">
-                                <span class="label">Stock actuel :</span>
-                                <strong id="currentQty">—</strong>
-                            </div>
-                            <div class="item">
-                                <span class="label">Disponible :</span>
-                                <strong id="currentDispo">—</strong>
-                            </div>
-                            <div class="item">
-                                <span class="label">Nouveau stock :</span>
-                                <strong id="newStock">—</strong>
-                            </div>
-                            <div class="item">
-                                <span class="label">Prix fournisseur actuel :</span>
-                                <strong id="currentPrixFour">—</strong>
-                            </div>
-                            <div class="item">
-                                <span class="label">Prix de vente actuel :</span>
-                                <strong id="currentPrixVente">—</strong>
-                            </div>
+                </div>
+
+                <!-- Ajout d'un produit à la liste -->
+                <div class="sl-panel" id="slPanel">
+                    <div class="fw-semibold mb-2"><i class="bi bi-plus-circle text-primary me-1"></i> Ajouter un produit à cette entrée</div>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4">
+                            <label for="produit_id" class="form-label">Produit</label>
+                            <select id="produit_id" class="form-select selectpicker" data-live-search="true" disabled title="-- Choisir d'abord une catégorie --">
+                                <option value="">-- Choisir un produit --</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label for="sl_qte" class="form-label">Quantité</label>
+                            <input type="number" id="sl_qte" class="form-control" min="1" step="1" placeholder="0">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="sl_prix_achat" class="form-label">Prix d'achat unitaire</label>
+                            <input type="number" id="sl_prix_achat" class="form-control" min="0" step="0.01" placeholder="0.00">
+                        </div>
+                        <div class="col-md-2">
+                            <label for="sl_prix_vente" class="form-label">Prix de vente unitaire</label>
+                            <input type="number" id="sl_prix_vente" class="form-control" min="0" step="0.01" placeholder="0.00">
+                        </div>
+                        <div class="col-md-2">
+                            <button type="button" id="slAjouter" class="btn btn-primary w-100"><i class="bi bi-plus-lg"></i> Ajouter</button>
                         </div>
                     </div>
-                    <div class="col-12 mt-3">
-                        <button type="submit" class="btn-chic btn-chic-success w-100" style="justify-content:center;">
-                            <i class="bi bi-save"></i>
-                            <span>Enregistrer l'entrée</span>
-                        </button>
+                    <div class="form-text" style="font-size:11px;color:var(--text-tertiary);margin-top:6px;">
+                        Les prix sont préremplis avec ceux du produit. S'ils sont modifiés, le prix fournisseur / de vente du produit est mis à jour à la validation.
                     </div>
+                    <div id="slInfo" class="stock-info">
+                        <div class="item"><span class="label">Stock actuel :</span> <strong data-info="stock">—</strong></div>
+                        <div class="item"><span class="label">Prix fournisseur actuel :</span> <strong data-info="prixFour">—</strong></div>
+                        <div class="item"><span class="label">Prix de vente actuel :</span> <strong data-info="prixVente">—</strong></div>
+                    </div>
+                </div>
+
+                <!-- Liste des produits de l'entrée -->
+                <div id="slVide" class="sl-vide">
+                    <i class="bi bi-inbox fs-3 d-block mb-1"></i>
+                    Aucun produit ajouté. Choisissez la boutique et la catégorie, puis ajoutez autant de produits que nécessaire.
+                </div>
+                <div id="slTableWrap" class="table-responsive mt-3" style="display:none;">
+                    <table class="table table-sm align-middle sl-table mb-0">
+                        <thead>
+                            <tr>
+                                <th>Produit</th>
+                                <th class="text-center">Stock actuel</th>
+                                <th style="width:120px;">Quantité</th>
+                                <th style="width:150px;">Prix d'achat</th>
+                                <th style="width:150px;">Prix de vente</th>
+                                <th class="text-center">Nouveau stock</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="slLignes"></tbody>
+                    </table>
+                </div>
+
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+                    <div id="slRecap" class="text-muted small"></div>
+                    <button type="submit" id="slValider" class="btn-chic btn-chic-success" disabled>
+                        <i class="bi bi-check2-circle"></i>
+                        <span>Valider l'entrée</span>
+                    </button>
                 </div>
             </form>
         </div>
@@ -714,164 +741,25 @@ if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
+<?php include 'includes/stock_lignes_js.php'; ?>
 <script>
 $(document).ready(function() {
     $('.selectpicker').selectpicker();
 
-    const toastEl = document.getElementById('toastMsg');
-    const toast = new bootstrap.Toast(toastEl, { delay: 3500 });
-
-    function showToast(msg, type = 'success') {
-        const colors = { success: 'bg-success', error: 'bg-danger', info: 'bg-primary' };
-        const icons = { success: 'bi-check-circle-fill', error: 'bi-exclamation-triangle-fill', info: 'bi-info-circle-fill' };
-        $('#toastBody').html(`<i class="bi ${icons[type]} me-2"></i>${msg}`);
-        toastEl.className = `toast align-items-center text-white border-0 ${colors[type]}`;
-        toast.show();
-    }
-
-    // ============================================================
-    // ✅ CORRECTION FILTRAGE : bootstrap-select IGNORE "hidden".
-    // On mémorise TOUS les produits au chargement, puis on
-    // RECONSTRUIT le <select> à chaque changement de catégorie.
-    // ============================================================
-    var allProduitOptions = [];
-    $('#produit_id option').each(function() {
-        allProduitOptions.push({
-            value: $(this).val(),
-            text: $.trim($(this).text()),
-            categorie: String($(this).attr('data-categorie') || '')
-        });
-    });
-
-    // ============================================================
-    // Catégories autorisées par boutique (null = pas de restriction pour
-    // cette boutique). Un utilisateur peut avoir plusieurs boutiques dans sa
-    // liste (accès supplémentaire), potentiellement restreintes différemment
-    // — on filtre donc la liste des catégories à chaque changement de
-    // boutique, pas une fois pour toutes.
-    // ============================================================
-    const CATEGORIES_AUTORISEES_PAR_BOUTIQUE = <?= json_encode($categoriesAutoriseesParBoutique, JSON_UNESCAPED_UNICODE) ?>;
-    var allCategorieOptions = [];
-    $('#categorie_id option').each(function() {
-        if ($(this).val() !== '') {
-            allCategorieOptions.push({ value: $(this).val(), text: $.trim($(this).text()) });
+    // Saisie multi-lignes : boutique + catégorie, autant de produits que voulu, puis UNE validation.
+    StockLignes.init({
+        mode: 'entree',
+        produits: <?= json_encode(stockProduitsPourJs($produits), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>,
+        // Catégories autorisées par boutique (null = pas de restriction), filtrées à chaque changement de boutique
+        catsParBoutique: <?= json_encode($categoriesAutoriseesParBoutique, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>,
+        qteDefaut: '',
+        sel: {
+            boutique: '#boutique_id', categorie: '#categorie_id', produit: '#produit_id',
+            qte: '#sl_qte', prixAchat: '#sl_prix_achat', prixVente: '#sl_prix_vente',
+            btnAjouter: '#slAjouter', tbody: '#slLignes', vide: '#slVide', tableWrap: '#slTableWrap',
+            recap: '#slRecap', submit: '#slValider', form: '#stockForm', panel: '#slPanel', info: '#slInfo'
         }
     });
-
-    function filterCategoriesByBoutique() {
-        var boutiqueId = String($('#boutique_id').val() || '').trim();
-        var $categorie = $('#categorie_id');
-        var catsAutorisees = boutiqueId ? CATEGORIES_AUTORISEES_PAR_BOUTIQUE[boutiqueId] : null;
-        var ancienneValeur = $categorie.val();
-
-        $categorie.empty();
-        $categorie.append($('<option>', { value: '', text: '-- Sélectionner --' }));
-        allCategorieOptions.forEach(function(opt) {
-            if (!catsAutorisees || catsAutorisees.indexOf(opt.value) !== -1) {
-                $categorie.append($('<option>', { value: opt.value, text: opt.text }));
-            }
-        });
-
-        // Si la catégorie déjà choisie n'est plus autorisée pour la nouvelle
-        // boutique, on la désélectionne (et le select produit se réinitialise
-        // via filterProduitsByCategorie, appelée juste après).
-        if (ancienneValeur && (!catsAutorisees || catsAutorisees.indexOf(ancienneValeur) !== -1)) {
-            $categorie.val(ancienneValeur);
-        }
-
-        if ($categorie.hasClass('bs-select-hidden') || $categorie.data('selectpicker')) { $categorie.selectpicker('destroy'); }
-        $categorie.selectpicker();
-        filterProduitsByCategorie();
-    }
-
-    // Mise à jour des infos de stock et des prix en AJAX
-    function updateStockInfo() {
-        var produit = $('#produit_id').val();
-        var boutique = $('#boutique_id').val();
-        var qty = parseInt($('#quantite').val()) || 0;
-        if (produit && boutique) {
-            $.ajax({
-                url: window.location.href,
-                method: 'POST',
-                data: { ajax: 1, produit_id: produit, boutique_id: boutique },
-                dataType: 'json',
-                success: function(data) {
-                    if (data.success) {
-                        $('#currentQty').text(data.quantite);
-                        $('#currentDispo').text(data.disponible);
-                        $('#newStock').text(data.quantite + qty);
-                        $('#currentPrixFour').text(data.prix || '—');
-                        $('#currentPrixVente').text(data.prix_vente || '—');
-                        if (data.prix > 0 && $('#prix_achat').val() == '') {
-                            $('#prix_achat').val(data.prix);
-                        }
-                        if (data.prix_vente > 0 && $('#prix_vente').val() == '') {
-                            $('#prix_vente').val(data.prix_vente);
-                        }
-                    } else {
-                        $('#currentQty, #currentDispo, #newStock, #currentPrixFour, #currentPrixVente').text('—');
-                    }
-                }
-            });
-        } else {
-            $('#currentQty, #currentDispo, #newStock, #currentPrixFour, #currentPrixVente').text('—');
-        }
-    }
-
-    // Filtrage : reconstruction COMPLÈTE du select produit
-    function filterProduitsByCategorie() {
-        var cat = String($('#categorie_id').val() || '').trim();
-        var $produit = $('#produit_id');
-
-        // On repart du <select> natif, sans passer par l'API selectpicker
-        // (évite tout état interne du plugin qui pourrait être désynchronisé)
-        $produit.empty();
-        $produit.append($('<option>', { value: '', text: '-- Choisir un produit --' }));
-
-        if (cat === '') {
-            // Aucune catégorie → select produit verrouillé
-            $produit.prop('disabled', true);
-            $produit.attr('title', "-- Choisir d'abord une catégorie --");
-        } else {
-            // Catégorie choisie → uniquement les produits de cette catégorie
-            var nb = 0;
-            for (var i = 0; i < allProduitOptions.length; i++) {
-                var opt = allProduitOptions[i];
-                if (opt.value !== '' && opt.categorie === cat) {
-                    $produit.append($('<option>', { value: opt.value, text: opt.text }));
-                    nb++;
-                }
-            }
-            console.log('[Filtre] Catégorie "' + cat + '" → ' + nb + ' produit(s) sur ' + allProduitOptions.length + ' au total');
-            if (nb === 0) {
-                console.warn('[Filtre] Aucun produit ne correspond à la catégorie "' + cat + '". ' +
-                    'Vérifiez que produit.categorie_id correspond bien à categorie.code_categorie en base.');
-            }
-            $produit.prop('disabled', false);
-            $produit.attr('title', '-- Choisir un produit --');
-        }
-
-        // ✅ DESTROY + RÉINIT plutôt que 'refresh' : sur bootstrap-select 1.14 beta,
-        // 'refresh' ne resynchronise pas toujours la liste interne du plugin après
-        // un empty()/append() en JS, ce qui laisse l'ancien menu (non filtré) affiché.
-        if ($produit.hasClass('bs-select-hidden') || $produit.data('selectpicker')) {
-            $produit.selectpicker('destroy');
-        }
-        $produit.selectpicker();
-
-        updateStockInfo();
-    }
-
-    // Événements (on écoute 'change' natif en plus de 'changed.bs.select' :
-    // plus fiable selon les versions de bootstrap-select)
-    $('#categorie_id').on('changed.bs.select change', filterProduitsByCategorie);
-    $('#boutique_id').on('changed.bs.select change', filterCategoriesByBoutique);
-    $('#produit_id, #boutique_id').on('changed.bs.select change', updateStockInfo);
-    filterCategoriesByBoutique(); // applique la restriction dès l'ouverture (boutique déjà présélectionnée)
-    $('#quantite').on('input', updateStockInfo);
-
-    // État initial
-    filterProduitsByCategorie();
 
     setTimeout(function() { $('.alert').alert('close'); }, 5000);
 });

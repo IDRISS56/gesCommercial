@@ -24,7 +24,12 @@ $menuConfigJs = <<<'JS'
                          icon: 'bi-person-badge',
                          label: 'Mon profil',
                          url: '/utilisateur/profil'
-                     }
+                     },
+                     {
+                        icon: 'bi-book',
+                        label: 'Guide d\'utilisation',
+                        url: '/assets/guide/guide.html?role=superviseur'
+                    }
                  ]
              },
 
@@ -70,6 +75,12 @@ $menuConfigJs = <<<'JS'
                          icon: 'bi-boxes',
                          label: 'Configuration des lots',
                          url: '/produit/lots'
+                     },
+
+                     {
+                         icon: 'bi-graph-down-arrow',
+                         label: 'Tranches de prix',
+                         url: '/produit/tranches'
                      },
 
                      {
@@ -192,6 +203,11 @@ $menuConfigJs = <<<'JS'
                          icon: 'bi-door-open',
                          label: 'Ouverture / Fermeture caisse',
                          url: '/caisse/journee'
+                     },
+                     {
+                         icon: 'bi-cash-stack',
+                         label: 'Dépenses',
+                         url: '/depense/gestion'
                      },
                      
                      {

@@ -6,6 +6,7 @@
 //    il met seulement à jour stock_produit (la disponibilité est calculée ailleurs).
 ob_start();
 require 'databases/database.php';
+require_once 'includes/stock_lignes.php';
 
 // ==========================================
 // SÉCURITÉ : utilisateur connecté & actif
@@ -43,7 +44,7 @@ AND code_statut NOT IN ('" . implode("','", $statutsReserves) . "')
 ORDER BY type_statut, titre_statut")->fetchAll(PDO::FETCH_ASSOC);
 
 // ✅ Liste des produits avec leur état Actif/Inactif (actifs en premier)
-$produitsList = $pdo->query("SELECT code_produit, titre_produit, etat_produit
+$produitsList = $pdo->query("SELECT code_produit, titre_produit, etat_produit, categorie_id
 FROM produit
 ORDER BY CASE WHEN etat_produit = 'Inactif' THEN 1 ELSE 0 END, titre_produit")->fetchAll(PDO::FETCH_ASSOC);
 
@@ -51,6 +52,40 @@ $boutiquesList = $pdo->query("SELECT code_boutique, nom_boutique FROM boutique W
 $boutiquesList = array_values(array_filter($boutiquesList, function ($b) use ($boutiquesAutorisees) {
     return in_array($b['code_boutique'], $boutiquesAutorisees, true);
 }));
+
+// - Catégories actives (le produit se choisit dans la catégorie) et catégories autorisées par boutique
+//   (restriction optionnelle, voir config/authentification.php::getCategoriesAutoriseesBoutique ; null = aucune) -
+$categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='ACTIF' ORDER BY titre_categorie")->fetchAll(PDO::FETCH_ASSOC);
+$categoriesAutoriseesParBoutique = [];
+foreach ($boutiquesList as $b) {
+    $categoriesAutoriseesParBoutique[$b['code_boutique']] = getCategoriesAutoriseesBoutique($pdo, $user['role'] ?? null, $b['code_boutique']);
+}
+
+// - AJAX : stock actuel et prix d'un produit dans une boutique (saisie multi-lignes) -
+if (isset($_POST['ajax']) && $_POST['ajax'] == '1') {
+    $produitId = $_POST['produit_id'] ?? '';
+    $boutiqueId = $_POST['boutique_id'] ?? '';
+    $response = ['success' => false, 'quantite' => 0, 'disponible' => 0, 'prix' => 0, 'prix_vente' => 0];
+    if (!empty($produitId) && !empty($boutiqueId) && in_array($boutiqueId, $boutiquesAutorisees, true)) {
+        $stmt = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ?");
+        $stmt->execute([$produitId, $boutiqueId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            $response['success'] = true;
+            $response['quantite'] = (int) $row['quantite'];
+            $response['disponible'] = (int) $row['quantite'];
+        }
+        $stmtPrix = $pdo->prepare("SELECT prix_fournisseur, prix_produit FROM produit WHERE code_produit = ?");
+        $stmtPrix->execute([$produitId]);
+        $rowPrix = $stmtPrix->fetch(PDO::FETCH_ASSOC);
+        $response['prix'] = (float) ($rowPrix['prix_fournisseur'] ?? 0);
+        $response['prix_vente'] = (float) ($rowPrix['prix_produit'] ?? 0);
+    }
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json');
+    echo json_encode($response);
+    exit;
+}
 
 // - Traitement POST (ajustement uniquement) -
 $message = '';
@@ -63,19 +98,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = 'Token de sécurité invalide.';
         $messageType = 'danger';
     } else if ($action === 'ajustement') {
-        $produitId = $_POST['produit_id_ajust'] ?? '';
-        $boutiqueId = $_POST['boutique_id_ajust'] ?? '';
-        $statutId = $_POST['statut_id_ajust'] ?? '';
-        $quantite = intval($_POST['quantite_ajust'] ?? 0);
-        $commentaire = trim($_POST['commentaire_ajust'] ?? '');
+        // UNE validation pour TOUTES les lignes saisies (voir includes/stock_lignes.php) :
+        // tout ou rien, si une ligne est refusée aucun ajustement n'est enregistré.
+        $boutiqueId = trim($_POST['boutique_id'] ?? '');
+        $categorieId = trim($_POST['categorie_id'] ?? '');
+        $commentaire = trim($_POST['commentaire'] ?? '');
+        $lignes = stockLireLignes($_POST['lignes'] ?? []);
 
-        $statutsCodes = array_column($statutsAjustement, 'code_statut');
+        // code_statut => 'entree' | 'sortie' (motifs d'ajustement autorisés)
+        $typesStatut = [];
+        foreach ($statutsAjustement as $s) {
+            $typesStatut[$s['code_statut']] = strtolower($s['type_statut']);
+        }
 
-        if (empty($produitId) || empty($boutiqueId) || !in_array($statutId, $statutsCodes) || $quantite <= 0) {
-            $message = "Veuillez renseigner le produit, la boutique, le motif et une quantité positive.";
+        if ($boutiqueId === '' || $categorieId === '') {
+            $message = "Veuillez sélectionner une boutique et une catégorie.";
+            $messageType = 'error';
+        } elseif (empty($lignes)) {
+            $message = "Ajoutez au moins un produit à la liste avant de valider.";
+            $messageType = 'error';
+        } elseif (count($lignes) > STOCK_LIGNES_MAX) {
+            $message = "Trop de lignes dans un même ajustement (maximum " . STOCK_LIGNES_MAX . ").";
             $messageType = 'error';
         } elseif (!in_array($boutiqueId, $boutiquesAutorisees, true)) {
             $message = "Vous n'êtes pas autorisé à effectuer un ajustement pour cette boutique.";
+            $messageType = 'error';
+        } elseif (($catsAutoriseesAjust = getCategoriesAutoriseesBoutique($pdo, $user['role'] ?? null, $boutiqueId)) !== null && !in_array($categorieId, $catsAutoriseesAjust, true)) {
+            $message = "Cette boutique n'est pas autorisée à gérer la catégorie sélectionnée.";
             $messageType = 'error';
         } elseif ($commentaire === '') {
             $message = "Un commentaire est obligatoire pour justifier ce mouvement (traçabilité).";
@@ -84,66 +133,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $pdo->beginTransaction();
 
-                $numCommande = 'AJU-' . date('YmdHis') . rand(100, 999);
-
-                $stmtPrix = $pdo->prepare("SELECT prix_fournisseur FROM produit WHERE code_produit = ?");
-                $stmtPrix->execute([$produitId]);
-                $prixUnitaire = (float) ($stmtPrix->fetchColumn() ?: 0);
+                // Produits des lignes : existent, sans doublon, de la catégorie choisie
+                $infosProduits = stockChargerProduits($pdo, $lignes, $categorieId);
 
                 $stmtStock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
-                $stmtStock->execute([$produitId, $boutiqueId]);
-                $stockActuel = $stmtStock->fetchColumn();
-                $stockAvant = $stockActuel !== false ? (int)$stockActuel : 0;
-
-                $stmtType = $pdo->prepare("SELECT type_statut FROM statut WHERE code_statut = ?");
-                $stmtType->execute([$statutId]);
-                $typeStatut = $stmtType->fetchColumn();
-                $isEntree = (strtolower($typeStatut) === 'entree');
-
-                $stockApres = $isEntree ? ($stockAvant + $quantite) : ($stockAvant - $quantite);
-                if (!$isEntree && $stockApres < 0) {
-                    throw new Exception("Stock insuffisant. Stock actuel : $stockAvant, quantité demandée : $quantite");
-                }
-
-                $stmt = $pdo->prepare("INSERT INTO commande
+                $stmtInsCmd = $pdo->prepare("INSERT INTO commande
                     (numero_commande, produit_id, lot_id, produits_par_lot, statut_id,
                      date_commande, heure_commande, prix_achat, prix_commande,
                      quantite_commande, montant_commande, utilisateur_id, boutique_id, etat_commande)
                     VALUES (?, ?, NULL, 1, ?, CURDATE(), CURTIME(), ?, 0, ?, ?, ?, ?, 'VALIDEE')");
-                $stmt->execute([
-                    $numCommande, $produitId, $statutId,
-                    $prixUnitaire, $quantite, $prixUnitaire * $quantite,
-                    $user['id'], $boutiqueId
-                ]);
 
-                if ($stockActuel === false) {
-                    $pdo->prepare("INSERT INTO stock (produit_id, boutique_id, quantite) VALUES (?, ?, ?)")
-                        ->execute([$produitId, $boutiqueId, $stockApres]);
-                } else {
-                    $pdo->prepare("UPDATE stock SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
-                        ->execute([$stockApres, $produitId, $boutiqueId]);
-                }
+                $numeroBase = 'AJU-' . date('YmdHis') . rand(100, 999);
+                $detailsLignes = [];
+                $numeros = [];
 
-                // ✅ Répercuter le mouvement sur le stock GLOBAL du produit.
-                // NB : etat_produit est désormais 'Actif'/'Inactif' (décision manuelle
-                // gérée dans la fiche produit). On ne le modifie PLUS ici : la
-                // disponibilité (rupture / alerte / disponible) est calculée
-                // dynamiquement depuis stock_produit vs stock_alerte sur les pages
-                // de lecture (historique, ventes, etc.).
-                if ($isEntree) {
-                    $pdo->prepare("UPDATE produit SET stock_produit = stock_produit + ? WHERE code_produit = ?")
-                        ->execute([$quantite, $produitId]);
-                } else {
-                    $pdo->prepare("UPDATE produit SET stock_produit = GREATEST(0, stock_produit - ?) WHERE code_produit = ?")
-                        ->execute([$quantite, $produitId]);
+                foreach ($lignes as $i => $ligne) {
+                    $produitId = $ligne['produit_id'];
+                    $titreProduit = $infosProduits[$produitId]['titre_produit'];
+                    $statutId = trim((string) ($ligne['statut_id'] ?? ''));
+                    $quantite = intval($ligne['quantite'] ?? 0);
+
+                    if (!isset($typesStatut[$statutId])) {
+                        throw new Exception("Motif non autorisé pour « $titreProduit ».");
+                    }
+                    if ($quantite <= 0) {
+                        throw new Exception("Quantité invalide pour « $titreProduit » (doit être supérieure à 0).");
+                    }
+                    $isEntree = ($typesStatut[$statutId] === 'entree');
+                    $prixUnitaire = (float) $infosProduits[$produitId]['prix_fournisseur'];
+
+                    $stmtStock->execute([$produitId, $boutiqueId]);
+                    $stockActuel = $stmtStock->fetchColumn();
+                    $stockAvant = $stockActuel !== false ? (int) $stockActuel : 0;
+                    $stockApres = $isEntree ? ($stockAvant + $quantite) : ($stockAvant - $quantite);
+                    if (!$isEntree && $stockApres < 0) {
+                        throw new Exception("Stock insuffisant pour « $titreProduit ». Stock actuel : $stockAvant, quantité demandée : $quantite");
+                    }
+
+                    // Un numéro par ligne (même base pour toute la saisie + rang de la ligne)
+                    $numCommande = $numeroBase . sprintf('%02d', $i + 1);
+                    $stmtInsCmd->execute([
+                        $numCommande, $produitId, $statutId,
+                        $prixUnitaire, $quantite, $prixUnitaire * $quantite,
+                        $user['id'], $boutiqueId
+                    ]);
+
+                    if ($stockActuel === false) {
+                        $pdo->prepare("INSERT INTO stock (produit_id, boutique_id, quantite) VALUES (?, ?, ?)")
+                            ->execute([$produitId, $boutiqueId, $stockApres]);
+                    } else {
+                        $pdo->prepare("UPDATE stock SET quantite = ? WHERE produit_id = ? AND boutique_id = ?")
+                            ->execute([$stockApres, $produitId, $boutiqueId]);
+                    }
+
+                    // ✅ Répercuter le mouvement sur le stock GLOBAL du produit.
+                    // NB : etat_produit est désormais 'Actif'/'Inactif' (décision manuelle
+                    // gérée dans la fiche produit). On ne le modifie PLUS ici.
+                    if ($isEntree) {
+                        $pdo->prepare("UPDATE produit SET stock_produit = stock_produit + ? WHERE code_produit = ?")
+                            ->execute([$quantite, $produitId]);
+                    } else {
+                        $pdo->prepare("UPDATE produit SET stock_produit = GREATEST(0, stock_produit - ?) WHERE code_produit = ?")
+                            ->execute([$quantite, $produitId]);
+                    }
+
+                    $numeros[] = $numCommande;
+                    $detailsLignes[] = "$titreProduit : $stockAvant → $stockApres";
                 }
 
                 $pdo->commit();
-                $message = "Mouvement $numCommande enregistré : stock passé de $stockAvant à $stockApres.";
+                $message = "Ajustement enregistré : " . count($lignes) . " produit(s). " . implode(' ; ', $detailsLignes)
+                    . ". Références : " . $numeros[0] . (count($numeros) > 1 ? ' à ' . end($numeros) : '') . '.';
                 $messageType = 'success';
             } catch (Exception $ex) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
-                $message = "Erreur : " . $ex->getMessage();
+                $message = "Erreur : " . $ex->getMessage() . " — aucune ligne n'a été enregistrée.";
                 $messageType = 'error';
             }
         }
@@ -519,33 +583,15 @@ body {
                 </span>
                 <span class="ref-stock">Les mouvements sont tracés avec commentaire obligatoire.</span>
             </div>
-            <form method="post" id="ajustForm">
+            <form method="post" id="stockForm" autocomplete="off">
                 <input type="hidden" name="action" value="ajustement">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token) ?>">
                 <div class="row g-3">
                     <div class="col-md-4">
-                        <label for="produit_id_ajust" class="form-label fw-semibold">
-                            <i class="bi bi-box-seam me-1"></i> Produit <span class="text-danger">*</span>
-                        </label>
-                        <select name="produit_id_ajust" id="produit_id_ajust" class="selectpicker form-select"
-                            data-live-search="true"
-                            data-live-search-placeholder="Rechercher un produit..."
-                            data-none-selected-text="-- Choisir un produit --"
-                            data-none-results-text="Aucun produit trouvé pour {0}"
-                            required>
-                            <option value="">-- Choisir --</option>
-                            <?php foreach ($produitsList as $p): ?>
-                            <option value="<?= htmlspecialchars($p['code_produit']) ?>">
-                                <?= htmlspecialchars($p['titre_produit']) ?><?= ($p['etat_produit'] === 'Inactif') ? ' (inactif)' : '' ?>
-                            </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div class="col-md-4">
-                        <label for="boutique_id_ajust" class="form-label fw-semibold">
+                        <label for="boutique_id" class="form-label fw-semibold">
                             <i class="bi bi-shop me-1"></i> Boutique <span class="text-danger">*</span>
                         </label>
-                        <select name="boutique_id_ajust" id="boutique_id_ajust" class="selectpicker form-select"
+                        <select name="boutique_id" id="boutique_id" class="selectpicker form-select"
                             data-live-search="true"
                             data-live-search-placeholder="Rechercher une boutique..."
                             data-none-selected-text="-- Choisir une boutique --"
@@ -558,40 +604,97 @@ body {
                         </select>
                     </div>
                     <div class="col-md-4">
-                        <label for="statut_id_ajust" class="form-label fw-semibold">
-                            <i class="bi bi-tags me-1"></i> Motif (statut) <span class="text-danger">*</span>
+                        <label for="categorie_id" class="form-label fw-semibold">
+                            <i class="bi bi-diagram-3 me-1"></i> Catégorie <span class="text-danger">*</span>
                         </label>
-                        <select name="statut_id_ajust" id="statut_id_ajust" class="selectpicker form-select"
+                        <select name="categorie_id" id="categorie_id" class="selectpicker form-select"
                             data-live-search="true"
-                            data-live-search-placeholder="Rechercher un motif..."
-                            data-none-selected-text="-- Choisir un motif --"
-                            data-none-results-text="Aucun motif trouvé pour {0}"
+                            data-live-search-placeholder="Rechercher une catégorie..."
+                            data-none-selected-text="-- Choisir une catégorie --"
+                            data-none-results-text="Aucune catégorie trouvée pour {0}"
                             required>
                             <option value="">-- Choisir --</option>
-                            <?php foreach ($statutsAjustement as $s): ?>
-                            <option value="<?= htmlspecialchars($s['code_statut']) ?>">
-                                <?= htmlspecialchars($s['titre_statut']) ?> (<?= strtolower($s['type_statut']) === 'entree' ? '↑ Entrée' : '↓ Sortie' ?>)
-                            </option>
+                            <?php foreach ($categories as $c): ?>
+                            <option value="<?= htmlspecialchars($c['code_categorie']) ?>"><?= htmlspecialchars($c['titre_categorie']) ?></option>
                             <?php endforeach; ?>
                         </select>
                     </div>
-                    <div class="col-md-3">
-                        <label for="quantite_ajust" class="form-label fw-semibold">
-                            <i class="bi bi-hash me-1"></i> Quantité <span class="text-danger">*</span>
-                        </label>
-                        <input type="number" name="quantite_ajust" id="quantite_ajust" class="form-control" min="1" placeholder="0" required>
-                    </div>
-                    <div class="col-md-9">
-                        <label for="commentaire_ajust" class="form-label fw-semibold">
+                    <div class="col-md-4">
+                        <label for="commentaire" class="form-label fw-semibold">
                             <i class="bi bi-chat-left-text me-1"></i> Commentaire <span class="text-danger">*</span>
                         </label>
-                        <input type="text" name="commentaire_ajust" id="commentaire_ajust" class="form-control" placeholder="Motif précis du mouvement (obligatoire)" required>
+                        <input type="text" name="commentaire" id="commentaire" class="form-control" placeholder="Motif précis du mouvement (obligatoire)" required>
                     </div>
-                    <div class="col-md-12 mt-3">
-                        <button type="submit" class="btn-success w-100">
-                            <i class="bi bi-save"></i> <span>Enregistrer l'ajustement</span>
-                        </button>
+                </div>
+
+                <!-- Ajout d'un produit à la liste -->
+                <div class="sl-panel" id="slPanel">
+                    <div class="fw-semibold mb-2"><i class="bi bi-plus-circle me-1 text-primary"></i> Ajouter un produit à cet ajustement</div>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-4">
+                            <label for="produit_id" class="form-label fw-semibold"><i class="bi bi-box-seam me-1"></i> Produit</label>
+                            <select id="produit_id" class="selectpicker form-select"
+                                data-live-search="true"
+                                data-live-search-placeholder="Rechercher un produit..."
+                                data-none-results-text="Aucun produit trouvé pour {0}"
+                                disabled title="-- Choisir d'abord une catégorie --">
+                                <option value="">-- Choisir un produit --</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="sl_motif" class="form-label fw-semibold"><i class="bi bi-tags me-1"></i> Motif (statut)</label>
+                            <select id="sl_motif" class="selectpicker form-select"
+                                data-live-search="true"
+                                data-live-search-placeholder="Rechercher un motif..."
+                                data-none-selected-text="-- Choisir un motif --"
+                                data-none-results-text="Aucun motif trouvé pour {0}">
+                                <option value="">-- Choisir --</option>
+                                <?php foreach ($statutsAjustement as $s): ?>
+                                <option value="<?= htmlspecialchars($s['code_statut']) ?>">
+                                    <?= htmlspecialchars($s['titre_statut']) ?> (<?= strtolower($s['type_statut']) === 'entree' ? '↑ Entrée' : '↓ Sortie' ?>)
+                                </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label for="sl_qte" class="form-label fw-semibold"><i class="bi bi-hash me-1"></i> Quantité</label>
+                            <input type="number" id="sl_qte" class="form-control" min="1" step="1" placeholder="0">
+                        </div>
+                        <div class="col-md-2">
+                            <button type="button" id="slAjouter" class="btn btn-primary w-100"><i class="bi bi-plus-lg"></i> Ajouter</button>
+                        </div>
                     </div>
+                    <div id="slInfo" class="stock-info">
+                        <div class="item"><span class="label">Stock actuel en boutique :</span> <strong data-info="stock">—</strong></div>
+                    </div>
+                </div>
+
+                <!-- Liste des produits de l'ajustement -->
+                <div id="slVide" class="sl-vide">
+                    <i class="bi bi-inbox fs-3 d-block mb-1"></i>
+                    Aucun produit ajouté. Choisissez la boutique et la catégorie, puis ajoutez autant de produits que nécessaire.
+                </div>
+                <div id="slTableWrap" class="table-responsive mt-3" style="display:none;">
+                    <table class="table table-sm align-middle sl-table mb-0">
+                        <thead>
+                            <tr>
+                                <th>Produit</th>
+                                <th class="text-center">Stock actuel</th>
+                                <th style="min-width:200px;">Motif</th>
+                                <th style="width:120px;">Quantité</th>
+                                <th class="text-center">Stock après</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="slLignes"></tbody>
+                    </table>
+                </div>
+
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+                    <div id="slRecap" class="text-muted small"></div>
+                    <button type="submit" id="slValider" class="btn-success" disabled>
+                        <i class="bi bi-save"></i> <span>Valider l'ajustement</span>
+                    </button>
                 </div>
             </form>
         </div>
@@ -667,6 +770,7 @@ body {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
+<?php include 'includes/stock_lignes_js.php'; ?>
 <script>
 $(document).ready(function() {
     // Initialisation des selectpicker (pas de refresh() : bug beta3)
@@ -674,6 +778,24 @@ $(document).ready(function() {
         iconBase: 'bi',
         tickIcon: 'bi-check-lg'
     });
+
+    // Saisie multi-lignes : boutique + catégorie, autant de produits que voulu, puis UNE validation.
+    StockLignes.init({
+        mode: 'ajustement',
+        produits: <?= json_encode(stockProduitsPourJs($produitsList), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>,
+        catsParBoutique: <?= json_encode($categoriesAutoriseesParBoutique, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>,
+        motifs: <?= json_encode(array_map(function ($s) {
+            return ['code' => (string) $s['code_statut'], 'titre' => (string) $s['titre_statut'], 'type' => strtolower($s['type_statut']) === 'entree' ? 'entree' : 'sortie'];
+        }, $statutsAjustement), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>,
+        qteDefaut: '',
+        sel: {
+            boutique: '#boutique_id', categorie: '#categorie_id', produit: '#produit_id',
+            qte: '#sl_qte', motif: '#sl_motif',
+            btnAjouter: '#slAjouter', tbody: '#slLignes', vide: '#slVide', tableWrap: '#slTableWrap',
+            recap: '#slRecap', submit: '#slValider', form: '#stockForm', panel: '#slPanel', info: '#slInfo'
+        }
+    });
+
     // Auto-fermeture des alerts après 5s
     setTimeout(function() {
         $('.alert').alert('close');

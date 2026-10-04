@@ -3,6 +3,7 @@
 // 1. CONNEXION À LA BASE DE DONNÉES
 // ==========================================
 require 'databases/database.php';
+require_once 'includes/prix_tranche.php';
 require 'librairies/fpdf/fpdf.php';
 
 // ==========================================
@@ -493,6 +494,7 @@ require 'views/commande/vente_actions.php';
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
+<?php include 'includes/prix_tranche_js.php'; ?>
 <script>
 $(document).ready(function() {
     $('.selectpicker').selectpicker();
@@ -1224,6 +1226,7 @@ $(document).ready(function() {
             const boutique = $('#editContent').data('boutique-id');
             $newProd.data('dispo', 0);
             $newProd.data('lots', []);
+            $newProd.data('tranches', []);
             appliquerModeVenteProduit([]);
             if (!produit || !boutique) {
                 $('#newLigneStockInfo').text(boutique ? 'Stock disponible : —' : 'Boutique du bon introuvable : vérifiez le stock manuellement.');
@@ -1239,8 +1242,13 @@ $(document).ready(function() {
                         $newProd.data('lots', resp.lots || []);
                         $newProd.data('saisie-carton', !!resp.saisie_par_carton);
                         $('#newLigneStockInfo').html('Stock disponible : <strong>' + resp.disponible + '</strong>');
-                        if (!$('#newLignePrix').val() && resp.prix > 0) $('#newLignePrix').val(resp.prix);
+                        // Prix de départ : prix détail défini dans prix_tranche (tranches appliquées), sinon produit.prix_produit
+                        const prixDepart = PrixTranche.base(resp.tranches || [], resp.prix);
+                        if (!$('#newLignePrix').val() && prixDepart > 0) $('#newLignePrix').val(prixDepart);
                         appliquerModeVenteProduit(resp.lots || []);
+                        // Tranches de prix actives (dégressif) : suggestion selon la quantité
+                        $newProd.data('tranches', resp.tranches || []);
+                        majTrancheNouvelleLigne();
                     } else {
                         $('#newLigneStockInfo').text('Stock disponible : —');
                     }
@@ -1389,8 +1397,56 @@ $(document).ready(function() {
         });
         $('#newLigneLotUnites, #newLigneLotLibelle').on('input change', majApercuLotNouvelleLigne);
 
+        // ----- Tranches de prix par quantité (dégressif) : SUGGESTION uniquement, le prix
+        // reste modifiable. La quantité prise en compte est CUMULÉE : pièces déjà présentes
+        // dans ce bon pour le même produit (hors lignes supprimées) + quantité saisie, toujours
+        // en unités de base. Un prix de lot spécial configuré reste prioritaire (on n'y touche pas).
+        // Le champ prix n'est réécrit que s'il est vide, égal au prix de base suggéré, ou égal à
+        // la dernière suggestion de tranche : un prix tapé à la main n'est jamais écrasé.
+        function qteDejaDansBonPourProduit(produitId) {
+            let total = 0;
+            $('#editLignesTable tbody tr').each(function() {
+                const row = $(this);
+                if (String(row.data('produit')) === String(produitId) && !row.hasClass('ligne-a-supprimer')) {
+                    total += parseFloat(row.find('.qte').val()) || 0;
+                }
+            });
+            return total;
+        }
+        function majTrancheNouvelleLigne() {
+            const tranches = $newProd.data('tranches') || [];
+            if (!tranches.length) return;
+            const produit = $newProd.val();
+            if (!produit) return;
+
+            const modeCatalogue = $('#newLigneVenteCatalogue').is(':visible');
+            let unitesParLot = 1, enCarton = false;
+            if (modeCatalogue && $('#newLigneModeVente').val() !== 'unite') {
+                const opt = $('#newLigneModeVente').find('option:selected');
+                const prixLotCat = opt.data('prix-lot');
+                if (prixLotCat !== '' && prixLotCat !== undefined && prixLotCat !== null) return; // prix de lot prioritaire
+                unitesParLot = parseInt(opt.data('unites')) || 1;
+                enCarton = !!$newProd.data('saisie-carton');
+            }
+            const qteSaisie = parseInt($('#newLigneQte').val()) || 0;
+            const qtePieces = enCarton ? qteSaisie * unitesParLot : qteSaisie;
+            const base = parseFloat($newProd.data('prix-unitaire')) || 0;
+            const prix = PrixTranche.prix(tranches, qteDejaDansBonPourProduit(produit) + qtePieces, base);
+
+            const $prix = $('#newLignePrix');
+            const actuel = parseFloat($prix.val());
+            const derniere = $prix.data('derniere-tranche');
+            const baseEffective = PrixTranche.base(tranches, base); // prix détail sinon prix_produit
+            if ($prix.val() === '' || actuel === base || actuel === baseEffective || (derniere !== undefined && actuel === derniere)) {
+                $prix.val(prix).data('derniere-tranche', prix);
+                verifierPrixNouvelleLigneLive();
+            }
+        }
+        $('#newLigneModeVente').on('change', majTrancheNouvelleLigne);
+
         // La quantité peut alimenter l'un ou l'autre mode selon celui actif.
         $('#newLigneQte').on('input change', function() {
+            majTrancheNouvelleLigne();
             if ($('#newLigneVenteCatalogue').is(':visible') && $('#newLigneModeVente').val() !== 'unite') {
                 majModeVenteCatalogue();
             } else if ($('#newLigneLotConfigure').is(':checked')) {
@@ -1508,13 +1564,27 @@ $(document).ready(function() {
                     if (ligneExistante.length) {
                         const qteActuelle = parseFloat(ligneExistante.find('.qte').val()) || 0;
                         const nouvelleQte = qteActuelle + qte;
+                        // Tranches de prix : le prix de la ligne existante suit la nouvelle quantité
+                        // cumulée UNIQUEMENT s'il correspond encore au prix « automatique » de
+                        // l'ancienne quantité (donc jamais un prix personnalisé ni un prix de lot).
+                        const trFusion = resp.tranches || [];
+                        const ligneEstPrixLot = ligneExistante.data('prix-est-lot') == 1 || ligneExistante.data('prix-est-lot') === '1';
+                        if (trFusion.length && !ligneEstPrixLot) {
+                            const $pl = ligneExistante.find('.prix');
+                            const prixLigne = parseFloat($pl.val());
+                            const baseFusion = parseFloat(resp.prix) || 0;
+                            if (prixLigne === PrixTranche.prix(trFusion, qteActuelle, baseFusion)) {
+                                $pl.val(PrixTranche.prix(trFusion, nouvelleQte, baseFusion));
+                            }
+                        }
                         ligneExistante.find('.qte').val(nouvelleQte).trigger('change');
                         reinitialiserFormulaireNouvelleLigne();
                         showToast((resp.titre || produitTexte) + ' est déjà dans ce bon : quantité augmentée à ' + nouvelleQte + ' pièce(s) sur la ligne existante.', 'success');
                         return;
                     }
 
-                    const prixFinal = prixSaisi > 0 ? prixSaisi : resp.prix;
+                    // Prix vide : on prend le prix détail (prix_tranche) s'il est défini, sinon produit.prix_produit
+                    const prixFinal = prixSaisi > 0 ? prixSaisi : PrixTranche.prix(resp.tranches || [], qte, resp.prix);
                     const nbLotsInitial = Math.floor(qte / unitesParLot);
                     // Montant : nb de lots complets × prix DU LOT si un prix de lot
                     // est configuré, qté (pièces) × prix unitaire sinon.

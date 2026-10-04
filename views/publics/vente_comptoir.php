@@ -1,6 +1,7 @@
 <?php
 
 require 'databases/database.php';
+require_once 'includes/prix_tranche.php';
 // vente_comptoir.php – Caisse - Vente Comptoir
 while (ob_get_level()) ob_end_clean();
 ob_start();
@@ -546,6 +547,7 @@ require 'views/publics/vente_comptoir_data.php';
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
+<?php include 'includes/prix_tranche_js.php'; ?>
 <script>
 const BASE_URL = window.location.pathname;
 const CSRF_TOKEN = '<?= $csrf_token ?>';
@@ -713,9 +715,13 @@ async function addProduct(idx) {
     if (existing) {
         if (existing.qte + 1 > stock) { toast('Stock max atteint', 'error'); return; }
         existing.qte += 1;
+        appliquerTrancheComptoir(existing);
         recalculerMontantComptoir(existing);
     } else {
-        const prix = parseFloat(p.prix_produit) || 0;
+        // PREMIÈRE CHOSE à l'ajout : un prix détail est-il défini dans prix_tranche (tranches appliquées) ?
+        // Oui -> c'est le prix de départ ; sinon -> produit.prix_produit.
+        const prixProduit = parseFloat(p.prix_produit) || 0;
+        const prix = PrixTranche.base(p.tranches || [], prixProduit);
         cart.push({
             code: p.code_produit,
             nom: p.titre_produit,
@@ -724,6 +730,8 @@ async function addProduct(idx) {
             prix_achat: parseFloat(p.prix_produit) || 0,
             prixAchatReel: parseFloat(p.prix_fournisseur) || 0, // coût réel du produit, pour la vérification "vente à perte"
             prixManuel: false,
+            prixBase: prix,                 // prix de départ : prix détail (prix_tranche) sinon produit.prix_produit
+            tranches: p.tranches || [],     // tranches de prix ACTIVES (vide si non activées)
             qte: 1,
             stock: stock,
             montant: prix,
@@ -783,6 +791,19 @@ function unitesActuellesComptoir(item) {
     return 1;
 }
 
+// Tranches de prix par quantité (dégressif). Le prix proposé suit la quantité TOTALE du
+// produit (une seule ligne par produit dans ce panier, donc rien à cumuler). On ne touche
+// pas au prix dans deux cas : le vendeur l'a fixé lui-même (prixManuel), ou un prix de lot
+// spécial est configuré pour le lot choisi (il reste prioritaire). Quantité = pièces.
+function appliquerTrancheComptoir(item) {
+    if (!item.tranches || !item.tranches.length) return;
+    if (item.prixManuel) return;
+    if (aPrixLotConfigure(item)) return;
+    const prix = PrixTranche.prix(item.tranches, item.qte, item.prixBase);
+    item.prixUnitaire = prix;
+    item.prix = prix;
+}
+
 function recalculerMontantComptoir(item) {
     if (aPrixLotConfigure(item)) {
         const unites = unitesActuellesComptoir(item);
@@ -808,6 +829,7 @@ window.updateQty = function(code, delta) {
     if (newQty <= 0) { window.removeProduct(code); return; }
     if (newQty > item.stock) { toast('Stock max', 'error'); return; }
     item.qte = newQty;
+    appliquerTrancheComptoir(item);
     recalculerMontantComptoir(item);
     renderCart();
 };
@@ -824,6 +846,7 @@ window.setQty = function(code, value) {
         newQty = Math.floor(item.stock / pas) * pas;
     }
     item.qte = newQty;
+    appliquerTrancheComptoir(item);
     recalculerMontantComptoir(item);
     renderCart();
 };
@@ -955,6 +978,7 @@ function renderCart() {
                 <div class="cl-info">
                     <div class="cl-name">${esc(p.nom)}</div>
                     <div class="cl-price">${labelPrix}: <input type="number" value="${p.prix}" onchange="updatePrice('${p.code}', this.value)" onclick="event.stopPropagation()"> FCFA</div>
+                    ${(p.tranches && p.tranches.length) ? `<div style="font-size:10.5px;color:var(--color-gray-500);">Tarif dégressif : ${PrixTranche.resume(p.tranches)}${(!p.prixManuel && p.prix < p.prixBase) ? ' — <strong>tranche appliquée</strong>' : ''}</div>` : ''}
                 </div>
                 <div class="cl-qty">
                     <button onclick="updateQty('${p.code}', -1)">-</button>
@@ -997,6 +1021,7 @@ window.setModeVente = function(code, value) {
             ? parseFloat(lotCat.prix_lot)
             : item.prixUnitaire;
     }
+    appliquerTrancheComptoir(item);
     recalculerMontantComptoir(item);
     renderCart();
 };

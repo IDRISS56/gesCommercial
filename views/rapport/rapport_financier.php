@@ -17,6 +17,12 @@ if (!$user) {
     header('Location: ../utilisateur/login');
     exit;
 }
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+// Rôles autorisés à corriger manuellement un solde client/fournisseur.
+$roleNormalise = strtolower(strtr(trim((string)$user['role']), ['é' => 'e', 'É' => 'e', 'è' => 'e', 'È' => 'e']));
+$peutAjusterSolde = in_array($roleNormalise, ['administrateur', 'superviseur', 'proprietaire'], true);
 // if (!in_array($user['role'], ['Administrateur', 'Superviseur', 'Proprietaire'], true)) {
 //     http_response_code(403);
 //     die("Accès non autorisé à ce rapport.");
@@ -519,7 +525,7 @@ function chargerAchats($pdo, $page, $boutiquesAutorisees) {
 //   solde_contact > 0 => le contact doit ce montant
 //   solde_contact < 0 => le contact est en avance (avoir)
 // On liste tout contact dont le solde n'est pas à zéro, dans les deux sens.
-function chargerSoldes($pdo, $type, $page, $contactFiltre = '') {
+function chargerSoldes($pdo, $type, $page, $contactFiltre = '', $peutAjuster = false) {
     $whereExtra = '';
     $params = [':type' => $type];
     if ($contactFiltre !== '') {
@@ -533,7 +539,7 @@ function chargerSoldes($pdo, $type, $page, $contactFiltre = '') {
             WHERE ct.type_contact = :type AND ct.solde_contact <> 0$whereExtra
             ORDER BY ct.solde_contact DESC";
     $countSql = "SELECT COUNT(*) FROM contact ct WHERE ct.type_contact = :type AND ct.solde_contact <> 0$whereExtra";
-    $renderer = function ($row) {
+    $renderer = function ($row) use ($peutAjuster) {
         $solde = (float)$row['solde_contact'];
         if ($solde > 0) {
             $soldeHtml = '<span class="text-danger fw-bold">Doit ' . fmt($solde) . ' F</span>';
@@ -546,9 +552,47 @@ function chargerSoldes($pdo, $type, $page, $contactFiltre = '') {
             . '<td class="text-center">' . (int)$row['nb_factures'] . '</td>'
             . '<td class="text-end">' . $soldeHtml . '</td>'
             . '<td>' . ($row['derniere_facture'] ? date('d/m/Y', strtotime($row['derniere_facture'])) : '—') . '</td>'
+            . ($peutAjuster
+                ? '<td class="text-end"><button type="button" class="btn btn-outline-primary btn-sm btn-ajuster-solde" data-code="' . e($row['code_contact']) . '" data-nom="' . e($row['nom_prenom_contact']) . '" data-solde="' . e($solde) . '"><i class="bi bi-sliders"></i> Ajuster</button></td>'
+                : '')
             . '</tr>';
     };
-    return paginer($pdo, $sql, $countSql, $params, $page, 20, $renderer, 5);
+    return paginer($pdo, $sql, $countSql, $params, $page, 20, $renderer, $peutAjuster ? 6 : 5);
+}
+
+// ==========================================================
+// AJUSTEMENT MANUEL D'UN SOLDE CONTACT (sans passer par la base)
+// ==========================================================
+// Modifie uniquement contact.solde_contact (factures, transactions et caisse
+// ne sont pas touchées). Réservé aux rôles définis dans $peutAjusterSolde.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'ajuster_solde') {
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: application/json; charset=utf-8');
+    $repondre = function ($ok, $message) {
+        echo json_encode(['ok' => $ok, 'message' => $message]);
+        exit;
+    };
+    if (empty($_POST['csrf_token']) || !hash_equals($_SESSION['csrf_token'], $_POST['csrf_token'])) {
+        http_response_code(403);
+        $repondre(false, "Session expirée : rechargez la page puis réessayez.");
+    }
+    if (!$peutAjusterSolde) {
+        http_response_code(403);
+        $repondre(false, "Vous n'avez pas le droit de corriger un solde.");
+    }
+    $codeContact = trim($_POST['code_contact'] ?? '');
+    $sens = $_POST['sens'] ?? '';
+    $brut = str_replace(',', '.', str_replace([' ', "\xc2\xa0"], '', (string)($_POST['montant'] ?? '0')));
+    if ($codeContact === '') $repondre(false, "Contact manquant.");
+    if (!in_array($sens, ['doit', 'avance', 'solde'], true)) $repondre(false, "Choisissez le type de solde.");
+    if ($sens !== 'solde' && (!is_numeric($brut) || (float)$brut <= 0)) $repondre(false, "Saisissez un montant supérieur à 0.");
+    $montant = ($sens === 'solde') ? 0.0 : round((float)$brut, 2);
+    if ($montant > 999999999999) $repondre(false, "Montant trop grand.");
+    $nouveau = ($sens === 'doit') ? $montant : (($sens === 'avance') ? -$montant : 0.0);
+
+    $stmtAj = $pdo->prepare("UPDATE contact SET solde_contact = ? WHERE code_contact = ? AND UPPER(type_contact) IN ('CLIENT','FOURNISSEUR')");
+    $stmtAj->execute([$nouveau, $codeContact]);
+    $repondre(true, "Solde corrigé.");
 }
 
 // ==========================================================
@@ -565,8 +609,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $_POST['aj
         case 'factures_clients':     $res = chargerFacturesClients($pdo, $page, $boutiquesAutorisees, $etatFiltreAjax, $contactFiltreAjax, $triAjax); break;
         case 'factures_fournisseurs':$res = chargerFacturesFournisseurs($pdo, $page, $boutiquesAutorisees, $etatFiltreAjax, $contactFiltreAjax, $triAjax); break;
         case 'achats':                $res = chargerAchats($pdo, $page, $boutiquesAutorisees); break;
-        case 'soldes_clients':        $res = chargerSoldes($pdo, 'CLIENT', $page, $contactFiltreAjax); break;
-        case 'soldes_fournisseurs':   $res = chargerSoldes($pdo, 'FOURNISSEUR', $page, $contactFiltreAjax); break;
+        case 'soldes_clients':        $res = chargerSoldes($pdo, 'CLIENT', $page, $contactFiltreAjax, $peutAjusterSolde); break;
+        case 'soldes_fournisseurs':   $res = chargerSoldes($pdo, 'FOURNISSEUR', $page, $contactFiltreAjax, $peutAjusterSolde); break;
         default:                      $res = chargerTresorerie($pdo, $page, $boutiquesAutorisees); break;
     }
     while (ob_get_level()) ob_end_clean();
@@ -591,8 +635,8 @@ $resTransClients    = chargerTransactionsClients($pdo, 1, $boutiquesAutorisees);
 $resFactClients     = chargerFacturesClients($pdo, 1, $boutiquesAutorisees);
 $resFactFourn       = chargerFacturesFournisseurs($pdo, 1, $boutiquesAutorisees);
 $resAchats          = chargerAchats($pdo, 1, $boutiquesAutorisees);
-$resSoldesClients   = chargerSoldes($pdo, 'CLIENT', 1);
-$resSoldesFourn     = chargerSoldes($pdo, 'FOURNISSEUR', 1);
+$resSoldesClients   = chargerSoldes($pdo, 'CLIENT', 1, '', $peutAjusterSolde);
+$resSoldesFourn     = chargerSoldes($pdo, 'FOURNISSEUR', 1, '', $peutAjusterSolde);
 
 // Stats globales (restreintes aux boutiques autorisées, sauf créances/dettes
 // qui restent globales au contact — voir commentaire plus haut)
@@ -1248,7 +1292,7 @@ tbody tr:last-child td { border-bottom: none; }
                 </div>
                 <div class="table-wrapper">
                     <table>
-                        <thead><tr><th>Client</th><th>Téléphone</th><th>Nb factures dues</th><th>Solde</th><th>Dernière facture</th></tr></thead>
+                        <thead><tr><th>Client</th><th>Téléphone</th><th>Nb factures dues</th><th>Solde</th><th>Dernière facture</th><?php if ($peutAjusterSolde): ?><th></th><?php endif; ?></tr></thead>
                         <tbody id="tbody-soldes_clients"><?= $resSoldesClients['tableHtml'] ?></tbody>
                     </table>
                 </div>
@@ -1282,7 +1326,7 @@ tbody tr:last-child td { border-bottom: none; }
                 </div>
                 <div class="table-wrapper">
                     <table>
-                        <thead><tr><th>Fournisseur</th><th>Téléphone</th><th>Nb factures dues</th><th>Solde</th><th>Dernière facture</th></tr></thead>
+                        <thead><tr><th>Fournisseur</th><th>Téléphone</th><th>Nb factures dues</th><th>Solde</th><th>Dernière facture</th><?php if ($peutAjusterSolde): ?><th></th><?php endif; ?></tr></thead>
                         <tbody id="tbody-soldes_fournisseurs"><?= $resSoldesFourn['tableHtml'] ?></tbody>
                     </table>
                 </div>
@@ -1291,6 +1335,43 @@ tbody tr:last-child td { border-bottom: none; }
         </div>
     </div>
 </div>
+
+<?php if ($peutAjusterSolde): ?>
+<!-- Modal : ajuster un solde -->
+<div class="modal fade" id="modalAjusterSolde" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-sm">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-sliders"></i> Ajuster le solde</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="ajCode">
+                <div class="mb-1"><strong id="ajNom"></strong></div>
+                <div class="mb-3 text-muted small">Solde actuel : <span id="ajActuel"></span></div>
+                <div class="mb-2">
+                    <label class="form-label small mb-1">Le solde doit être</label>
+                    <select class="form-select form-select-sm" id="ajSens">
+                        <option value="doit">Doit (dette)</option>
+                        <option value="avance">En avance (avoir)</option>
+                        <option value="solde">Soldé (0)</option>
+                    </select>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small mb-1">Montant (F)</label>
+                    <input type="text" class="form-control form-control-sm" id="ajMontant" inputmode="decimal" autocomplete="off">
+                </div>
+                <div class="small mb-2">Nouveau solde : <strong id="ajApercu"></strong></div>
+                <div class="alert alert-danger py-2 small d-none mb-0" id="ajErreur"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Annuler</button>
+                <button type="button" class="btn btn-primary btn-sm" id="ajEnregistrer"><i class="bi bi-check2"></i> Enregistrer</button>
+            </div>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
 
 <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
@@ -1494,6 +1575,64 @@ $(document).ready(function () {
         var tab = $(this).closest('.filtres-factures, .filtres-soldes').data('tab');
         chargerPage(tab, 1);
     });
+
+    // ---- Ajustement manuel d'un solde (sans passer par la base) ----
+    var CSRF_TOKEN = <?= json_encode($_SESSION['csrf_token']) ?>;
+    function fmtF(n) { return Math.round(Math.abs(n)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' '); }
+    function texteSolde(s) {
+        if (s > 0) return 'Doit ' + fmtF(s) + ' F';
+        if (s < 0) return 'En avance de ' + fmtF(s) + ' F';
+        return 'Soldé (0 F)';
+    }
+    function montantSaisi() {
+        var v = parseFloat(String($('#ajMontant').val()).replace(/[\s\u00a0]/g, '').replace(',', '.'));
+        return isNaN(v) ? 0 : v;
+    }
+    function majApercu() {
+        var sens = $('#ajSens').val();
+        $('#ajMontant').prop('disabled', sens === 'solde');
+        var m = sens === 'solde' ? 0 : montantSaisi();
+        $('#ajApercu').text(texteSolde(sens === 'doit' ? m : (sens === 'avance' ? -m : 0)));
+    }
+    $('#ajSens').on('change', majApercu);
+    $('#ajMontant').on('input', majApercu);
+    $('.tab-content').on('click', '.btn-ajuster-solde', function () {
+        var $b = $(this), solde = parseFloat($b.data('solde')) || 0;
+        $('#ajCode').val($b.data('code'));
+        $('#ajNom').text($b.data('nom'));
+        $('#ajActuel').text(texteSolde(solde));
+        $('#ajSens').val(solde > 0 ? 'doit' : (solde < 0 ? 'avance' : 'solde'));
+        $('#ajMontant').val(solde === 0 ? '' : Math.abs(solde));
+        $('#ajErreur').addClass('d-none');
+        majApercu();
+        new bootstrap.Modal(document.getElementById('modalAjusterSolde')).show();
+    });
+    $('#ajEnregistrer').on('click', function () {
+        var $btn = $(this).prop('disabled', true);
+        $.post(window.location.pathname, {
+            action: 'ajuster_solde', csrf_token: CSRF_TOKEN, code_contact: $('#ajCode').val(),
+            sens: $('#ajSens').val(), montant: $('#ajMontant').val()
+        }, function (res) {
+            if (res.ok) {
+                // On recharge la page pour rafraîchir aussi les totaux en haut de l'onglet.
+                sessionStorage.setItem('soldeVue', $('.sub-nav button.active').data('solde') || 'clients');
+                location.reload();
+            } else {
+                $('#ajErreur').text(res.message).removeClass('d-none');
+                $btn.prop('disabled', false);
+            }
+        }, 'json').fail(function (xhr) {
+            var msg = 'Erreur de communication avec le serveur.';
+            try { msg = JSON.parse(xhr.responseText).message || msg; } catch (e) {}
+            $('#ajErreur').text(msg).removeClass('d-none');
+            $btn.prop('disabled', false);
+        });
+    });
+    var vueSoldes = sessionStorage.getItem('soldeVue');
+    if (vueSoldes) {
+        sessionStorage.removeItem('soldeVue');
+        $('.sub-nav button[data-solde="' + vueSoldes + '"]').trigger('click');
+    }
 
     // ---- Impression / téléchargement PDF (mêmes filtres que l'onglet imprimé) ----
     function imprimerRapport(section, mode, format) {

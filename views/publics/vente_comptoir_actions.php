@@ -243,6 +243,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     unset($p);
                 }
 
+                // Tranches de prix ACTIVES (dégressif par quantité) : tableau vide si aucune.
+                $products = joindreTranches($pdo, $products);
+
                 echo json_encode(['success' => true, 'products' => $products]);
                 exit;
 

@@ -30,4 +30,11 @@ class produit
         requirePermission(['Administrateur', 'Superviseur', 'Proprietaire']);
         include "views/produit/lots.php";
     }
+
+    // Tranches de prix de vente par quantité (dégressif), activables produit par produit
+    public function tranches()
+    {
+        requirePermission(['Administrateur', 'Superviseur', 'Proprietaire']);
+        include "views/produit/tranches.php";
+    }
 }

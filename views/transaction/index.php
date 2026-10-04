@@ -384,6 +384,13 @@ if (isset($_POST['action']) && $_POST['action'] === 'annuler_transaction') {
         //    d'opération ne touche jamais solde_contact à la création (seule la
         //    caisse est impactée) — le reverser ici créditerait le contact à tort.
         $estDecaissementDirect = (strpos($tr['objet_transaction'] ?? '', 'Décaissement fournisseur (dépense)') === 0);
+        // Nouvelles dépenses (menu Dépenses) : identifiées par la table `depense`,
+        // pas par le texte de l'objet. Elles n'ont jamais de contact.
+        if (!$estDecaissementDirect) {
+            $stmtDep = $pdo->prepare("SELECT COUNT(*) FROM depense WHERE numero_transaction = ?");
+            $stmtDep->execute([$numero]);
+            $estDecaissementDirect = ($stmtDep->fetchColumn() > 0);
+        }
         if (!empty($tr['contact_id']) && !$estDecaissementDirect) {
             $pdo->prepare("SELECT solde_contact FROM contact WHERE code_contact = ? FOR UPDATE")->execute([$tr['contact_id']]);
             $pdo->prepare("UPDATE contact SET solde_contact = solde_contact + ? WHERE code_contact = ?")->execute([$montant, $tr['contact_id']]);

@@ -27,7 +27,7 @@ function getStatutBadge($statut) {
 function renderAchatCard(array $row): string {
     $etatBadge = getEtatBadge($row['etat_facture']);
     $isValidee = (strtolower($row['statut_facture']) === 'validee');
-    $peutGerer = ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Caisse');
+    $peutGerer = ($_SESSION['role'] === 'Administrateur' || $_SESSION['role'] === 'Superviseur' || $_SESSION['role'] === 'Proprietaire' || $_SESSION['role'] === 'Caisse');
 
     ob_start();
     ?>

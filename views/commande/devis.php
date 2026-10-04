@@ -4,6 +4,7 @@
 // qu'au moment où on transforme le devis en Bon de commande.
 
 require 'databases/database.php';
+require_once 'includes/prix_tranche.php';
 
 while (ob_get_level()) {
     ob_end_clean();
@@ -102,7 +103,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
              ORDER BY titre_produit ASC"
         );
         $stmtProd->execute([$categorieId]);
-        echo json_encode(['success' => true, 'produits' => $stmtProd->fetchAll(PDO::FETCH_ASSOC)]);
+        echo json_encode(['success' => true, 'produits' => joindreTranches($pdo, $stmtProd->fetchAll(PDO::FETCH_ASSOC))]);
         exit;
     }
 
@@ -988,6 +989,7 @@ h1,h2,h3,h4,h5,h6 { font-family: 'Outfit', sans-serif; font-weight: 700; letter-
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
+<?php include 'includes/prix_tranche_js.php'; ?>
 
 <script>
 const CSRF_TOKEN = <?= json_encode($csrf_token) ?>;
@@ -1118,6 +1120,7 @@ function filtrerProduitsLigne($line, catId, selectedProduitCode) {
                     value="${escapeHtml(p.code_produit)}"
                     data-prix="${escapeHtml(p.prix_produit)}"
                     data-prix-achat="${escapeHtml(p.prix_fournisseur || 0)}"
+                    data-tranches="${escapeHtml(JSON.stringify(p.tranches || []))}"
                     data-subtext="${escapeHtml(fmtN(p.prix_produit))}"${sel}
                 >
                     ${escapeHtml(p.titre_produit)}
@@ -1195,6 +1198,10 @@ function ajouterLigne(prefill) {
         <div class="ligne-prix-alerte"></div>
     `;
 
+    // Devis existant rouvert : le prix enregistré est conservé tel quel (jamais recalculé
+    // à l'ouverture). Une nouvelle ligne, elle, suit les tranches de prix actives.
+    if (prefill) div.setAttribute('data-prix-manuel', '1');
+
     container.appendChild(div);
 
     const $line = $(div);
@@ -1209,8 +1216,10 @@ function ajouterLigne(prefill) {
         });
 
         $catSelect.on('changed.bs.select', function () {
+            const ancienCode = $line.attr('data-produit-code') || '';
             filtrerProduitsLigne($line, $(this).val(), null);
             corrigerLibelleSelectpicker($(this));
+            appliquerTranchesDevis(ancienCode);
             calculerTotaux();
         });
     } else {
@@ -1235,7 +1244,9 @@ function supprimerLigne(btn) {
         try { $line.find('.ligne-categorie').selectpicker('destroy'); } catch (e) {}
     }
 
+    const codeSupprime = $line.attr('data-produit-code') || '';
     $line.remove();
+    appliquerTranchesDevis(codeSupprime);
     calculerTotaux();
 }
 
@@ -1254,6 +1265,9 @@ function calculerHintLigne(div) {
     } else {
         hint.textContent = `Apparaîtra comme : ${qte} produit(s) (pas de lot)`;
     }
+
+    const resume = PrixTranche.resume(tranchesDeLigne($(div)));
+    if (resume) hint.textContent += ` — Tarif dégressif : ${resume}`;
 }
 
 function produitChoisi(sel) {
@@ -1262,12 +1276,57 @@ function produitChoisi(sel) {
     const code = $select.val() || '';
 
     const $ligne = $select.closest('.ligne-devis');
+    const ancienCode = $ligne.attr('data-produit-code') || '';
     $ligne.attr('data-produit-code', code);
+    $ligne.attr('data-prix-manuel', '0');
     $ligne.removeClass('line-error');
     $ligne.find('.ligne-prix').val(prix);
 
+    // Tranches de prix : le prix suit la quantité TOTALE du produit sur toutes les lignes
+    appliquerTranchesDevis(code);
+    if (ancienCode && ancienCode !== code) appliquerTranchesDevis(ancienCode);
+
     calculerTotaux();
 }
+
+// ---- Tranches de prix par quantité (dégressif) ----
+// Tranches ACTIVES du produit sélectionné sur une ligne (vide si non activées).
+function tranchesDeLigne($div) {
+    try { return JSON.parse($div.find('.ligne-produit option:selected').attr('data-tranches') || '[]'); }
+    catch (e) { return []; }
+}
+
+// Recalcule le prix proposé de toutes les lignes d'un même produit d'après la quantité
+// CUMULÉE de ces lignes. Une ligne dont le prix a été saisi/modifié à la main
+// (data-prix-manuel="1") ou reprise d'un devis existant n'est jamais touchée.
+function appliquerTranchesDevis(codeProduit) {
+    if (!codeProduit) return;
+    const lignes = Array.from(document.querySelectorAll('.ligne-devis'))
+        .filter(d => d.getAttribute('data-produit-code') === codeProduit);
+    if (!lignes.length) return;
+    let total = 0;
+    lignes.forEach(d => { total += parseFloat(d.querySelector('.ligne-qte').value) || 0; });
+    lignes.forEach(d => {
+        if (d.getAttribute('data-prix-manuel') === '1') return;
+        const $d = $(d);
+        const tr = tranchesDeLigne($d);
+        if (!tr.length) return;
+        const base = parseFloat($d.find('.ligne-produit option:selected').attr('data-prix')) || 0;
+        d.querySelector('.ligne-prix').value = PrixTranche.prix(tr, total, base);
+    });
+}
+
+// Événements 'input' (saisie utilisateur uniquement : une affectation par script n'en déclenche pas)
+document.getElementById('lignesContainer').addEventListener('input', function (e) {
+    const div = e.target.closest ? e.target.closest('.ligne-devis') : null;
+    if (!div) return;
+    if (e.target.classList.contains('ligne-prix')) {
+        div.setAttribute('data-prix-manuel', '1');          // prix fixé par le vendeur : on le respecte
+    } else if (e.target.classList.contains('ligne-qte')) {
+        appliquerTranchesDevis(div.getAttribute('data-produit-code'));
+        calculerTotaux();
+    }
+});
 
 function calculerTotaux() {
     let montantHT = 0;

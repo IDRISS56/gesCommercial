@@ -36,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
              ORDER BY CASE WHEN etat_produit = 'RUPTURE' THEN 1 ELSE 0 END, titre_produit"
         );
         $stmtProd->execute([$categorieId]);
-        echo json_encode(['success' => true, 'produits' => $stmtProd->fetchAll(PDO::FETCH_ASSOC)]);
+        echo json_encode(['success' => true, 'produits' => joindreTranches($pdo, $stmtProd->fetchAll(PDO::FETCH_ASSOC))]);
         exit;
     }
 
@@ -436,6 +436,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $response['prix'] = (float) $rowP['prix_produit'];
                 $response['titre'] = $rowP['titre_produit'];
                 $response['saisie_par_carton'] = (int) $rowP['saisie_par_carton'];
+                // Tranches de prix actives (dégressif) : vide si non activées pour ce produit.
+                $response['tranches'] = chargerTranchesActives($pdo, [$produitId])[$produitId] ?? [];
 
                 // Prix de lot éventuellement configurés pour ce produit (menu
                 // "Configuration des lots") : permet de pré-remplir le prix de

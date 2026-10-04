@@ -1428,10 +1428,10 @@
                  </span>
              </div>
          </div>
-         <div class="status-right">
+         <!-- <div class="status-right">
              <div class="status-item"><i class="bi-exclamation-triangle-fill text-warning"></i><span>Échéances: 5</span></div>
              <div class="status-item"><i class="bi-exclamation-octagon-fill text-danger"></i><span>Impayés: 2</span></div>
-         </div>
+         </div> -->
      </div>
 
      <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>

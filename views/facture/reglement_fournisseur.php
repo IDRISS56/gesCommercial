@@ -22,7 +22,7 @@ $message = '';
 $messageType = '';
 
 // ============================================================
-// ENREGISTREMENT D'UN RÈGLEMENT OU DÉCAISSEMENT
+// ENREGISTREMENT D'UN RÈGLEMENT OU D'UNE AVANCE FOURNISSEUR
 // ============================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regler') {
     if (($_POST['csrf_token'] ?? '') !== $csrf_token) {
@@ -31,7 +31,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
     } else {
         $numero_facture = trim($_POST['numero_facture'] ?? '');
         $fournisseur_id = trim($_POST['fournisseur_id'] ?? '');
-        $type_operation = trim($_POST['type_operation'] ?? 'facture'); // 'facture' (règlement/avance) ou 'depense'
+        $type_operation = trim($_POST['type_operation'] ?? 'facture'); // toujours 'facture' (règlement/avance) ; 'depense' est refusé plus bas
         $montant = floatval(str_replace(',', '.', $_POST['montant'] ?? 0));
         $mode_reglement = trim($_POST['mode_reglement'] ?? 'Espece');
         $numero_reglement = trim($_POST['numero_reglement'] ?? '');
@@ -63,54 +63,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'regle
 
             $pdo->beginTransaction();
 
-            // ============================================================
-            // CAS 1 : DÉCAISSEMENT DIRECT (DÉPENSE) — n'affecte jamais le
-            // solde d'un fournisseur, c'est une sortie de caisse pure.
-            // ============================================================
+            // Les dépenses (sortie de caisse sans fournisseur, motif obligatoire) ont
+            // leur propre écran : menu Trésorerie > Dépenses (views/depense/index.php).
+            // Ce garde-fou refuse un POST forgé qui tenterait encore l'ancien mode.
             if ($type_operation === 'depense') {
-                if (empty($fournisseur_id)) {
-                    throw new Exception("Veuillez sélectionner un fournisseur ou une facture.");
-                }
-                $stmtF = $pdo->prepare("SELECT code_contact, nom_prenom_contact FROM contact WHERE code_contact = ? AND type_contact = 'Fournisseur' FOR UPDATE");
-                $stmtF->execute([$fournisseur_id]);
-                $contactDepense = $stmtF->fetch(PDO::FETCH_ASSOC);
-                if (!$contactDepense) throw new Exception("Fournisseur introuvable.");
-
-                $stmt = $pdo->prepare("SELECT * FROM caisse WHERE statut = 'Actif' AND (boutique_id = ? OR boutique_id IS NULL) ORDER BY boutique_id IS NULL LIMIT 1 FOR UPDATE");
-                $stmt->execute([$boutique_id_cible]);
-                $caisse = $stmt->fetch(PDO::FETCH_ASSOC);
-                if (!$caisse) throw new Exception("Aucune caisse active pour cette boutique.");
-
-                $stmtJC = $pdo->prepare("SELECT COUNT(*) FROM journees_caisse WHERE caisse_id = ? AND statut = 'OUVERTE'");
-                $stmtJC->execute([$caisse['caisse_id']]);
-                if ($stmtJC->fetchColumn() == 0) throw new Exception("Aucune journée de caisse n'est ouverte : impossible d'enregistrer ce décaissement.");
-                if ($montant > floatval($caisse['solde'])) throw new Exception("Solde de caisse insuffisant (" . fmt($caisse['solde']) . " F disponibles).");
-
-                $soldeAvant = floatval($caisse['solde']);
-                $soldeApres = $soldeAvant - $montant;
-                $numTrans = 'TR-' . date('YmdHis') . rand(100, 999);
-                $objetTransactionDepense = 'Décaissement fournisseur (dépense) — ' . $contactDepense['nom_prenom_contact'];
-
-                $stmtTr = $pdo->prepare("INSERT INTO transaction
-                    (numero_transaction, date_transaction, heure_transaction, montant_transaction,
-                     frais_transaction, montant_total, type_transaction, objet_transaction,
-                     caisse_id, facture_id, contact_id, mode_reglement, numero_reglement, reference_reglement,
-                     utilisateur_id, etat_transaction)
-                    VALUES (?, ?, CURTIME(), ?, 0, ?, 'Sortie', ?,
-                            ?, NULL, ?, ?, ?, ?, ?, 'Succes')");
-                $stmtTr->execute([
-                    $numTrans, $date_reglement, $montant, $montant, $objetTransactionDepense,
-                    $caisse['caisse_id'], $contactDepense['code_contact'], $mode_reglement_mapped,
-                    $numero_reglement, $reference_reglement, $user['id']
-                ]);
-
-                $stmtMaj = $pdo->prepare("UPDATE caisse SET solde = ? WHERE caisse_id = ? AND statut = 'Actif'");
-                $stmtMaj->execute([$soldeApres, $caisse['caisse_id']]);
-                if ($stmtMaj->rowCount() === 0) throw new Exception("La mise à jour du solde de la caisse n'a affecté aucune ligne (caisse devenue inactive entre-temps ?).");
-
-                $pdo->commit();
-                $message = "Décaissement de " . fmt($montant) . " F enregistré comme dépense.";
-                $messageType = 'success';
+                throw new Exception("Les dépenses s'enregistrent désormais dans le menu Dépenses.");
             }
             // ============================================================
             // CAS 2 : RÈGLEMENT D'UNE FACTURE FOURNISSEUR, ET/OU AVANCE
@@ -301,7 +258,7 @@ if (empty($user['boutique_id'])) {
 
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Règlement / Décaissement Fournisseur</title>
+    <title>Règlement Fournisseur</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/css/bootstrap-select.min.css">
@@ -346,7 +303,6 @@ if (empty($user['boutique_id'])) {
         .type-btn span { font-size: 12px; font-weight: 700; }
         .type-btn.active { border-color: var(--b); background: var(--bl); color: var(--b); }
         .type-btn.active-facture { border-color: var(--suc); background: var(--sucl); color: var(--suc); }
-        .type-btn.active-depense { border-color: var(--dng); background: var(--dngl); color: var(--dng); }
         .info-box { background: var(--wrnl); border: 1px solid var(--wrnb); color: #92400e; padding: 10px 14px; border-radius: 8px; font-size: 12px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
         .help-text { font-size: 10px; color: var(--lt); margin-top: 4px; font-style: italic; }
         @media (max-width:700px) { body { padding: 14px; } .hdr { flex-direction: column; align-items: flex-start; } .prow { flex-direction: column; align-items: stretch; } }
@@ -356,8 +312,8 @@ if (empty($user['boutique_id'])) {
 <div class="W">
     <div class="hdr">
         <div class="hdr-l">
-            <h1><i class="bi bi-truck text-danger me-2"></i>Règlement / Décaissement — Fournisseur</h1>
-            <p>Décaissement des paiements fournisseurs ou dépenses directes</p>
+            <h1><i class="bi bi-truck text-danger me-2"></i>Règlement — Fournisseur</h1>
+            <p>Règlement des factures fournisseurs et versements d'avance</p>
         </div>
         <div class="hdr-badge"><i class="bi bi-wallet2"></i> Décaissement</div>
     </div>
@@ -375,22 +331,11 @@ if (empty($user['boutique_id'])) {
             <input type="hidden" name="csrf_token" value="<?= $csrf_token ?>">
             <input type="hidden" name="numero_facture" id="numeroFacture" value="">
             <input type="hidden" name="fournisseur_id" id="fournisseurId" value="">
-            <input type="hidden" name="type_operation" id="typeOperation" value="facture">
-
-            <div class="type-selector">
-                <div class="type-btn active-facture" id="typeFactureBtn" onclick="setType('facture')">
-                    <i class="bi bi-receipt"></i>
-                    <span>Règlement de facture</span>
-                </div>
-                <div class="type-btn" id="typeDepenseBtn" onclick="setType('depense')">
-                    <i class="bi bi-cash-stack"></i>
-                    <span>Dépense directe (sans facture)</span>
-                </div>
-            </div>
+            <input type="hidden" name="type_operation" value="facture">
 
             <div class="info-box" id="infoBox">
                 <i class="bi bi-info-circle-fill"></i>
-                <span id="infoText">Sélectionnez un fournisseur puis une facture à régler.</span>
+                <span id="infoText">Sélectionnez un fournisseur, puis une facture à régler — ou laissez « Aucune facture » pour lui verser une simple avance.</span>
             </div>
 
             <div class="pbar">
@@ -490,7 +435,6 @@ if (empty($user['boutique_id'])) {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
 <script>
 const facturesData = <?= $factures_json ?>;
-let currentType = 'facture';
 
 $(document).ready(function() {
     $('.selectpicker').selectpicker();
@@ -501,10 +445,6 @@ $(document).ready(function() {
     const montantVerseEl    = document.getElementById('montantVerse');
     const resteAPayerEl     = document.getElementById('resteAPayer');
     const btnValider        = document.getElementById('btnValider');
-    const factureCol        = document.getElementById('factureCol');
-    const infoText          = document.getElementById('infoText');
-    const btnFacture        = document.getElementById('typeFactureBtn');
-    const btnDepense        = document.getElementById('typeDepenseBtn');
 
     let soldeFournisseurValue = 0;
 
@@ -530,7 +470,7 @@ $(document).ready(function() {
         if (!fourCode) {
             $sf.append('<option value="">-- Sélectionner d\'abord un fournisseur --</option>');
             $sf.prop('disabled', true);
-        } else if (currentType === 'facture') {
+        } else {
             $sf.append('<option value="">Aucune facture — Versement en avance</option>');
             const facturesFour = facturesData.filter(f => f.contact_id === fourCode);
             facturesFour.forEach(f => {
@@ -542,10 +482,6 @@ $(document).ready(function() {
                 $sf[0].appendChild(opt);
             });
             $sf.prop('disabled', false);
-        } else {
-            // Mode dépense : pas de facture
-            $sf.append('<option value="">-- Mode dépense directe --</option>');
-            $sf.prop('disabled', true);
         }
 
         reinit($sf); // ⛔ JAMAIS selectpicker('refresh') avec la beta3
@@ -559,9 +495,7 @@ $(document).ready(function() {
         const fourCode = this.value;
         document.getElementById('fournisseurId').value = fourCode;
         soldeFournisseurValue = parseFloat(this.selectedOptions[0]?.dataset.solde || 0);
-        if (currentType === 'facture') {
-            montantDuEl.value = fmt2(soldeFournisseurValue) + ' F';
-        }
+        montantDuEl.value = fmt2(soldeFournisseurValue) + ' F';
         rebuildFactures(fourCode);
     });
 
@@ -583,23 +517,11 @@ $(document).ready(function() {
     // Filet de sécurité : resynchronise le champ caché numero_facture depuis la
     // vraie valeur du <select> juste avant l'envoi du formulaire.
     $('#formReglement').on('submit', function () {
-        document.getElementById('typeOperation').value = currentType;
-        if (currentType === 'facture') {
-            document.getElementById('numeroFacture').value = selectFacture.value;
-        } else {
-            document.getElementById('numeroFacture').value = '';
-        }
+        document.getElementById('numeroFacture').value = selectFacture.value;
     });
 
     function updateCalculs() {
         const verse = parseFloat(montantVerseEl.value) || 0;
-
-        if (currentType === 'depense') {
-            resteAPayerEl.value = '—';
-            resteAPayerEl.classList.remove('reste-negatif');
-            btnValider.disabled = !(selectFournisseur.value && verse > 0);
-            return;
-        }
 
         const reste = soldeFournisseurValue - verse;
         resteAPayerEl.value = fmt2(reste) + ' F' + (reste > 0 ? ' (on doit encore)' : (reste < 0 ? ' (on est en avance)' : ' (soldé)'));
@@ -609,31 +531,6 @@ $(document).ready(function() {
         // plus que le dû).
         btnValider.disabled = !(selectFournisseur.value && verse > 0);
     }
-
-    // ============================================================
-    // Changement de type : facture / dépense directe
-    // ============================================================
-    window.setType = function(type) {
-        currentType = type;
-
-        btnFacture.className = 'type-btn' + (type === 'facture' ? ' active-facture' : '');
-        btnDepense.className = 'type-btn' + (type === 'depense' ? ' active-depense' : '');
-
-        if (type === 'facture') {
-            factureCol.style.display = '';
-            infoText.textContent = 'Sélectionnez un fournisseur, puis une facture à régler — ou laissez « Aucune facture » pour lui verser une simple avance.';
-            document.getElementById('numeroFacture').value = '';
-            montantDuEl.value = fmt2(soldeFournisseurValue) + ' F';
-        } else {
-            factureCol.style.display = 'none';
-            infoText.textContent = 'Dépense directe : sélectionnez un fournisseur et saisissez le montant. Aucune facture ne sera impactée.';
-            document.getElementById('numeroFacture').value = '';
-            montantDuEl.value = 'Dépense directe';
-        }
-
-        // Rebuild du select Facture selon le nouveau mode et le fournisseur courant
-        rebuildFactures(selectFournisseur.value);
-    };
 
     // ============================================================
     // Réinitialisation complète du formulaire
@@ -654,8 +551,8 @@ $(document).ready(function() {
         $sc.val('');
         reinit($sc);
 
-        // Retour au mode facture
-        setType('facture');
+        montantDuEl.value = '0 F';
+        updateCalculs();
     };
 });
 

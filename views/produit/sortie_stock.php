@@ -12,6 +12,7 @@
 ob_start();
 require 'databases/database.php';
 require 'databases/id_generator.php';
+require_once 'includes/stock_lignes.php';
 
 // ==========================================
 // SÉCURITÉ : utilisateur connecté & actif
@@ -78,12 +79,21 @@ $boutiques = array_values(array_filter($boutiques, function ($b) use ($boutiques
 // global (> 0), actifs en premier, avec mention "(inactif)" le cas échéant.
 // NB : pour exclure totalement les produits inactifs des sorties, ajoutez
 //      "AND etat_produit <> 'Inactif'" dans la requête ci-dessous.
-$produits = $pdo->query("SELECT code_produit, titre_produit, etat_produit
+$produits = $pdo->query("SELECT code_produit, titre_produit, etat_produit, categorie_id
     FROM produit
     WHERE stock_produit > 0
     ORDER BY CASE WHEN etat_produit = 'Inactif' THEN 1 ELSE 0 END, titre_produit")->fetchAll(PDO::FETCH_ASSOC);
 
-// Traitement du formulaire de sortie
+// - Catégories actives (le produit se choisit dans la catégorie) et catégories autorisées par boutique
+//   (restriction optionnelle, voir config/authentification.php::getCategoriesAutoriseesBoutique ; null = aucune) -
+$categories = $pdo->query("SELECT code_categorie, titre_categorie FROM categorie WHERE etat_categorie='ACTIF' ORDER BY titre_categorie")->fetchAll(PDO::FETCH_ASSOC);
+$categoriesAutoriseesParBoutique = [];
+foreach ($boutiques as $b) {
+    $categoriesAutoriseesParBoutique[$b['code_boutique']] = getCategoriesAutoriseesBoutique($pdo, $user['role'] ?? null, $b['code_boutique']);
+}
+
+// Traitement du formulaire de sortie : UNE validation pour TOUTES les lignes saisies
+// (voir includes/stock_lignes.php). Tout ou rien : si une ligne est refusée, aucune sortie n'est enregistrée.
 $action = $_POST['action'] ?? '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'sortie' && !isset($_POST['ajax'])) {
     $csrf_post = $_POST['csrf_token'] ?? '';
@@ -91,75 +101,82 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'sortie' && !isset($_PO
         $message = 'Token de sécurité invalide.';
         $messageType = 'danger';
     } else {
-        $produitId    = trim($_POST['produit_id'] ?? '');
         $boutiqueId   = trim($_POST['boutique_id'] ?? '');
+        $categorieId  = trim($_POST['categorie_id'] ?? '');
         $statutId     = trim($_POST['statut_id'] ?? '');
-        $quantite     = intval($_POST['quantite'] ?? 0);
-        $prixVente    = floatval($_POST['prix_vente'] ?? 0);
+        $lignes       = stockLireLignes($_POST['lignes'] ?? []);
 
         // Vérifier que le statut choisi est bien dans la liste autorisée
         $statutsAutorises = array_column($statutsSortieReserves, 'code_statut');
         if (!in_array($statutId, $statutsAutorises)) {
             $message = 'Motif de sortie non autorisé.';
             $messageType = 'warning';
-        } elseif (empty($produitId) || empty($boutiqueId) || empty($statutId) || $quantite <= 0) {
-            $message = 'Veuillez sélectionner un produit, une boutique, un motif et saisir une quantité valide (> 0).';
+        } elseif ($boutiqueId === '' || $categorieId === '') {
+            $message = 'Veuillez sélectionner une boutique, une catégorie et un motif.';
+            $messageType = 'warning';
+        } elseif (empty($lignes)) {
+            $message = 'Ajoutez au moins un produit à la liste avant de valider.';
+            $messageType = 'warning';
+        } elseif (count($lignes) > STOCK_LIGNES_MAX) {
+            $message = 'Trop de lignes dans une même sortie (maximum ' . STOCK_LIGNES_MAX . ').';
             $messageType = 'warning';
         } elseif (!in_array($boutiqueId, $boutiquesAutorisees, true)) {
             $message = "Vous n'êtes pas autorisé à saisir une sortie de stock pour cette boutique.";
             $messageType = 'danger';
+        } elseif (($catsAutoriseesSortie = getCategoriesAutoriseesBoutique($pdo, $user['role'] ?? null, $boutiqueId)) !== null && !in_array($categorieId, $catsAutoriseesSortie, true)) {
+            $message = "Cette boutique n'est pas autorisée à gérer la catégorie sélectionnée.";
+            $messageType = 'danger';
         } else {
-            // Vérification préliminaire (message rapide, hors transaction) : simplement
-            // pour éviter d'ouvrir une transaction si le produit n'existe pas du tout
-            // dans cette boutique. Le contrôle qui compte (avec verrou) est refait
-            // juste après, à l'intérieur de la transaction.
-            $stmt = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ?");
-            $stmt->execute([$produitId, $boutiqueId]);
-            $stockActuel = $stmt->fetch(PDO::FETCH_ASSOC);
-            if (!$stockActuel) {
-                $message = "Ce produit n'est pas présent dans cette boutique.";
-                $messageType = 'danger';
-            } else {
-                try {
-                    $pdo->beginTransaction();
+            try {
+                $pdo->beginTransaction();
 
-                    // Contrôle de stock verrouillé (FOR UPDATE) : verrouille la ligne
-                    // jusqu'au commit/rollback pour empêcher deux sorties simultanées
-                    // de faire passer le stock sous zéro.
-                    $stmtLock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
-                    $stmtLock->execute([$produitId, $boutiqueId]);
-                    $quantiteDisponible = $stmtLock->fetchColumn();
-                    $quantiteDisponible = ($quantiteDisponible === false) ? 0 : (int) $quantiteDisponible;
-                    if ($quantite > $quantiteDisponible) {
-                        throw new Exception("Stock disponible insuffisant. Disponible : $quantiteDisponible, demandé : $quantite.");
+                // Produits des lignes : existent, sans doublon, de la catégorie choisie
+                $infosProduits = stockChargerProduits($pdo, $lignes, $categorieId);
+
+                // Contrôle de stock verrouillé (FOR UPDATE) : verrouille chaque ligne de stock
+                // jusqu'au commit/rollback pour empêcher deux sorties simultanées de faire passer
+                // le stock sous zéro (les lignes sont triées par produit : même ordre de verrou partout).
+                $stmtLock = $pdo->prepare("SELECT quantite FROM stock WHERE produit_id = ? AND boutique_id = ? FOR UPDATE");
+                $stmtUpdateStock = $pdo->prepare("UPDATE stock SET quantite = quantite - ? WHERE produit_id = ? AND boutique_id = ?");
+                $stmtUpdateProd = $pdo->prepare("UPDATE produit SET stock_produit = GREATEST(0, stock_produit - ?) WHERE code_produit = ?");
+
+                $detailsLignes = [];
+                $numeros = [];
+                $totalQuantite = 0;
+
+                foreach ($lignes as $ligne) {
+                    $produitId = $ligne['produit_id'];
+                    $titreProduit = $infosProduits[$produitId]['titre_produit'];
+                    $quantite = intval($ligne['quantite'] ?? 0);
+                    $prixVente = floatval(str_replace(',', '.', (string) ($ligne['prix_vente'] ?? 0)));
+                    if ($quantite <= 0) {
+                        throw new Exception("Quantité invalide pour « $titreProduit » (doit être supérieure à 0).");
                     }
 
-                    // Récupérer le prix fournisseur (coût) du produit
-                    $stmtPrix = $pdo->prepare("SELECT prix_fournisseur, prix_produit FROM produit WHERE code_produit = ?");
-                    $stmtPrix->execute([$produitId]);
-                    $prod = $stmtPrix->fetch(PDO::FETCH_ASSOC);
-                    $prixAchat = (float)($prod['prix_fournisseur'] ?? 0);
-                    $prixUnitaire = $prixVente > 0 ? $prixVente : (float)($prod['prix_produit'] ?? 0);
+                    $stmtLock->execute([$produitId, $boutiqueId]);
+                    $quantiteDisponible = $stmtLock->fetchColumn();
+                    if ($quantiteDisponible === false) {
+                        throw new Exception("« $titreProduit » n'est pas présent dans cette boutique.");
+                    }
+                    $quantiteDisponible = (int) $quantiteDisponible;
+                    if ($quantite > $quantiteDisponible) {
+                        throw new Exception("Stock insuffisant pour « $titreProduit ». Disponible : $quantiteDisponible, demandé : $quantite.");
+                    }
+
+                    // Prix fournisseur (coût) et prix unitaire de sortie (prix du produit par défaut)
+                    $prixAchat = (float) $infosProduits[$produitId]['prix_fournisseur'];
+                    $prixUnitaire = $prixVente > 0 ? $prixVente : (float) $infosProduits[$produitId]['prix_produit'];
                     $montantCommande = $prixUnitaire * $quantite;
 
-                    // 1) Mise à jour du stock boutique
-                    $stmtUpdateStock = $pdo->prepare("UPDATE stock SET quantite = quantite - ? WHERE produit_id = ? AND boutique_id = ?");
+                    // 1) Stock boutique, 2) stock global produit
                     $stmtUpdateStock->execute([$quantite, $produitId, $boutiqueId]);
-
-                    // 2) Mise à jour du stock global produit
-                    $stmtUpdateProd = $pdo->prepare("UPDATE produit SET stock_produit = GREATEST(0, stock_produit - ?) WHERE code_produit = ?");
                     $stmtUpdateProd->execute([$quantite, $produitId]);
 
                     // ✅ etat_produit est désormais 'Actif'/'Inactif' (décision manuelle
                     // gérée dans la fiche produit) : on ne le modifie PLUS ici.
-                    // La disponibilité (rupture / alerte / disponible) est calculée
-                    // dynamiquement depuis stock_produit vs stock_alerte sur les
-                    // pages de lecture (historique, ventes, etc.).
 
-                    // 3) Enregistrement du mouvement dans la table commande
-                    // Génération + insertion avec réessai automatique en cas de
-                    // collision entre deux sorties de stock simultanées (voir
-                    // databases/id_generator.php).
+                    // 3) Mouvement dans la table commande, avec réessai automatique en cas de
+                    // collision de numéro (voir databases/id_generator.php).
                     $numeroCommande = genererEtInsererIdSequence($pdo, 'SC', function (string $numero) use (
                         $pdo, $produitId, $statutId, $prixAchat, $prixUnitaire, $quantite, $montantCommande, $user, $boutiqueId
                     ) {
@@ -183,20 +200,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'sortie' && !isset($_PO
                         ]);
                     }, 4);
 
-                    $pdo->commit();
-
-                    // Libellé du motif
-                    $libelleMotif = '';
-                    foreach ($statutsSortieReserves as $s) {
-                        if ($s['code_statut'] === $statutId) { $libelleMotif = $s['titre_statut']; break; }
-                    }
-                    $message = "Sortie enregistrée (n° $numeroCommande) : $quantite unité(s) — motif « $libelleMotif ».";
-                    $messageType = 'success';
-                } catch (Exception $e) {
-                    if ($pdo->inTransaction()) $pdo->rollBack();
-                    $message = "Erreur : " . $e->getMessage();
-                    $messageType = 'danger';
+                    $numeros[] = $numeroCommande;
+                    $totalQuantite += $quantite;
+                    $detailsLignes[] = $titreProduit . ' : ' . $quantiteDisponible . ' → ' . ($quantiteDisponible - $quantite);
                 }
+
+                $pdo->commit();
+
+                // Libellé du motif
+                $libelleMotif = '';
+                foreach ($statutsSortieReserves as $s) {
+                    if ($s['code_statut'] === $statutId) { $libelleMotif = $s['titre_statut']; break; }
+                }
+                $message = htmlspecialchars(
+                    'Sortie enregistrée : ' . count($lignes) . ' produit(s), ' . $totalQuantite . ' unité(s) — motif « ' . $libelleMotif . ' ». '
+                    . implode(' ; ', $detailsLignes) . '. Références : ' . $numeros[0]
+                    . (count($numeros) > 1 ? ' à ' . end($numeros) : '') . '.',
+                    ENT_QUOTES, 'UTF-8'
+                );
+                $messageType = 'success';
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                $message = 'Erreur : ' . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8') . ' — aucune ligne n\'a été enregistrée.';
+                $messageType = 'danger';
             }
         }
     }
@@ -618,7 +644,7 @@ body {
         <h5><i class="bi bi-pencil-square"></i> Saisie d'une sortie</h5>
     </div>
     <div class="form-section">
-        <form method="post" id="sortieForm">
+        <form method="post" id="stockForm" autocomplete="off">
             <input type="hidden" name="action" value="sortie">
             <input type="hidden" name="csrf_token" value="<?= e($csrf_token) ?>">
             <div class="row g-3">
@@ -632,16 +658,13 @@ body {
                     </select>
                 </div>
                 <div class="col-md-4">
-                    <label class="form-label">Produit <span class="text-danger">*</span></label>
-                    <select name="produit_id" id="produit_id" class="selectpicker form-select" data-live-search="true" required>
-                        <option value="">-- Sélectionner un produit --</option>
-                        <?php foreach ($produits as $p): ?>
-                        <option value="<?= e($p['code_produit']) ?>">
-                            <?= e($p['titre_produit']) ?> (<?= e($p['code_produit']) ?>)<?= ($p['etat_produit'] === 'Inactif') ? ' (inactif)' : '' ?>
-                        </option>
+                    <label class="form-label">Catégorie <span class="text-danger">*</span></label>
+                    <select name="categorie_id" id="categorie_id" class="selectpicker form-select" data-live-search="true" required>
+                        <option value="">-- Sélectionner une catégorie --</option>
+                        <?php foreach ($categories as $c): ?>
+                        <option value="<?= e($c['code_categorie']) ?>"><?= e($c['titre_categorie']) ?></option>
                         <?php endforeach; ?>
                     </select>
-                    <small class="text-muted">Seuls les produits ayant un stock global &gt; 0 sont proposés.</small>
                 </div>
                 <div class="col-md-4">
                     <label class="form-label">Motif de sortie <span class="text-danger">*</span></label>
@@ -651,27 +674,64 @@ body {
                         <option value="<?= e($s['code_statut']) ?>"><?= e($s['titre_statut']) ?></option>
                         <?php endforeach; ?>
                     </select>
-                    <small class="text-muted">Seuls les motifs de sortie standards sont proposés.</small>
+                    <small class="text-muted">Le même motif s'applique à tous les produits de la sortie.</small>
                 </div>
-                <div class="col-md-3">
-                    <label class="form-label">Quantité <span class="text-danger">*</span></label>
-                    <input type="number" name="quantite" id="quantite" class="form-control" min="1" value="1" required>
-                </div>
-                <div class="col-md-9">
-                    <label class="form-label">Prix unitaire de sortie (FCFA) <small class="text-muted">(optionnel, par défaut prix du produit)</small></label>
-                    <input type="number" name="prix_vente" id="prix_vente" class="form-control" min="0" step="0.01" value="0" placeholder="Laisser à 0 pour utiliser le prix du produit">
-                </div>
-                <div class="col-12">
-                    <div id="stockInfo" class="stock-info">
-                        <div class="item"><span class="label">Stock actuel en boutique :</span> <strong id="currentQty">—</strong></div>
-                        <div class="item"><span class="label">Disponible :</span> <strong id="currentDispo">—</strong></div>
+            </div>
+
+            <!-- Ajout d'un produit à la liste -->
+            <div class="sl-panel" id="slPanel">
+                <div class="fw-semibold mb-2"><i class="bi bi-plus-circle me-1" style="color:var(--color-primary);"></i> Ajouter un produit à cette sortie</div>
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-5">
+                        <label class="form-label">Produit</label>
+                        <select id="produit_id" class="selectpicker form-select" data-live-search="true" disabled title="-- Choisir d'abord une catégorie --">
+                            <option value="">-- Sélectionner un produit --</option>
+                        </select>
+                        <small class="text-muted">Seuls les produits ayant un stock global &gt; 0 sont proposés.</small>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label">Quantité</label>
+                        <input type="number" id="sl_qte" class="form-control" min="1" value="1">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">Prix unitaire de sortie <small class="text-muted">(optionnel)</small></label>
+                        <input type="number" id="sl_prix" class="form-control" min="0" step="0.01" placeholder="Prix du produit par défaut">
+                    </div>
+                    <div class="col-md-2">
+                        <button type="button" id="slAjouter" class="btn btn-primary w-100"><i class="bi bi-plus-lg"></i> Ajouter</button>
                     </div>
                 </div>
-                <div class="col-12 mt-2">
-                    <button type="submit" class="btn-submit">
-                        <i class="bi bi-arrow-down-circle"></i> Valider la sortie
-                    </button>
+                <div id="slInfo" class="stock-info">
+                    <div class="item"><span class="label">Stock actuel en boutique :</span> <strong data-info="stock">—</strong></div>
                 </div>
+            </div>
+
+            <!-- Liste des produits de la sortie -->
+            <div id="slVide" class="sl-vide">
+                <i class="bi bi-inbox fs-3 d-block mb-1"></i>
+                Aucun produit ajouté. Choisissez la boutique et la catégorie, puis ajoutez autant de produits que nécessaire.
+            </div>
+            <div id="slTableWrap" class="table-responsive mt-3" style="display:none;">
+                <table class="table table-sm align-middle sl-table mb-0">
+                    <thead>
+                        <tr>
+                            <th>Produit</th>
+                            <th class="text-center">Disponible</th>
+                            <th style="width:120px;">Quantité</th>
+                            <th style="width:170px;">Prix unitaire de sortie</th>
+                            <th class="text-center">Stock restant</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="slLignes"></tbody>
+                </table>
+            </div>
+
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+                <div id="slRecap" class="text-muted small"></div>
+                <button type="submit" id="slValider" class="btn-submit" disabled>
+                    <i class="bi bi-arrow-down-circle"></i> Valider la sortie
+                </button>
             </div>
         </form>
     </div>
@@ -750,53 +810,22 @@ body {
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/bootstrap-select.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap-select@1.14.0-beta3/dist/js/i18n/defaults-fr_FR.min.js"></script>
+<?php include 'includes/stock_lignes_js.php'; ?>
 <script>
 $(document).ready(function() {
     $('.selectpicker').selectpicker();
 
-    // Mise à jour des infos de stock en AJAX
-    function updateStockInfo() {
-        var produit  = $('#produit_id').val();
-        var boutique = $('#boutique_id').val();
-        if (produit && boutique) {
-            $.ajax({
-                url: window.location.href,
-                method: 'POST',
-                data: { ajax: 1, produit_id: produit, boutique_id: boutique },
-                dataType: 'json',
-                success: function(data) {
-                    if (data.success) {
-                        $('#currentQty').text(data.quantite);
-                        $('#currentDispo').text(data.disponible);
-                        var max = Math.max(0, data.disponible);
-                        $('#quantite').attr('max', max);
-                    } else {
-                        $('#currentQty').text('—');
-                        $('#currentDispo').text('—');
-                        $('#quantite').removeAttr('max');
-                    }
-                }
-            });
-        } else {
-            $('#currentQty').text('—');
-            $('#currentDispo').text('—');
-        }
-    }
-    $('#produit_id, #boutique_id').on('changed.bs.select', updateStockInfo);
-
-    function showAlertModal(msg) {
-        $('#alertModalMsg').text(msg);
-        new bootstrap.Modal(document.getElementById('alertModal')).show();
-    }
-
-    // Validation avant soumission
-    $('#sortieForm').on('submit', function(e) {
-        var dispo = parseInt($('#currentDispo').text()) || 0;
-        var qty   = parseInt($('#quantite').val()) || 0;
-        if (qty > dispo) {
-            e.preventDefault();
-            showAlertModal('La quantité demandée (' + qty + ') dépasse le stock disponible (' + dispo + ').');
-            return false;
+    // Saisie multi-lignes : boutique + catégorie, autant de produits que voulu, puis UNE validation.
+    StockLignes.init({
+        mode: 'sortie',
+        produits: <?= json_encode(stockProduitsPourJs($produits), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>,
+        catsParBoutique: <?= json_encode($categoriesAutoriseesParBoutique, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP) ?>,
+        qteDefaut: '1',
+        sel: {
+            boutique: '#boutique_id', categorie: '#categorie_id', produit: '#produit_id',
+            qte: '#sl_qte', prixSortie: '#sl_prix',
+            btnAjouter: '#slAjouter', tbody: '#slLignes', vide: '#slVide', tableWrap: '#slTableWrap',
+            recap: '#slRecap', submit: '#slValider', form: '#stockForm', panel: '#slPanel', info: '#slInfo'
         }
     });
 });
